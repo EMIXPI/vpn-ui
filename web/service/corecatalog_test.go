@@ -332,3 +332,117 @@ func TestRefreshInstalledDaemonsScope(t *testing.T) {
 		}
 	})
 }
+
+// TestDerivedCoresFollowTheirConsumers guards the two cards that used to answer from a
+// host probe instead of from what the operator installed. On a fresh box the strongSwan
+// bundle is embedded in the binary whether or not setup ever extracted it, so ipsec read
+// "Stopped", and the in-binary RADIUS server binds :1812 from panel start, so radius read
+// "Running". Both were reporting on something the host had never been set up for.
+func TestDerivedCoresFollowTheirConsumers(t *testing.T) {
+	set := func(names ...string) (map[string]bool, []string) {
+		m := map[string]bool{}
+		for _, n := range names {
+			m[n] = true
+		}
+		return m, coreNamesFromSet(m)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		installed []string
+		ipsec     bool
+		radius    bool
+	}{
+		{"fresh box, nothing installed", nil, false, false},
+		{"l2tp brings both", []string{"l2tp"}, true, true},
+		{"ikev2 brings both", []string{"ikev2"}, true, true},
+		{"pptp needs radius but not ipsec", []string{"pptp"}, false, true},
+		{"openvpn needs radius but not ipsec", []string{"openvpn"}, false, true},
+		{"openconnect needs radius but not ipsec", []string{"openconnect"}, false, true},
+		{"sstp needs radius but not ipsec", []string{"sstp"}, false, true},
+		{"wgc alone needs neither", []string{"wgc"}, false, false},
+		{"mtproto alone needs neither", []string{"mtproto"}, false, false},
+		{"gre alone needs neither", []string{"gre"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, names := set(tc.installed...)
+			if got := coreInstalled("ipsec", m, names); got != tc.ipsec {
+				t.Errorf("ipsec installed = %v, want %v", got, tc.ipsec)
+			}
+			if got := coreInstalled("radius", m, names); got != tc.radius {
+				t.Errorf("radius installed = %v, want %v", got, tc.radius)
+			}
+			// The panel's own cores are never "not installed": they are the binary.
+			for _, builtin := range []string{"xray", "ssh"} {
+				if !coreInstalled(builtin, m, names) {
+					t.Errorf("built-in core %q reported as not installed", builtin)
+				}
+			}
+		})
+	}
+}
+
+// TestRadiusConsumersMatchTheSecretHandout keeps the usesRadius flags honest: the cores
+// marked here must be exactly the ones the panel hands the RADIUS secret to at startup.
+// A new dial-in core that forgets the flag would make the radius card read "not
+// installed" on a host that is actively authenticating against it.
+func TestRadiusConsumersMatchTheSecretHandout(t *testing.T) {
+	want := map[string]bool{
+		"l2tp": true, "pptp": true, "openvpn": true,
+		"openconnect": true, "sstp": true, "ikev2": true,
+	}
+	for _, c := range coreCatalog {
+		if c.usesRadius != want[c.name] {
+			t.Errorf("core %q: usesRadius = %v, want %v", c.name, c.usesRadius, want[c.name])
+		}
+	}
+}
+
+// TestEveryVpnProtocolMapsToItsCore is the guard for "I uninstalled GRE and could still
+// create GRE inbounds". The add/update/import gate asks ProtocolNeedsSetup, which is
+// only as good as protocolCoreName: a protocol that maps to "" is treated as needing no
+// host setup and is never gated. The gate used to be a hardcoded list of six protocols
+// instead, so four cores were ungated and uninstalling any core left its protocol just
+// as creatable as before.
+func TestEveryVpnProtocolMapsToItsCore(t *testing.T) {
+	// Every protocol served by an installable core, and the core that serves it.
+	for protocol, core := range map[string]string{
+		"l2tp":        "l2tp",
+		"pptp":        "pptp",
+		"openvpn":     "openvpn",
+		"openconnect": "openconnect",
+		"sstp":        "sstp",
+		"ikev2":       "ikev2",
+		"wg-c":        "wgc", // the one name that differs, and the one that used to slip through
+		"awg":         "awg",
+		"gre":         "gre",
+		"mtproto":     "mtproto",
+	} {
+		if got := protocolCoreName(protocol); got != core {
+			t.Errorf("protocolCoreName(%q) = %q, want %q: a protocol with no core is never gated", protocol, got, core)
+		}
+	}
+
+	// Protocols that genuinely need no host setup: the Xray-native ones and the
+	// in-binary cores. Gating these would block an inbound that works perfectly.
+	for _, protocol := range []string{
+		"ssh", "xray", "vmess", "vless", "trojan", "shadowsocks", "hysteria", "",
+	} {
+		if got := protocolCoreName(protocol); got != "" {
+			t.Errorf("protocolCoreName(%q) = %q, want \"\": it needs no core install", protocol, got)
+		}
+	}
+
+	// And every installable core must be reachable from some protocol, or installing it
+	// is the only thing the operator can ever do with it.
+	served := map[string]bool{}
+	for _, p := range []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp",
+		"ikev2", "wg-c", "awg", "gre", "mtproto"} {
+		served[protocolCoreName(p)] = true
+	}
+	for _, core := range installableCores() {
+		if !served[core] {
+			t.Errorf("core %q is installable but no protocol maps to it, so its gate can never fire", core)
+		}
+	}
+}

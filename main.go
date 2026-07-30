@@ -1257,10 +1257,25 @@ var menuScript []byte
 //go:embed build/acme/acme.sh
 var acmeScript []byte
 
+// The Cloudflare DNS-01 hook from the same pinned acme.sh release. acme.sh 3.1.4
+// does NOT fetch a missing dnsapi plugin: `--dns dns_cf` just reports "Cannot find
+// DNS API hook" and falls back to telling the operator to add the TXT record by
+// hand, which is no flow at all. Bundling it keeps the Cloudflare-token option (and
+// every wildcard certificate, which Let's Encrypt only issues over DNS-01) working
+// on a box that cannot reach GitHub.
+//
+//go:embed build/acme/dnsapi/dns_cf.sh
+var acmeDnsCfHook []byte
+
 // installAcmeScript implements `vpn-ui install-acme <path>`: write the embedded
-// acme.sh client (0755) to <path>. The management menu extracts it to a scratch dir
-// and runs it as `--install`, so Let's Encrypt issuance no longer depends on
-// fetching the client from the internet at deploy time.
+// acme.sh client (0755) to <path>, plus the Cloudflare DNS hook as
+// <dir>/dnsapi/dns_cf.sh. The management menu extracts it to a scratch dir and runs
+// it as `--install`, so Let's Encrypt issuance no longer depends on fetching the
+// client from the internet at deploy time.
+//
+// The hook goes in a `dnsapi` subdirectory because that is where acme.sh's own
+// installer looks: `--install` copies `dnsapi/*` from the directory it is run in
+// into $HOME/.acme.sh/dnsapi/, which is the only place _findHook reads at issue time.
 func installAcmeScript(args []string) {
 	if len(args) == 0 || args[0] == "" {
 		fmt.Fprintln(os.Stderr, "usage: vpn-ui install-acme <path>")
@@ -1269,6 +1284,64 @@ func installAcmeScript(args []string) {
 	if err := backend.WriteFileAtomic(args[0], acmeScript, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to write the bundled acme.sh:", err)
 		os.Exit(1)
+	}
+	hookDir := filepath.Join(filepath.Dir(args[0]), "dnsapi")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to create the acme.sh dnsapi directory:", err)
+		os.Exit(1)
+	}
+	if err := backend.WriteFileAtomic(filepath.Join(hookDir, "dns_cf.sh"), acmeDnsCfHook, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to write the bundled Cloudflare DNS hook:", err)
+		os.Exit(1)
+	}
+}
+
+// runCloudflare implements `vpn-ui cf verify` and `vpn-ui cf zones`, the two
+// Cloudflare lookups the menu's DNS-01 SSL path needs before it hands a token to
+// acme.sh. Output is deliberately machine-readable (one zone per line, name TAB
+// status) so the menu never parses JSON and no jq is required on the host.
+//
+// The token is read from CF_Token in the environment, NEVER from argv: a command
+// line is world-readable through /proc/<pid>/cmdline, an environment is not. It is
+// also the variable name acme.sh itself expects, so the menu exports it once.
+func runCloudflare(args []string) {
+	if len(args) == 0 || args[0] == "" {
+		fmt.Fprintln(os.Stderr, "usage: CF_Token=... vpn-ui cf {verify|zones}")
+		os.Exit(2)
+	}
+	token := os.Getenv("CF_Token")
+	if strings.TrimSpace(token) == "" {
+		fmt.Fprintln(os.Stderr, "CF_Token is not set in the environment.")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "verify":
+		status, err := service.VerifyCloudflareToken(token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Cloudflare rejected the API token:", err)
+			os.Exit(1)
+		}
+		if status == "" {
+			status = "active"
+		}
+		fmt.Printf("token verified (status: %s)\n", status)
+	case "zones":
+		zones, err := service.ListCloudflareZones(token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Cloudflare zone lookup failed:", err)
+			os.Exit(1)
+		}
+		if len(zones) == 0 {
+			fmt.Fprintln(os.Stderr, "The token is valid but can see no zones.")
+			os.Exit(1)
+		}
+		for _, zone := range zones {
+			fmt.Printf("%s\t%s\n", zone.Name, zone.Status)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "unknown argument for cf: %q (use verify or zones)\n", args[0])
+		os.Exit(2)
 	}
 }
 
@@ -2654,6 +2727,8 @@ func main() {
 		installAcmeScript(os.Args[2:])
 	case "acme-deps":
 		fmt.Println(service.EnsureAcmeDeps())
+	case "cf":
+		runCloudflare(os.Args[2:])
 	case "openvpn-auth":
 		openvpnAuth()
 	case "openvpn-connect":

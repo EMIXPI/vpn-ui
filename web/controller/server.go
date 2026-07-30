@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -90,6 +91,12 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.POST("/stopXrayService", requirePerm(model.PermXraySettings), a.stopXrayService)
 	g.POST("/updatePanel", requireSuperAdmin(), a.updatePanel)
 	g.POST("/cancelUpdate", requireSuperAdmin(), a.cancelUpdate)
+	// Update from a locally chosen binary. Same escalation class as updatePanel: it
+	// ends in the same binary swap. Split in two so the operator confirms against a
+	// version the server read out of the file, not against its name.
+	g.POST("/uploadPanelBinary", requireSuperAdmin(), a.uploadPanelBinary)
+	g.POST("/applyPanelBinary", requireSuperAdmin(), a.applyPanelBinary)
+	g.POST("/discardPanelBinary", requireSuperAdmin(), a.discardPanelBinary)
 	g.POST("/restartXrayService", requirePerm(model.PermXraySettings), a.restartXrayService)
 	g.POST("/installXray/:version", requirePerm(model.PermXraySettings), a.installXray)
 	g.POST("/updateGeofile", requirePerm(model.PermXraySettings), a.updateGeofile)
@@ -339,6 +346,77 @@ func (a *ServerController) updatePanel(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.index.panelUpdate"), err)
 		return
 	}
+	jsonObj(c, nil, nil)
+}
+
+// uploadPanelBinary receives a binary the operator picked in the browser, stages it
+// beside the running one and answers with the versions, so the confirmation names
+// what the server actually read rather than what the file was called.
+//
+// multipart/form-data, unlike every other POST in this panel: a file cannot travel
+// through the form-urlencoded body axios builds for the rest of the API.
+//
+// It reads the part with c.Request.MultipartReader() rather than c.FormFile. FormFile
+// calls ParseMultipartForm, which buffers MaxMultipartMemory in RAM and spills the
+// rest into os.TempDir, which is tmpfs (RAM) on several of the distros this panel
+// targets. The release asset is around 315MB, so on a small VPS that path would
+// exhaust memory before the file ever reached its destination, and then copy it a
+// second time. MultipartReader streams straight to the staging file at constant
+// memory. Nothing may touch c.PostForm, c.FormFile or ParseForm before it, or the
+// body is already consumed.
+func (a *ServerController) uploadPanelBinary(c *gin.Context) {
+	// The hard cap, and the only one that survives a client that lies about its length
+	// or sends no length at all.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, service.MaxPanelUploadSize)
+
+	mr, err := c.Request.MultipartReader()
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.index.panelUpdate"), err)
+		return
+	}
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "pages.index.panelUpdate"), err)
+			return
+		}
+		if part.FormName() != "binary" {
+			_ = part.Close()
+			continue
+		}
+		info, err := service.StagePanelBinary(part, c.Request.ContentLength)
+		_ = part.Close()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "pages.index.panelUpdate"), err)
+			return
+		}
+		jsonObj(c, info, nil)
+		return
+	}
+	jsonMsg(c, I18nWeb(c, "pages.index.panelUpdate"), errors.New("no binary was uploaded"))
+}
+
+// applyPanelBinary installs the staged upload and restarts the panel. Like
+// updatePanel it answers before the restart lands, and says nothing on success so the
+// frontend's own "restarting" state is what the operator sees.
+//
+// Ordinary form-urlencoded: only the token travels here, the bytes arrived at
+// uploadPanelBinary.
+func (a *ServerController) applyPanelBinary(c *gin.Context) {
+	if err := service.ApplyStagedPanelBinary(c.PostForm("token")); err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.index.panelUpdate"), err)
+		return
+	}
+	jsonObj(c, nil, nil)
+}
+
+// discardPanelBinary drops a staged upload the operator decided not to install, so a
+// binary they backed away from is not left sitting next to the running one.
+func (a *ServerController) discardPanelBinary(c *gin.Context) {
+	service.DiscardStagedPanelBinary()
 	jsonObj(c, nil, nil)
 }
 

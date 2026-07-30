@@ -143,6 +143,30 @@ func TestConnectionCardEscapesNameForClients(t *testing.T) {
 	}
 }
 
+// GRE gets NO entry of any kind. Its peer is a ROUTER, so there is no app to import a URI,
+// and the inbound has no port for one to name: 47 is the IP protocol number, and the card
+// this used to emit was a trojan:// link to a TCP port nothing listens on, which every
+// client then offered as a connectable node. Its delivery is the config-file download.
+func TestGreYieldsNoLink(t *testing.T) {
+	s := cardService()
+	gre := credInbound(model.GRE, 47,
+		`{"clients":[{"email":"alice","enable":true,"peers":[{"peerIp":"198.51.100.4"}]}]}`)
+	gre.Remark = "home"
+	if got := s.getLink(gre, "alice"); got != "" {
+		t.Fatalf("gre must produce no share link, got %q", got)
+	}
+
+	// The protocols beside it in that switch are unaffected: they have a real endpoint and
+	// a real credential, and the card is the only thing that makes them visible in a client.
+	for _, p := range []model.Protocol{model.OPENVPN, model.L2TP, model.PPTP,
+		model.OPENCONNECT, model.SSTP, model.IKEV2} {
+		in := credInbound(p, 1194, `{"clients":[{"email":"alice","password":"pw"}]}`)
+		if s.getLink(in, "alice") == "" {
+			t.Fatalf("%s lost its connection card", p)
+		}
+	}
+}
+
 // mtproto and ssh keep their own protocol-native link AND get a card, so Telegram (or
 // Shadowrocket) still works while a subscription importer has something to keep.
 func TestMtprotoAndSshCarryNativeLinkPlusCard(t *testing.T) {

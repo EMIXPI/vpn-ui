@@ -339,14 +339,10 @@ func (s *CoreService) GetCoresStatus() []CoreStatus {
 	// host probes say. Several cores would otherwise report themselves ready off
 	// an embedded bundle (strongSwan, accel-ppp) or a stock kernel module
 	// (WireGuard) that setup has not actually wired up on this host.
-	//
-	// ipsec is deliberately exempt: it is not a core anyone installs directly,
-	// it is the shared charon that L2TP and IKEv2 both stand on, so its own card
-	// reflects the daemon rather than a selection.
 	installed := s.provisionedProtocolSet()
+	installedNames := coreNamesFromSet(installed)
 	for i := range all {
-		spec := coreSpecFor(all[i].Name)
-		if spec == nil || spec.builtin || installed[all[i].Name] {
+		if coreInstalled(all[i].Name, installed, installedNames) {
 			continue
 		}
 		all[i].State = CoreNotInstalled
@@ -356,6 +352,39 @@ func (s *CoreService) GetCoresStatus() []CoreStatus {
 		}
 	}
 	return all
+}
+
+// coreInstalled answers "has this host been set up for this core" for each of the
+// three shapes of core the status cards show.
+//
+//   - A catalog core the operator picks: the recorded set is the only answer.
+//   - A DERIVED core (ipsec, radius): nobody installs it directly, it exists only
+//     to serve other cores, so it is installed exactly when an installed core
+//     needs it. That is reference counting against what IS installed, the same
+//     arithmetic uninstall runs against what REMAINS.
+//   - A built-in core nothing else depends on (xray, ssh): part of the panel, so
+//     it is always installed and its card reports plain liveness.
+//
+// ipsec and radius used to skip this check and fall through to their own probes,
+// and on a host that has installed nothing both probes lie. The strongSwan bundle
+// is embedded in the binary whether or not setup ever extracted it, so ipsec read
+// "stopped"; the in-binary RADIUS server binds :1812 from panel start, so radius
+// read "running" with nothing on the host for it to authenticate.
+func coreInstalled(name string, installed map[string]bool, installedNames []string) bool {
+	switch name {
+	case "ipsec":
+		// The shared IPsec layer: one charon serving L2TP/IPsec and IKEv2, or host
+		// libreswan on an arch with no bundle. Only those two claim featStrongswan,
+		// so a host with neither has no IPsec to report on.
+		return needsFeature(installedNames, featStrongswan)
+	case "radius":
+		return anyCoreUsesRadius(installedNames)
+	}
+	spec := coreSpecFor(name)
+	if spec == nil {
+		return false
+	}
+	return spec.builtin || installed[name]
 }
 
 func (s *CoreService) xrayStatus() CoreStatus {
@@ -409,9 +438,15 @@ func (s *CoreService) ipsecStatus() CoreStatus {
 		if v := daemonVersion("charon"); v != "" {
 			cs.Version = v
 		}
-		if procMgr.IsRunning(ikev2ProcName) {
+		switch {
+		case procMgr.IsRunning(ikev2ProcName):
 			cs.State = CoreRunning
-		} else {
+		case !charonNeeded():
+			// No enabled inbound wants IPsec (no IKEv2, and no L2TP or GRE with
+			// ipsecEnable), so charon is MEANT to be down. "Idle" says that; amber
+			// "Stopped" reads as a fault the operator is supposed to go and fix.
+			cs.State = CoreIdle
+		default:
 			cs.State = CoreStopped
 		}
 		return cs

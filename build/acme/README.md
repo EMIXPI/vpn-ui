@@ -22,15 +22,29 @@ the final `--issue` reaches out to Let's Encrypt (which needs egress regardless)
 - Tag: `3.1.4`
 - sha256: `fcabf274d4f96966ec933879ae0257266e8ef2f7d16161f14b84dd896c0cac32`
 
-This is the single self-contained `acme.sh` script only (no `dnsapi/`, `deploy/` or
-`notify/` plugins): issuance uses the built-in standalone HTTP-01 challenge, which
-needs none of them.
+## `dnsapi/dns_cf.sh`
+
+The Cloudflare DNS-01 hook, from the same tag, bundled for the same reason as the
+client itself and written out beside `acme.sh` by `vpn-ui install-acme <path>`.
+
+- sha256: `9628ee8238cb3f9cfa1b1a985c0e9593436a3e4f8a9d65a6f775b981be9e76c8`
+
+`acme.sh --install` copies a `dnsapi/` directory sitting next to it into
+`$HOME/.acme.sh/dnsapi/`, which is where `_findHook` looks at issue time. Without
+the file on disk 3.1.4 does not fetch it: `--dns dns_cf` fails with "Cannot find DNS
+API hook", and the operator is told to add the TXT record by hand. That is why the
+DNS-01 path (Cloudflare token, and every wildcard certificate) needs it vendored.
+
+No other plugin is bundled: HTTP-01 standalone and DNS-01 via Cloudflare are the
+only two challenges the menu offers, and neither `deploy/` nor `notify/` is used.
 
 ## Updating
 
-Fetch the new tag's raw `acme.sh`, drop it in place, and refresh the tag + sha256
+Fetch the new tag's raw files, drop them in place, and refresh the tag + sha256s
 above:
 
     curl -fsSL https://raw.githubusercontent.com/acmesh-official/acme.sh/<tag>/acme.sh \
         -o build/acme/acme.sh
-    sha256sum build/acme/acme.sh
+    curl -fsSL https://raw.githubusercontent.com/acmesh-official/acme.sh/<tag>/dnsapi/dns_cf.sh \
+        -o build/acme/dnsapi/dns_cf.sh
+    sha256sum build/acme/acme.sh build/acme/dnsapi/dns_cf.sh

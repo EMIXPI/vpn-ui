@@ -1029,7 +1029,14 @@ func (s *ServerService) GetXrayLogs(
 
 	file, err := os.Open(pathToAccessLog)
 	if err != nil {
-		return nil
+		// The IP-limit job drains the live access log into this archive every hour
+		// (clearAccessLog in web/job/check_client_ip_job.go), so on a quiet box the
+		// live file is regularly empty or absent while the recent history is here.
+		// Without this the viewer reads as broken for most of every hour.
+		file, err = os.Open(xray.GetAccessPersistentLogPath())
+		if err != nil {
+			return nil
+		}
 	}
 	defer file.Close()
 

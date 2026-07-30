@@ -80,8 +80,12 @@
         </a-form-item>
     </template>
 
+    <!-- GRE is excluded as well as openvpn/ikev2, but for the opposite reason: it has no
+         ports at all (IP protocol 47), so there is nothing to ask for. Its row still
+         carries one because the inbound tag is built from it, and the server assigns it
+         (NormalizeGrePort). -->
     <a-form-item
-        v-if="inbound.protocol !== 'openvpn' && inbound.protocol !== 'ikev2'"
+        v-if="inbound.protocol !== 'openvpn' && inbound.protocol !== 'ikev2' && inbound.protocol !== 'gre'"
         :validate-status="portValidateStatus"
         :help="portHelp"
     >
@@ -118,15 +122,6 @@
                     UDP port this AmneziaWG interface listens on. 51821 is the
                     convention, but each awg inbound is its own interface and
                     needs its OWN port, so additional inbounds must differ.
-                </template>
-                {{ i18n "pages.inbounds.port" }}
-                <a-icon type="question-circle"></a-icon>
-            </a-tooltip>
-            <a-tooltip v-else-if="inbound.protocol === 'gre'">
-                <template slot="title">
-                    NOT USED by GRE. GRE is IP protocol 47 and has no ports at all, so
-                    this value is ignored and several GRE inbounds may share it. Peers are
-                    told apart by address, not by port.
                 </template>
                 {{ i18n "pages.inbounds.port" }}
                 <a-icon type="question-circle"></a-icon>

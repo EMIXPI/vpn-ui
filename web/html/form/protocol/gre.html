@@ -4,17 +4,6 @@
     :label-col="{ md: {span:8} }"
     :wrapper-col="{ md: {span:14} }"
 >
-    <a-alert type="info" show-icon :style="{ marginBottom: '16px' }">
-        <template slot="message">GRE is a router protocol</template>
-        <template slot="description">
-            One account is one customer site. The customer's router builds the tunnel and
-            NATs its whole LAN behind a single tunnel address, so nearly any router works,
-            including old ones with no WireGuard support. GRE has no ports (it is IP
-            protocol 47), so the Port field above is not used. A customer whose network
-            drops protocol 47 outright (CGNAT is the usual cause) needs the FOU option
-            below, which also requires their address to be known.
-        </template>
-    </a-alert>
     <a-form-item>
         <template slot="label">
             <a-tooltip>
@@ -131,20 +120,7 @@
         ></a-switch>
     </a-form-item>
 
-    <a-divider :style="{ margin: '8px 0 16px' }">Encryption</a-divider>
-    <a-alert
-        v-if="!inbound.settings.ipsecEnable"
-        type="warning"
-        show-icon
-        :style="{ marginBottom: '16px' }"
-    >
-        <template slot="message">This tunnel is not encrypted</template>
-        <template slot="description">
-            Plain GRE sends every byte in cleartext, and anyone on the path can read it.
-            Turning on IPsec below wraps the tunnel in ESP transport mode, which is the
-            standard recipe on MikroTik and every other router that speaks GRE.
-        </template>
-    </a-alert>
+    <a-divider :style="{ margin: '8px 0 16px' }"></a-divider>
     <a-form-item>
         <template slot="label">
             <a-tooltip>
@@ -159,6 +135,8 @@
         </template>
         <a-switch v-model="inbound.settings.ipsecEnable"></a-switch>
     </a-form-item>
+    <!-- Acronym only, same reason as FOU below: "IPsec Pre-Shared Key" wrapped onto a
+         second line at this label-col width and dropped below the input box. -->
     <a-form-item v-if="inbound.settings.ipsecEnable">
         <template slot="label">
             <a-tooltip>
@@ -166,7 +144,7 @@
                     The pre-shared key the router must present. Generated for you; change
                     it if you prefer your own.
                 </template>
-                IPsec Pre-Shared Key
+                IPsec PSK
                 <a-icon type="question-circle"></a-icon>
             </a-tooltip>
         </template>
@@ -188,7 +166,10 @@
         <a-switch v-model="inbound.settings.allowRaw"></a-switch>
     </a-form-item>
 
-    <a-divider :style="{ margin: '8px 0 16px' }">NAT traversal</a-divider>
+    <a-divider :style="{ margin: '8px 0 16px' }"></a-divider>
+    <!-- Label kept to the bare acronym and the expansion moved beside the switch: at this
+         label-col width "FOU (UDP encapsulation)" wrapped onto a second line, which then
+         sat below the switch instead of beside it. -->
     <a-form-item>
         <template slot="label">
             <a-tooltip>
@@ -202,11 +183,12 @@
                     because UDP-wrapped traffic carries nothing the server can learn a
                     changing address from.
                 </template>
-                FOU (UDP encapsulation)
+                FOU
                 <a-icon type="question-circle"></a-icon>
             </a-tooltip>
         </template>
         <a-switch v-model="inbound.settings.fouEnable"></a-switch>
+        <span :style="{ marginLeft: '8px', color: '#888' }">UDP encapsulation</span>
     </a-form-item>
     <a-form-item v-if="inbound.settings.fouEnable">
         <template slot="label">

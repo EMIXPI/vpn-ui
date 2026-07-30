@@ -15,8 +15,10 @@ DL_URL="https://github.com/$REPO/releases/latest/download/$ASSET"
 # The panel keeps its SQLite DB next to the binary (exe dir). Backups go beside it.
 DB="$DEST_DIR/vpn-ui.db"
 BACKUP_DIR="$DEST_DIR/backups"
-# Real-SSL (Let's Encrypt via acme.sh, standalone HTTP-01). DEPLOY_DOMAIN /
-# DEPLOY_EMAIL preset these for a non-interactive issuance; otherwise prompted.
+# Real-SSL (Let's Encrypt via acme.sh: Cloudflare DNS-01 or standalone HTTP-01).
+# DEPLOY_DOMAIN / DEPLOY_EMAIL preset these for a non-interactive issuance;
+# otherwise prompted. DEPLOY_CF_TOKEN (+ optional DEPLOY_WILDCARD=1) picks the
+# Cloudflare path, and is read by the sourced obtain_letsencrypt_cert itself.
 CERT_DIR="$DEST_DIR/cert"
 DOMAIN="${DEPLOY_DOMAIN:-}"
 EMAIL="${DEPLOY_EMAIL:-}"
@@ -402,13 +404,14 @@ if [[ "$MODE" == "install" ]]; then
         selfsign|https|self-signed|yes)  tls_choice="selfsign" ;;
         http|plain|0|no)                 tls_choice="http" ;;
         "")
-            # A preset DEPLOY_DOMAIN implies a non-interactive real-cert request.
-            if [[ -n "$DOMAIN" ]]; then
+            # A preset DEPLOY_DOMAIN or DEPLOY_CF_TOKEN implies a non-interactive
+            # real-cert request; the sourced SSL function picks the challenge.
+            if [[ -n "$DOMAIN" || -n "${DEPLOY_CF_TOKEN:-}" ]]; then
                 tls_choice="letsencrypt"
             elif [[ -r /dev/tty ]]; then
                 {
                     printf '%s::%s %sPanel access mode%s\n' "$B$BLUE" "$R" "$WHITE" "$R"
-                    printf "    %s1)%s HTTPS  (real cert via Let's Encrypt / acme.sh)\n" "$GREEN" "$R"
+                    printf "    %s1)%s HTTPS  (real cert via Let's Encrypt: Cloudflare token or manual)\n" "$GREEN" "$R"
                     printf '    %s2)%s HTTPS  (self-signed certificate)\n'                "$GREEN" "$R"
                     printf '    %s3)%s HTTP   (no TLS) %s[default]%s\n'                    "$GREEN" "$R" "$D" "$R"
                     printf '  choose [1/2/3]: '
@@ -471,9 +474,10 @@ if [[ "$MODE" == "install" ]]; then
         "$DEST" --random --systemd
     fi
 else
-    # Update: only touch TLS when explicitly requested (PANEL_TLS=letsencrypt or a
-    # DEPLOY_DOMAIN is set), so routine binary updates never change the transport.
-    if [[ "${PANEL_TLS:-}" =~ ^(letsencrypt|le|acme|real)$ || -n "$DOMAIN" ]]; then
+    # Update: only touch TLS when explicitly requested (PANEL_TLS=letsencrypt, or a
+    # DEPLOY_DOMAIN / DEPLOY_CF_TOKEN is set), so routine binary updates never change
+    # the transport.
+    if [[ "${PANEL_TLS:-}" =~ ^(letsencrypt|le|acme|real)$ || -n "$DOMAIN" || -n "${DEPLOY_CF_TOKEN:-}" ]]; then
         obtain_letsencrypt_cert || true
     fi
     msg "Refreshing systemd unit (existing credentials preserved)"
@@ -501,7 +505,7 @@ if [[ "$MODE" == "install" ]]; then
         act "the randomized login (port / user / password / web path) is printed above"
     fi
     if [[ "${tls_choice:-http}" == "letsencrypt" ]]; then
-        act "panel serves ${GREEN}HTTPS${R} with a real cert for ${TEAL}${DOMAIN}${R} — no browser warning"
+        act "panel serves ${GREEN}HTTPS${R} with a real cert for ${TEAL}${DOMAIN}${WILDCARD_SAN:+ + ${WILDCARD_SAN}}${R}, no browser warning"
         act "auto-renew runs via acme.sh (cron); SSTP can reuse ${TEAL}$CERT_DIR/fullchain.pem${R} + ${TEAL}$CERT_DIR/privkey.pem${R}"
     elif [[ "${tls_choice:-http}" == "selfsign" ]]; then
         act "panel serves ${GREEN}HTTPS${R} with a self-signed cert — the browser warns once; accept it to continue"

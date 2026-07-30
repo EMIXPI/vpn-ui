@@ -250,10 +250,12 @@
                     </div>
                     <br />
 
-                    <!-- Config files: OpenVPN and WireGuard/AmneziaWG cannot be set up
-                         from a link, so their profiles are offered as downloads. Rendered
-                         server-side (the list depends on inbound settings and external
-                         proxies), plain <a download> so the browser saves the file. -->
+                    <!-- Config files: OpenVPN, WireGuard/AmneziaWG and GRE cannot be set
+                         up from a link, so their profiles are offered as downloads (GRE
+                         has no link at all: one file per peer per platform is its only
+                         delivery). Rendered server-side (the list depends on inbound
+                         settings and external proxies), plain <a download> so the browser
+                         saves the file. -->
                     {{ if .configs }}
                     <a-divider>{{ i18n "subscription.configFiles" }}</a-divider>
                     <a-row type="flex" justify="center" :gutter="[8,8]" style="width:100%; margin-bottom: 16px;">

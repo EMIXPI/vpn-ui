@@ -344,6 +344,10 @@ func (s *Server) startTask() {
 	s.sshOutboundService.InitSshOutbound()
 
 	s.customGeoService.EnsureOnStartup()
+	// Same crash-safety idea as the orphan reap below: a panel that died between an
+	// upload and its confirmation left a whole binary staged next to itself, and the
+	// token that made it installable died with the process.
+	service.CleanStagedPanelUpload()
 	// Reap an orphaned Xray from a previous instance BEFORE starting ours — a panel
 	// self-update re-execs in place (same PID), leaving the old Xray alive and holding
 	// its ports; without this the fresh Xray fails to bind and loops in the error

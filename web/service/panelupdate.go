@@ -353,10 +353,27 @@ func (s *ServerService) UpdatePanel() error {
 		return ErrPanelUpdateCancelled
 	}
 
+	if err := installPanelBinary(tmp, exe); err != nil {
+		return err
+	}
+	// Set only once the swap succeeded, so the deferred reset above still publishes
+	// the error phase for every path that did not get this far.
+	restarting = true
+	return nil
+}
+
+// installPanelBinary is the point of no return, shared by the download updater and
+// the update-from-file path: snapshot the DB, keep a rollback copy of the running
+// binary, swap `staged` in, record what was replaced, and restart. One
+// implementation because this is the sequence that must not be interrupted
+// half-way, and two copies of it would be two chances to get the order wrong.
+//
+// Replacing a running ELF via rename is safe on Linux: the live process keeps the
+// old (now-unlinked) inode, and the next start execs the new file.
+func installPanelBinary(staged, exe string) error {
 	setUpdateProgress(updatePhaseInstalling, 99)
-	// Point of no return: the DB snapshot and the binary swap below must not be
-	// interrupted half-way, so drop the cancel hook. A nil hook is what makes
-	// CancelPanelUpdate refuse from here on.
+	// Drop the cancel hook: a nil hook is what makes CancelPanelUpdate refuse from
+	// here on.
 	setPanelUpdateCancel(nil)
 	panelUpdateSpeed.Store(0)
 	// Best-effort DB snapshot before the new binary can migrate it.
@@ -370,11 +387,11 @@ func (s *ServerService) UpdatePanel() error {
 		logger.Warning("panel update: binary backup failed (continuing):", err)
 	}
 
-	if err := os.Rename(tmp, exe); err != nil {
-		_ = os.Remove(tmp)
+	if err := os.Rename(staged, exe); err != nil {
+		_ = os.Remove(staged)
 		return fmt.Errorf("replacing binary failed: %w", err)
 	}
-	logger.Infof("panel update: installed new binary at %s — restarting", exe)
+	logger.Infof("panel update: installed new binary at %s, restarting", exe)
 	setUpdateProgress(updatePhaseRestarting, 100)
 
 	// Record what we are replacing so the binary that comes up can tell the
@@ -388,7 +405,6 @@ func (s *ServerService) UpdatePanel() error {
 	}
 
 	// Restart detached so our own termination can't abort the restart.
-	restarting = true
 	go restartPanel(exe)
 	return nil
 }

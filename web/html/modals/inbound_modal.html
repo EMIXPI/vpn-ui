@@ -481,9 +481,12 @@
                     inModal.inbound.port = freeInboundPortFrom(51821);
                 } else if (protocol === 'gre') {
                     // GRE has NO ports (it is IP protocol 47), so this value is never
-                    // bound and never sent to a peer. It still has to be unique to pass
-                    // the panel's port-conflict check, so seed from 47 as a mnemonic and
-                    // take the next free number.
+                    // bound and never sent to a peer, and the form shows no port box for
+                    // it. It still has to be unique because the inbound tag is built from
+                    // it, so seed from 47 as a mnemonic and take the next free number.
+                    // Only a seed: the server settles the real value (NormalizeGrePort),
+                    // which is what covers a stale list, a race with another admin and
+                    // callers that never load this page.
                     inModal.inbound.port = freeInboundPortFrom(47);
                 } else if (protocol === 'mtproto') {
                     // 443 is what MTProto clients expect and what FakeTLS needs to be

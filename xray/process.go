@@ -104,6 +104,19 @@ func GetAccessLogPath() (string, error) {
 	return "", err
 }
 
+// AccessLogEnabled reports whether Xray is configured to write an access log at all.
+// "none" is Xray's own spelling of "disabled" and is the shipped default (see
+// web/service/config.json), so an empty or "none" path is the answer rather than a
+// failure. Anything that reads that file needs this to tell "the log is off" apart from
+// "the log is on and has nothing in it yet", which it otherwise cannot.
+func AccessLogEnabled() bool {
+	p, err := GetAccessLogPath()
+	if err != nil {
+		return false
+	}
+	return p != "" && p != "none"
+}
+
 // stopProcess calls Stop on the given Process instance.
 func stopProcess(p *Process) {
 	p.Stop()

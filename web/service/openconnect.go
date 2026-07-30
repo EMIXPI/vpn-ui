@@ -324,9 +324,31 @@ func (s *OcservService) buildServerConfig(inbound *model.Inbound, settings *ocse
 	// native ocserv cap here would refuse the (K+1)-th device BEFORE RADIUS runs,
 	// breaking both the reject logging and the accept-then-evict-oldest flow.
 	b.WriteString("max-same-clients = 0\n")
-	b.WriteString("keepalive = 32400\n")
-	b.WriteString("dpd = 90\n")
-	b.WriteString("mobile-dpd = 1800\n")
+	// Keepalive and DPD are what hold the tunnel open through NAT, and ocserv's own
+	// sample values (keepalive 32400, dpd 90, mobile-dpd 1800) cannot do it here.
+	//
+	// keepalive is not a server timer: it is advertised as X-CSTP-Keepalive /
+	// X-DTLS-Keepalive and tells the CLIENT how often to send a packet on an idle
+	// tunnel. At 32400 (9 hours) an idle client sends nothing at all, so the only
+	// traffic keeping the NAT mapping alive is DPD. Worse, ocserv REPLACES dpd with
+	// mobile-dpd for any client whose platform header says android or apple-ios
+	// (worker-vpn.c: `if (req->is_mobile) ws->user_config->dpd = mobile_dpd`), which is
+	// every phone. So a phone was told "DPD every 30 minutes, keepalive every 9 hours"
+	// while carrier-grade NAT drops an idle UDP mapping in well under two minutes: after
+	// a few idle minutes the path is dead in the server->client direction, the client
+	// has no probe due for half an hour to notice, and ocserv only tears the session down
+	// after DPD_MAX_TRIES (3) x dpd, i.e. 90 minutes. Both ends believe they are
+	// connected, nothing passes, and only a manual client reconnect fixes it.
+	//
+	// 30s keepalive is the interval every other tunnel protocol here already relies on
+	// (WireGuard persistent-keepalive is 25s, IPsec NAT-T ~20s) and it refreshes both the
+	// TCP and the DTLS mapping. With that in place DPD only has to answer "is this peer
+	// gone", so 60s (probe at 2x, teardown at 3x = 3 minutes) is a genuinely dead link,
+	// and a phone's 300s keeps the battery cost near zero while still freeing its
+	// User-Limit slot in 15 minutes instead of 90.
+	b.WriteString("keepalive = 30\n")
+	b.WriteString("dpd = 60\n")
+	b.WriteString("mobile-dpd = 300\n")
 	b.WriteString("switch-to-tcp-timeout = 25\n")
 	b.WriteString("try-mtu-discovery = true\n")
 	b.WriteString("cisco-client-compat = true\n")
@@ -544,11 +566,13 @@ func (s *OcservService) occtlSocket(inboundId int) string {
 func killOcservByIP(inboundId int, ip string) {
 	sock := fmt.Sprintf("/var/run/ocserv/occtl-%d.sock", inboundId)
 	if _, err := os.Stat(sock); err != nil {
+		logger.Warning("OpenConnect: cannot evict", ip, "- no occtl socket", sock)
 		return
 	}
 	bin := daemonBin("occtl")
-	out, err := exec.Command(bin, "-s", sock, "-j", "show", "users").Output()
+	out, err := probeCmd(bin, "-s", sock, "-j", "show", "users")
 	if err != nil {
+		logger.Warning("OpenConnect: cannot evict", ip, "- occtl show users failed:", err)
 		return
 	}
 	var users []struct {
@@ -556,14 +580,24 @@ func killOcservByIP(inboundId int, ip string) {
 		IPv4 string      `json:"IPv4"`
 	}
 	if err := json.Unmarshal(out, &users); err != nil {
+		logger.Warning("OpenConnect: cannot evict", ip, "- unreadable occtl output:", err)
 		return
 	}
 	for _, u := range users {
 		if u.IPv4 == ip {
-			_ = exec.Command(bin, "-s", sock, "disconnect", "id", u.ID.String()).Run()
+			if _, err := probeCmd(bin, "-s", sock, "disconnect", "id", u.ID.String()); err != nil {
+				logger.Warning("OpenConnect: occtl disconnect id", u.ID.String(), "failed:", err)
+			}
 			return
 		}
 	}
+	// Usually benign: the victim's tunnel was already gone, which is why the panel's view
+	// of it was stale enough to evict. Logged because the other reading is not benign at
+	// all: the caller has already handed this address to the incoming device, and if a
+	// victim IS still connected it now shares it. ocserv will not notice (it registers no
+	// lease for an explicitly assigned address), and one of the two tunnels then stops
+	// receiving while staying connected.
+	logger.Infof("OpenConnect: no live ocserv session holds %s, nothing to evict", ip)
 }
 
 // KillClient disconnects a user's active session(s) on an inbound's ocserv via
@@ -579,7 +613,11 @@ func (s *OcservService) KillClient(inboundId int, username string) {
 	if _, err := os.Stat(sock); err != nil {
 		return
 	}
-	_ = s.runCmd(s.occtlBinaryPath(), "-s", sock, "disconnect", "user", username)
+	// Bounded like every other occtl call on a RADIUS/job path: this runs from the 10s
+	// traffic tick, once per disabled client. See vpnProbeTimeout.
+	if _, err := probeCmd(s.occtlBinaryPath(), "-s", sock, "disconnect", "user", username); err != nil {
+		logger.Debugf("OpenConnect: occtl disconnect user %s failed: %v", username, err)
+	}
 }
 
 // KillDisabledSessions disconnects active OpenConnect sessions for clients that

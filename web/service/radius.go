@@ -40,7 +40,7 @@ type RadiusService struct {
 	stationIP   map[string]string         // key: "proto:idx:Calling-Station-Id" -> its stable block IP
 	stationSeen map[string]time.Time      // last time each station authenticated (for pruning)
 	secret      []byte
-	eapSessions map[string]*eapState      // key: hex(State attr) — in-flight EAP-MSCHAPv2 exchanges (IKEv2/strongSwan)
+	eapSessions map[string]*eapState // key: hex(State attr): in-flight EAP-MSCHAPv2 exchanges (IKEv2/strongSwan)
 	// ocActiveFn overrides the OpenConnect liveness probe (isIPActive) — set in unit
 	// tests where no real ocserv route table exists. nil in production.
 	ocActiveFn func(ip string) bool
@@ -73,11 +73,36 @@ const pendingReclaimGrace = 15 * time.Second
 // that a genuine re-dial of a dropped device isn't blocked as "block full" for long.
 const ocStaleReclaimGrace = 15 * time.Second
 
+// ocInterimInterval is the Acct-Interim-Interval the panel asks ocserv for, so it is
+// also how often a live OpenConnect session announces itself (see handleOcservAcct).
+const ocInterimInterval = 60
+
+// ocHeartbeatGrace is how long an OpenConnect session is trusted on its last
+// Interim-Update alone.
+//
+// ocserv reports on a 30s check tick and fuzzes the interval by a few seconds, so the
+// real gap between updates is up to ~95s rather than the 60s asked for; radcli retries a
+// packet the panel does not answer, so a lost one is not a third case. 150s therefore
+// carries a comfortable margin over one gap while still bounding how long a session that
+// went silent WITHOUT a stop (an ocserv crash) keeps its address before the route probe
+// takes over.
+const ocHeartbeatGrace = 150 * time.Second
+
 type radiusSession struct {
 	email    string
 	ip       string
 	protocol string    // "l2tp", "pptp", "openvpn", or "openconnect"
 	started  time.Time // session start; used to pick the oldest device to evict
+	// heard is the last time the DAEMON itself confirmed the tunnel is up (an
+	// OpenConnect Interim-Update). Zero for the protocols whose accounting the panel
+	// does not use as a heartbeat, so a zero value must never read as "long ago".
+	heard time.Time
+	// acctID is the daemon's own Acct-Session-Id, learned from that same
+	// Interim-Update. OpenConnect sessions are keyed by tunnel IP, and an address
+	// outlives the device that held it, so this is the only way to tell whether a later
+	// Acct-Stop is ending THIS session or the predecessor that used to hold the address.
+	// Empty until the first interim, and unused by the protocols keyed by session id.
+	acctID string
 }
 
 // ocSessionKey is the s.sessions map key for an auth-recorded OpenConnect session.
@@ -249,17 +274,30 @@ func (s *RadiusService) handleAuth(w radius.ResponseWriter, r *radius.Request) {
 				w.Write(r.Response(radius.CodeAccessReject))
 				return
 			}
-			if clientIP != nil {
-				rfc2865.FramedIPAddress_Set(accept, clientIP)
-				// The session was recorded at auth (getClientIP -> allocateBlockIP). ocserv
-				// won't drive Acct-Start usefully, so create the nft accounting counters here
-				// too, off the lock — otherwise this device's traffic is never counted and
-				// account usage/quota enforcement silently no-ops for OpenConnect. Idempotent.
-				if err := s.nftService.AddClientAccounting(protocol, clientIP.String()); err != nil {
-					logger.Warning("RADIUS: failed to add openconnect nft accounting:", err)
-				}
+			// A keyless Access-Accept is not a safe fallback for OpenConnect. ocserv would
+			// then lease from its OWN pool, which spans the very block the panel hands out
+			// by account slot, and it registers no lease at all for an explicitly assigned
+			// address (ip-lease.c sets ->db only on the pool path), so its duplicate check
+			// cannot see the addresses we assign: it can pick one a live device already
+			// holds. Two tunnels on one address leaves the older one's return traffic on the
+			// newer tun, so it stays "connected" and passes nothing. Such an address is also
+			// outside the routing backstop's valid-IP list, so Xray blackholes it anyway.
+			if clientIP == nil {
+				logger.Infof("RADIUS: auth rejected: no tunnel IP available (pool exhausted?) user=%s nas=%s", username, nasID)
+				w.Write(r.Response(radius.CodeAccessReject))
+				return
 			}
-			rfc2869.AcctInterimInterval_Set(accept, rfc2869.AcctInterimInterval(60))
+			rfc2865.FramedIPAddress_Set(accept, clientIP)
+			// The session was recorded at auth (getClientIP -> allocateBlockIP). ocserv
+			// won't drive Acct-Start usefully, so create the nft accounting counters here
+			// too, off the lock, otherwise this device's traffic is never counted and
+			// account usage/quota enforcement silently no-ops for OpenConnect. Idempotent.
+			if err := s.nftService.AddClientAccounting(protocol, clientIP.String()); err != nil {
+				logger.Warning("RADIUS: failed to add openconnect nft accounting:", err)
+			}
+			// Interim accounting is not billing here (nft counters do that): it is the only
+			// liveness signal ocserv gives the panel, see handleOcservAcct.
+			rfc2869.AcctInterimInterval_Set(accept, rfc2869.AcctInterimInterval(ocInterimInterval))
 			logger.Infof("RADIUS: auth accepted (PAP) user=%s nas=%s ip=%v", username, nasID, clientIP)
 		} else {
 			logger.Infof("RADIUS: auth accepted (PAP) user=%s nas=%s", username, nasID)
@@ -350,15 +388,17 @@ func (s *RadiusService) handleAcct(w radius.ResponseWriter, r *radius.Request) {
 		return
 	}
 
-	// OpenConnect sessions are owned by the AUTH path (see allocateBlockIP): ocserv's
-	// Accounting-Request carries neither Framed-IP-Address nor NAS-Port, so it can't
-	// identify the per-device session, and its octet counts are unused (nft counters
-	// drive quota). Ignoring it here keeps auth the single source of truth and stops
-	// a stray Acct-Start (should ocserv ever include a Framed-IP) from double-recording
-	// the session or re-adding its nft counters. Cleanup is via CleanStaleSessions. The
-	// deferred Accounting-Response above still ACKs ocserv so it doesn't retry.
+	// OpenConnect sessions are CREATED by the AUTH path (see allocateBlockIP), because
+	// ocserv's Acct-Start identifies nothing: main opens the accounting session before it
+	// leases the tunnel IP, so that packet carries no Framed-IP-Address (and ocserv sends
+	// no NAS-Port at all). Its LATER packets do carry one: the worker reports its assigned
+	// address with every stats message, which sec-mod copies into the accounting info, so
+	// Interim-Update and Stop both name the tunnel IP that keys the session. Those two are
+	// the only word the panel ever gets from ocserv about a session it did not just
+	// authenticate, so they are handled rather than discarded. The deferred
+	// Accounting-Response above still ACKs every packet so ocserv does not retry.
 	if protocol == "openconnect" {
-		logger.Debugf("RADIUS: acct ignored for openconnect (auth-managed) user=%s status=%v", username, statusType)
+		s.handleOcservAcct(statusType, sessionID, username, framedIP)
 		return
 	}
 
@@ -481,6 +521,97 @@ func (s *RadiusService) handleAcct(w radius.ResponseWriter, r *radius.Request) {
 			}
 		}
 		s.mu.Unlock()
+	}
+}
+
+// handleOcservAcct applies one OpenConnect Accounting-Request to the auth-created
+// session at that tunnel IP (see ocSessionKey).
+//
+//   - Interim-Update is a heartbeat. It is what lets the route-probe sweep stop
+//     second-guessing a live tunnel, and it re-adopts a session the panel lost (a
+//     restart, or a sweep that ran while the tunnel was still coming up) instead of
+//     leaving its address looking free to the next device on the account.
+//   - Stop is the authoritative end of the session, and the only prompt one: without it
+//     a dead device's address stays occupied until the next 60s sweep notices its route
+//     is gone, which both refuses the account's own redial and delays the counters.
+//
+// A start (no Framed-IP yet) is ignored, as is any packet the panel cannot key.
+func (s *RadiusService) handleOcservAcct(statusType rfc2866.AcctStatusType, sessionID, username string, framedIP net.IP) {
+	ip := framedIP.String()
+	if ip == "" || ip == "<nil>" {
+		logger.Debugf("RADIUS: oc acct without Framed-IP ignored user=%s status=%v", username, statusType)
+		return
+	}
+	sid := ocSessionKey(ip)
+	now := time.Now()
+
+	switch statusType {
+	case rfc2866.AcctStatusType_Value_InterimUpdate:
+		s.mu.Lock()
+		if sess, ok := s.sessions[sid]; ok {
+			sess.heard = now
+			sess.acctID = sessionID // whose session this address currently is
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		// Unknown live tunnel: adopt it. The email lookup is a DB read, so it runs off
+		// the lock (every RADIUS auth on the box waits behind that mutex).
+		email := s.lookupEmail("openconnect", username)
+		if email == "" {
+			return
+		}
+		s.mu.Lock()
+		if _, exists := s.sessions[sid]; !exists {
+			s.sessions[sid] = &radiusSession{email: email, ip: ip, protocol: "openconnect", started: now, heard: now, acctID: sessionID}
+		}
+		s.mu.Unlock()
+		if err := s.nftService.AddClientAccounting("openconnect", ip); err != nil {
+			logger.Warning("RADIUS: failed to add openconnect nft accounting:", err)
+		}
+		logger.Infof("RADIUS: re-added openconnect session from interim user=%s email=%s ip=%s", username, email, ip)
+
+	case rfc2866.AcctStatusType_Value_Stop:
+		s.mu.Lock()
+		sess, ok := s.sessions[sid]
+		if !ok {
+			s.mu.Unlock()
+			return
+		}
+		// Under User-Limit "accept" the freed address is handed to the incoming device
+		// immediately, so the evicted device's stop can arrive once the newcomer already
+		// owns this key. Acting on it would delete a live session and wipe the newcomer's
+		// counters (the l2tp Acct-Stop case documents the same hazard). The daemon's own
+		// session id settles it whenever the session has been heard from: a stop naming a
+		// different one is the predecessor's, and the evicting path has already folded and
+		// removed that device's accounting. Before the first interim there is nothing to
+		// compare (ocserv's Access-Request carries no session id), so age stands in.
+		//
+		// A cookie reconnect is deliberately NOT a case here: ocserv refcounts the auth
+		// session, so the old worker's close does not reach the accounting module and no
+		// stop is sent while the session lives on.
+		if sess.acctID != "" && sessionID != "" && sess.acctID != sessionID {
+			s.mu.Unlock()
+			logger.Infof("RADIUS: oc acct-stop stale: ip=%s belongs to session %s now (stop was for %s)", ip, sess.acctID, sessionID)
+			return
+		}
+		if sess.acctID == "" && now.Sub(sess.started) < ocStaleReclaimGrace {
+			s.mu.Unlock()
+			logger.Infof("RADIUS: oc acct-stop stale: ip=%s just reassigned, keeping its accounting (user=%s)", ip, username)
+			return
+		}
+		delete(s.sessions, sid)
+		s.mu.Unlock()
+
+		// Fold the bytes counted since the last collection before deleting the counters,
+		// exactly as the l2tp/pptp Acct-Stop path does.
+		up, down := s.nftService.ReadAndResetClientCounters("openconnect", ip)
+		foldClientTraffic(sess.email, up, down)
+		if err := s.nftService.RemoveClientAccounting("openconnect", ip); err != nil {
+			logger.Warning("RADIUS: failed to remove openconnect nft accounting:", err)
+		}
+		logger.Infof("RADIUS: oc acct-stop user=%s email=%s ip=%s", username, sess.email, ip)
 	}
 }
 
@@ -810,12 +941,16 @@ func (s *RadiusService) killPppdByIP(ip string) {
 // resulting remove/add churn was what let duplicate accounting rules accumulate.
 func (s *RadiusService) CleanStaleSessions() {
 	s.mu.Lock()
+	now := time.Now()
 	var stale []string
 	for sid, sess := range s.sessions {
 		if strings.HasPrefix(sid, "cp:") {
 			continue
 		}
-		if !s.isIPActive(sess.ip, sess.protocol) {
+		if sess.protocol == "openconnect" && !ocProbeReady(sess, now) {
+			continue
+		}
+		if !s.sessionActive(sess) {
 			stale = append(stale, sid)
 		}
 	}
@@ -823,6 +958,11 @@ func (s *RadiusService) CleanStaleSessions() {
 		sess := s.sessions[sid]
 		delete(s.sessions, sid)
 		s.mu.Unlock()
+		// Fold what the counters hold before deleting them, mirroring Acct-Stop:
+		// otherwise every session that ends without one (which is every OpenConnect
+		// session that did not report a stop) silently drops its last window of traffic.
+		up, down := s.nftService.ReadAndResetClientCounters(sess.protocol, sess.ip)
+		foldClientTraffic(sess.email, up, down)
 		s.nftService.RemoveClientAccounting(sess.protocol, sess.ip)
 		logger.Infof("RADIUS: cleaned stale session=%s email=%s ip=%s", sid, sess.email, sess.ip)
 		s.mu.Lock()
@@ -830,12 +970,65 @@ func (s *RadiusService) CleanStaleSessions() {
 	s.mu.Unlock()
 }
 
+// ocProbeReady reports whether an OpenConnect session may be judged by the route probe
+// yet. Both gates exist because a false "stale" verdict does not merely lose the
+// session: it frees the address, which the account's next device is then handed while
+// the first one is still using it, and ocserv does not detect a duplicate explicitly
+// assigned address (see the auth path). Two tunnels on one address means the kernel
+// keeps one route and the other device's return traffic goes to the wrong tun: it stays
+// connected and passes nothing, which is only cleared by reconnecting it, which then
+// does the same to its twin.
+//
+//   - Just authenticated: the session is recorded at auth, but ocserv only creates the
+//     tun (and thus the route) after the client comes back with its cookie, so the probe
+//     reads a false negative until then. allocateBlockIP's own reclaim already waits out
+//     this window; the 60s sweep did not, and it is a wall-clock tick that can land
+//     anywhere, including inside it.
+//   - Recently heard from: an Interim-Update is ocserv itself saying the tunnel is up,
+//     which beats anything inferred from the routing table.
+func ocProbeReady(sess *radiusSession, now time.Time) bool {
+	if now.Sub(sess.started) < ocStaleReclaimGrace {
+		return false
+	}
+	if !sess.heard.IsZero() && now.Sub(sess.heard) < ocHeartbeatGrace {
+		return false
+	}
+	return true
+}
+
+// vpnProbeTimeout bounds the helper commands the RADIUS paths shell out to (the
+// liveness probe, the occtl eviction). They run while a client's Access-Request is
+// waiting and, for the eviction, while s.mu is held, so one that blocks stalls every
+// other login on the box. occtl in particular talks to ocserv's MAIN process, which can
+// itself be waiting on sec-mod, which is waiting for the very reply we have not written
+// yet: the same circular wait the IKEv2 eviction had to be made asynchronous for. A
+// missed probe just retries on the next sweep, so failing fast is the cheap side.
+const vpnProbeTimeout = 3 * time.Second
+
+// probeCmd runs a short-lived helper command under vpnProbeTimeout and returns its
+// stdout.
+func probeCmd(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), vpnProbeTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+// sessionActive reports whether a tracked session's tunnel is still up, routing
+// OpenConnect through the injectable probe (ocActiveFn) so the sweep can be exercised
+// without a real ocserv route table.
+func (s *RadiusService) sessionActive(sess *radiusSession) bool {
+	if sess.protocol == "openconnect" {
+		return s.ocIsActive(sess.ip)
+	}
+	return s.isIPActive(sess.ip, sess.protocol)
+}
+
 // isIPActive checks if a VPN client IP is still reachable through its tunnel.
 func (s *RadiusService) isIPActive(ip string, protocol string) bool {
 	switch protocol {
 	case "openvpn":
 		// A route to the IP exists through OpenVPN's tun device.
-		output, err := exec.Command("ip", "route", "get", ip).Output()
+		output, err := probeCmd("ip", "route", "get", ip)
 		if err != nil {
 			return false // no route = not active
 		}
@@ -843,7 +1036,7 @@ func (s *RadiusService) isIPActive(ip string, protocol string) bool {
 	case "openconnect":
 		// ocserv client IPs are peers on the ocserv tun (not local addrs), so check
 		// for a route through an ocserv device rather than scanning `ip addr show`.
-		output, err := exec.Command("ip", "route", "get", ip).Output()
+		output, err := probeCmd("ip", "route", "get", ip)
 		if err != nil {
 			return false
 		}
@@ -1050,9 +1243,10 @@ func (s *RadiusService) allocateBlockIP(inboundId, accountSlot int, blockIPs []s
 	}
 
 	// recordOC records/refreshes an OpenConnect device's session at AUTH (see
-	// ocSessionKey). ocserv's accounting can't identify the device (no Framed-IP, no
-	// NAS-Port), so this — not handleAcct — is where an OpenConnect session enters
-	// s.sessions, which is what User-Limit accept-eviction (oldestBlockSession) and
+	// ocSessionKey). ocserv's Acct-Start can't identify the device (it carries no
+	// Framed-IP, and ocserv sends no NAS-Port at all), so this (not handleAcct) is
+	// where an OpenConnect session enters s.sessions; handleOcservAcct then keeps it
+	// alive and ends it. This is what User-Limit accept-eviction (oldestBlockSession) and
 	// traffic attribution (GetSessions) rely on. The transient `pending` lease is the
 	// gap between an Access-Accept and its confirming Acct-Start; OpenConnect has no
 	// such gap (auth IS the confirmation), so it is cleared here — leaving it would let
@@ -1122,13 +1316,16 @@ func (s *RadiusService) allocateBlockIP(inboundId, accountSlot int, blockIPs []s
 			recordOC(ip) // openconnect: refresh session, clear the transient pending lease
 			return net.ParseIP(ip).To4(), false
 		}
-		// Prune long-abandoned station claims (client gone for good) so the map can't
-		// grow without bound; active clients refresh their timestamp just above.
-		for key, ts := range s.stationSeen {
-			if now.Sub(ts) > pendingLeaseTTL {
-				delete(s.stationSeen, key)
-				delete(s.stationIP, key)
-			}
+	}
+	// Prune long-abandoned station claims (client gone for good) so the map can't grow
+	// without bound; active clients refresh their timestamp above. Deliberately outside
+	// the redial branch: the protocols excluded from it still WRITE these maps in assign,
+	// so leaving the prune inside meant an openconnect/sstp/ikev2-only server accumulated
+	// an entry per (device, account) forever.
+	for key, ts := range s.stationSeen {
+		if now.Sub(ts) > pendingLeaseTTL {
+			delete(s.stationSeen, key)
+			delete(s.stationIP, key)
 		}
 	}
 
@@ -1149,12 +1346,13 @@ func (s *RadiusService) allocateBlockIP(inboundId, accountSlot int, blockIPs []s
 			if !ok {
 				continue
 			}
-			// Don't reclaim a session still establishing: right after auth its ocserv
-			// route may not be in the kernel yet, so isIPActive would read a false
-			// negative and we'd wrongly free a live device's IP (re-opening the very
-			// collapse this fixes). Only past the grace does "no ocserv route" mean the
-			// tunnel is genuinely gone.
-			if now.Sub(sess.started) < ocStaleReclaimGrace {
+			// Don't reclaim a session still establishing (its ocserv route may not be in
+			// the kernel yet) or one ocserv has just reported alive: in both cases the
+			// probe reads a false negative and we would free a live device's IP, which
+			// hands the account's next device an address already in use. See
+			// ocProbeReady. Only past those does "no ocserv route" mean the tunnel is
+			// genuinely gone.
+			if !ocProbeReady(sess, now) {
 				continue
 			}
 			if !s.ocIsActive(ip) {

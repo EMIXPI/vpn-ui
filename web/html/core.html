@@ -141,11 +141,11 @@
 
                   <div class="core-actions">
                     <a-space>
-                      <a-button size="small" type="primary" :disabled="!canRestart(core.name)"
+                      <a-button size="small" type="primary" :disabled="!canRestart(core)"
                         @click="restart(core.name)">
                         <a-icon type="reload"></a-icon>{{ i18n "pages.core.restart" }}
                       </a-button>
-                      <a-button size="small" type="danger" :disabled="!canStop(core.name)"
+                      <a-button size="small" type="danger" :disabled="!canStop(core)"
                         @click="stop(core.name)">
                         <a-icon type="pause-circle"></a-icon>{{ i18n "pages.core.stop" }}
                       </a-button>
@@ -961,8 +961,12 @@
           error: '{{ i18n "pages.core.stateError" }}',
         })[state] || state;
       },
-      canStop(name) { return true; },
-      canRestart(name) { return true; },
+      // Nothing to restart or stop on a core this host was never set up for.
+      // These returned true unconditionally back when every card reported a live
+      // daemon state; ipsec and radius can now report not_installed too, and
+      // offering to restart a daemon that is not on disk only produces an error.
+      canStop(core) { return core.state !== 'not_installed'; },
+      canRestart(core) { return core.state !== 'not_installed'; },
     },
     computed: {
       // The core's log, coloured by severity through the shared LogFormatter.

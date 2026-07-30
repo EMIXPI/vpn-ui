@@ -19,6 +19,7 @@
 - IKEv2
 - WireGuard (C)
 - AmneziaWG (WireGuard مموّه)
+- GRE (أنفاق site-to-site بين الراوترات، مع إمكانية تشغيلها فوق IPsec)
 - MTProto Proxy (Telegram)
 - SSH
 
@@ -87,6 +88,7 @@ flowchart TB
   Client["VPN Client<br/>(L2TP/IPsec · PPTP · OpenVPN · OpenConnect · SSTP · IKEv2 · WireGuard (C) · AmneziaWG)"]
   TGC["Telegram Client<br/>(MTProto Proxy)"]
   SSHC["SSH Client<br/>(ssh -D dynamic SOCKS · badvpn-udpgw for UDP)"]
+  GREC["Customer Router<br/>(GRE · IP protocol 47 · optional IPsec / FOU)"]
 
   subgraph PANEL["vpn-ui panel — root process"]
     PROC["procmgr<br/>supervises the daemons"]
@@ -98,12 +100,12 @@ flowchart TB
   end
 
   subgraph DAEMON["Bundled VPN daemons (panel children)"]
-    D["xl2tpd + strongSwan/charon · pptpd · openvpn · ocserv · accel-ppp<br/>(pppd for L2TP/PPTP · accel-ppp for SSTP · charon for IKEv2)"]
+    D["xl2tpd + strongSwan/charon · pptpd · openvpn · ocserv · accel-ppp<br/>(pppd for L2TP/PPTP · accel-ppp for SSTP · charon for IKEv2 and GRE-over-IPsec)"]
     MT["telemt (MTProto Proxy)<br/>userspace relay: no tunnel, no pool IP"]
   end
 
   subgraph KERNEL["Linux kernel data plane"]
-    IFACE["ppp0 / tun0 / wgc0 / awg0<br/>client is assigned a pool IP"]
+    IFACE["ppp0 / tun0 / wgc0 / awg0 / gre-*<br/>client is assigned a pool IP"]
     NFT["nftables mark:<br/>UDP → TPROXY · TCP → REDIRECT"]
     RULE["ip rule fwmark 1 → table 100"]
   end
@@ -121,6 +123,7 @@ flowchart TB
   Client -->|"tunnel + credentials"| D
   Client -.->|"WireGuard (C): in-kernel wgc, no daemon"| IFACE
   Client -.->|"AmneziaWG: in-kernel awg (DKMS module), no daemon<br/>obfuscated handshake: Jc/Jmin/Jmax · S1/S2 · H1-H4"| IFACE
+  GREC -.->|"GRE: in-kernel tunnel, no daemon and no credentials<br/>peer pinned by its public IP, or learned from its first packets<br/>optional ESP transport on the shared charon · FOU for peers behind NAT"| IFACE
   TGC -->|"obfuscated2 / dd / FakeTLS secret"| MT
   SSHC -->|"username + password (checked in-process, no RADIUS)"| SSHSRV
   D -.->|"MS-CHAPv2 Access-Request"| RAD
@@ -227,6 +230,7 @@ git clone https://github.com/Sir-MmD/vpn-ui.git && cd vpn-ui
 | `ikev2` | connect + checks + peer reachability (IKEv2/IPsec, strongSwan charon; eap-mschapv2 + psk + eap-tls) |
 | `wg-c` | connect + checks + peer reachability + per-account usage/termination (WireGuard C, in-kernel wgctrl, gateway /29, + preshared-key mode) |
 | `awg` | connect + checks + peer reachability + per-account usage/termination (AmneziaWG, in-kernel amneziawg DKMS module, obfuscation params, + preshared-key mode) |
+| `gre` | connect + checks + peer reachability + per-account usage/termination (GRE site-to-site, in-kernel ip_gre; raw / IPsec / FOU peer modes, static and dynamic peers) |
 | `mtproto` | alias: runs every MTProto phase below (MTProto Proxy, telemt) |
 | `mtproto-classic` | handshake + relay to a real Telegram DC + wrong-secret control + usage (obfuscated2) |
 | `mtproto-secure` | same, "dd" random-padding secret |

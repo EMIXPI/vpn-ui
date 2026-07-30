@@ -13,7 +13,8 @@ import (
 // Four protocols cannot be configured from a link alone: OpenVPN needs its .ovpn
 // profile (CA + tls-crypt + cipher list), WireGuard (C) / AmneziaWG need a .conf per
 // device (keys, address, DNS, and awg's obfuscation values), and GRE has no client app at
-// all, so its artifact is the plain-text set of values to type into a router. The subscriber page
+// all, so its artifact is the plain-text recipe to type into a router, one file per peer per
+// platform (it is the only protocol here with no share link at all). The subscriber page
 // therefore offers them as downloads, rendered by the same service functions the panel's
 // own download buttons use, so a profile taken from the subscription is byte-for-byte the
 // profile the admin sees: inbound settings and external proxies included.
@@ -175,25 +176,36 @@ func (s *SubService) inboundConfigFiles(inbound *model.Inbound, email, host stri
 
 	case model.GRE:
 		// GRE has no client app and therefore no profile format: the artifact is the set of
-		// values the customer types into their router, so it ships as plain text.
+		// values the customer types into their router, so it ships as plain text. The two
+		// platforms are separate files rather than one blob, exactly as the panel splits
+		// them: a customer runs one recipe, never both, and a combined file invites pasting
+		// RouterOS syntax into a Linux shell.
 		cfgs, err := s.greService.RenderPeerConfigs(inbound, email, host)
 		if err != nil {
 			return nil
 		}
-		out := make([]SubConfigFile, 0, len(cfgs))
+		multi := len(cfgs) > 1
+		out := make([]SubConfigFile, 0, len(cfgs)*2)
 		for i, cfg := range cfgs {
-			variant := ""
-			if len(cfgs) > 1 {
-				variant = fmt.Sprintf("peer%d", cfg.PeerIndex+1)
+			for _, p := range []struct{ slug, name, content string }{
+				{"mikrotik", "MikroTik", cfg.ConfigMikrotik},
+				{"linux", "Linux", cfg.ConfigLinux},
+			} {
+				if strings.TrimSpace(p.content) == "" {
+					continue
+				}
+				out = append(out, SubConfigFile{
+					// The platform is part of the key, not just the filename: the key is
+					// what the download route resolves, so without it both files of a peer
+					// would serve whichever one ConfigFiles listed first.
+					Key:         fmt.Sprintf("gre-%d-%d-%s", inbound.Id, i, p.slug),
+					Protocol:    string(model.GRE),
+					Label:       greLabel(p.name, cfg.Remark, inbound.Remark, cfg.PeerIndex, multi),
+					Filename:    configFilename(inbound.Remark, "gre", greVariant(inbound.Remark, p.slug, cfg.PeerIndex, multi), "txt"),
+					ContentType: "text/plain; charset=utf-8",
+					Content:     p.content,
+				})
 			}
-			out = append(out, SubConfigFile{
-				Key:         fmt.Sprintf("gre-%d-%d", inbound.Id, i),
-				Protocol:    string(model.GRE),
-				Label:       wgLabel("GRE", cfg.Remark, inbound.Remark),
-				Filename:    configFilename(inbound.Remark, "gre", variant, "txt"),
-				ContentType: "text/plain; charset=utf-8",
-				Content:     cfg.Config,
-			})
 		}
 		return out
 	}
@@ -221,6 +233,37 @@ func wgVariant(cfgRemark string, index int) string {
 		return r
 	}
 	return strconv.Itoa(index + 1)
+}
+
+// greLabel names one GRE download. It cannot reuse wgLabel: a GRE peer remark is optional
+// (a WireGuard config always gets "Device N" from its renderer), so an account with two
+// unnamed peers would show the same button text twice. The slot number stands in when the
+// admin left the peer unnamed, and only then, since "Peer 1" on a single-peer account is
+// noise.
+func greLabel(platform, peerRemark, inboundRemark string, peerIndex int, multi bool) string {
+	label := "GRE " + platform
+	if r := strings.TrimSpace(peerRemark); r != "" {
+		label += " " + r
+	} else if multi {
+		label += " Peer " + strconv.Itoa(peerIndex+1)
+	}
+	return label + labelSuffix(inboundRemark)
+}
+
+// greVariant is the filename half of the same thing. A GRE artifact is a bare .txt rather
+// than a .ovpn/.conf that names itself, so the protocol goes in the filename or the
+// customer is left with "home-linux.txt" and nothing saying what it belongs to. It is
+// dropped when the remark slugs away to nothing, because configFilename already falls back
+// to "gre" there.
+func greVariant(inboundRemark, platform string, peerIndex int, multi bool) string {
+	parts := make([]string, 0, 3)
+	if slugForFilename(inboundRemark) != "" {
+		parts = append(parts, "gre")
+	}
+	if multi {
+		parts = append(parts, "peer"+strconv.Itoa(peerIndex+1))
+	}
+	return strings.Join(append(parts, platform), "-")
 }
 
 func labelSuffix(remark string) string {

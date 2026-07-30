@@ -18,6 +18,7 @@ import (
 	"github.com/mhsanaei/3x-ui/v2/util/random"
 	"github.com/mhsanaei/3x-ui/v2/util/reflect_util"
 	"github.com/mhsanaei/3x-ui/v2/web/entity"
+	"github.com/mhsanaei/3x-ui/v2/xray"
 )
 
 //go:embed config.json
@@ -946,8 +947,13 @@ func (s *SettingService) GetDefaultSettings(host string, full bool) (map[string]
 		"remarkModel":    func() (any, error) { return s.GetRemarkModel() },
 		"datepicker":     func() (any, error) { return s.GetDatepicker() },
 		"ipLimitEnable":  func() (any, error) { return s.GetIpLimitEnable() },
-		"provisioned":      func() (any, error) { var cs CoreService; return cs.IsProvisioned(), nil },
-		"missingProtocols": func() (any, error) { var cs CoreService; return cs.MissingProtocols(), nil },
+		// The overview's access-log viewer reads Xray's access FILE, so this is what
+		// decides whether it has anything to show. It used to ride on ipLimitEnable,
+		// which meant the same thing until IP-limit enforcement moved into the core and
+		// that getter became an unconditional true.
+		"xrayAccessLogEnable": func() (any, error) { return xray.AccessLogEnabled(), nil },
+		"provisioned":         func() (any, error) { var cs CoreService; return cs.IsProvisioned(), nil },
+		"missingProtocols":    func() (any, error) { var cs CoreService; return cs.MissingProtocols(), nil },
 	}
 
 	result := make(map[string]any)

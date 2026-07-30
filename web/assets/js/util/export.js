@@ -137,22 +137,13 @@ const AccountExport = {
           continue;
         }
 
-        // GRE: there is no key, password or link at all, and no client app: the account's
-        // artifact is the block of values the customer types into their router. So the TXT
-        // config block carries that recipe and there is NOTHING to put in a QR (a router
-        // setup is not a scannable URI), which is why qr is left empty rather than being
-        // handed the recipe text like awg's .conf.
+        // GRE: there is no key, password or link at all, and no client app, and the router
+        // setup is deliberately NOT embedded here: it is a multi-page recipe per peer that
+        // buried every other account in a bulk export. It stays in the account's GRE Setup
+        // modal (and its subscription .txt), which is also where it can be handed out per
+        // platform. So the card is the account row alone, with nothing to put in a QR.
         if (isGre) {
-          const peers = await AccountExport._fetchConfigs(dbInbound.id, client.email, 'gre-configs');
-          if (!peers.length) { cards.push(base); continue; }
-          for (const peer of peers) {
-            const label = peer.remark || ('Peer ' + ((peer.peerIndex || 0) + 1));
-            cards.push(Object.assign({}, base, {
-              remark: base.remark + (peers.length > 1 ? ' (' + label + ')' : ''),
-              qr: '',
-              configText: peer.config || '',
-            }));
-          }
+          cards.push(base);
           continue;
         }
 

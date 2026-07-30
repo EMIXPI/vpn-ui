@@ -89,8 +89,9 @@ func (s *SubService) GetSubs(subId string, host string) ([]string, int64, xray.C
 			if client.Enable && client.SubID == subId {
 				// Count every matching client's usage so the subscriber page shows the
 				// account's remaining traffic/days for ALL protocols, including ones with
-				// no raw link (wg-c/awg deliver via the Clash sub; the credential VPNs add
-				// a connection-info line via getLink).
+				// no raw link (wg-c/awg deliver via the Clash sub and gre via the page's
+				// config downloads; the credential VPNs add a connection-info line via
+				// getLink).
 				ct := s.getClientTraffics(inbound.ClientStats, client.Email)
 				clientTraffics = append(clientTraffics, ct)
 				if ct.LastOnline > lastOnline {
@@ -205,13 +206,21 @@ func (s *SubService) getLink(inbound *model.Inbound, email string) string {
 		// WireGuard, so these accounts get a working entry. The full-fidelity .conf
 		// still comes from the Clash sub and the per-client modal.
 		return s.genWireguardLink(inbound, email)
-	case "openvpn", "l2tp", "pptp", "openconnect", "sstp", "ikev2", "gre":
+	case "openvpn", "l2tp", "pptp", "openconnect", "sstp", "ikev2":
 		// Username/password VPNs have no importable proxy URI at all, so the entry is
 		// a connection card: parseable enough for a client to accept the account and
-		// show its quota, with the credentials in the name. GRE belongs here rather than
-		// with the WireGuard family: its client is a ROUTER, so there is no app to import
-		// a link, but the card still makes the account and its usage visible.
+		// show its quota, with the credentials in the name.
 		return s.genConnectionCard(inbound, email)
+	case "gre":
+		// No entry at all, deliberately. GRE's peer is a ROUTER: there is no app to paste
+		// a URI into, and there is no port for one to name either, since GRE is IP protocol
+		// 47 and the inbound's port column only holds a synthetic unique value nothing
+		// binds. A card here was therefore a trojan:// link to a dead port, which every
+		// client then offered as a connectable node. The account reaches the subscriber
+		// through the config-file downloads instead, and its usage still counts towards the
+		// page and the Subscription-Userinfo header, which GetSubs accumulates whether or
+		// not a link comes out.
+		return ""
 	}
 	return ""
 }

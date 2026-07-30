@@ -49,6 +49,19 @@ BIN="${VPNUI_BIN:-/opt/vpn-ui/vpn-ui-amd64}"
 CERT_DIR="${CERT_DIR:-$(dirname "$BIN")/cert}"
 DOMAIN="${DOMAIN:-${DEPLOY_DOMAIN:-}}"
 EMAIL="${EMAIL:-${DEPLOY_EMAIL:-}}"
+# How the ACME challenge is answered: "cloudflare" (DNS-01 through the Cloudflare
+# API) or "manual" (standalone HTTP-01, the original flow). Chosen per run.
+SSL_METHOD="${SSL_METHOD:-}"
+# The Cloudflare API token, when that path is taken. It is a SECRET: this script
+# never prints it and never writes it to disk. It IS exported, for acme.sh, which
+# saves it in $HOME/.acme.sh/account.conf (0600, inside a 0700 directory) because an
+# unattended renewal two months from now has to re-create the TXT record with nobody
+# at the keyboard. Presetting DEPLOY_CF_TOKEN chooses the Cloudflare path.
+CF_Token="${CF_Token:-${DEPLOY_CF_TOKEN:-}}"
+# Second name on a wildcard certificate ("*.example.com"); empty for a single host.
+WILDCARD_SAN="${WILDCARD_SAN:-}"
+# "1" issues a wildcard without asking (Cloudflare path only).
+DEPLOY_WILDCARD="${DEPLOY_WILDCARD:-}"
 
 # --------------------------------------------------------------------------- #
 #  Panel facts (never parsed out of prose)
@@ -96,14 +109,228 @@ say_unmanaged() {
 #  Item 17: Get SSL  (shared with deploy.sh: one implementation, no copies)
 # --------------------------------------------------------------------------- #
 
-# Obtain a REAL certificate (Let's Encrypt via acme.sh, standalone HTTP-01) and
-# point the panel's HTTPS at it. Needs a public DNS A record for $DOMAIN pointing
-# at this host and TCP :80 free during issuance. The same cert files can be reused
-# for SSTP so stock Windows trusts it. Best-effort: on any failure it warns and
-# leaves the panel's current TLS untouched (returns non-zero). Callers guard with
-# `|| ...` so set -e is suspended inside; unguarded failures won't abort deploy.
+# Read the Cloudflare API token and verify it before anything is built on top of it.
+#
+# The permission list is the point of the prompt: a token that can edit DNS but
+# cannot READ zones works right up until acme.sh looks the zone up, and the failure
+# then reads like a DNS problem rather than a missing checkbox. Verifying against
+# Cloudflare here also catches the mistyped and the expired token in one second
+# instead of five minutes into an issuance.
+ssl_cf_token() {
+    if [[ -z "$CF_Token" ]]; then
+        [[ -r /dev/tty ]] || {
+            warn "no Cloudflare token (set DEPLOY_CF_TOKEN=...), skipping real SSL."
+            return 1
+        }
+        {
+            printf '%s::%s %sCloudflare API token%s\n' "$B$BLUE" "$R" "$WHITE" "$R"
+            printf '    Create one at %shttps://dash.cloudflare.com/profile/api-tokens%s\n' "$TEAL" "$R"
+            printf '    (Create Token -> Custom token) with EXACTLY these permissions:\n'
+            printf '      %sZone : Zone : Read%s\n' "$GREEN" "$R"
+            printf '      %sZone : DNS  : Edit%s\n' "$GREEN" "$R"
+            printf '    Zone Resources: All zones, or just the zone you are issuing for.\n'
+            printf '    The token is used to write a temporary TXT record for the challenge.\n'
+            printf '  %stoken%s (input hidden): ' "$BLUE" "$R"
+        } > /dev/tty
+        read -rs CF_Token < /dev/tty || CF_Token=""
+        printf '\n' > /dev/tty
+    fi
+    [[ -n "$CF_Token" ]] || { warn "no Cloudflare token entered, skipping real SSL."; return 1; }
+    export CF_Token
+
+    msg "Verifying the token with Cloudflare"
+    # The binary makes the API call: no jq on a minimal box, and a token passed in
+    # the environment stays out of /proc/<pid>/cmdline, which is world-readable.
+    # Cloudflare's own refusal ("Invalid API Token") is printed on its stderr.
+    local verdict=""
+    if ! verdict="$("$BIN" cf verify)"; then
+        warn "Cloudflare did not accept that token. Check the two permissions above, and that it has not expired."
+        CF_Token=""
+        return 1
+    fi
+    ok "$verdict"
+}
+
+# Choose which domain the certificate is for: pick a zone the token can see, then
+# a single host or a wildcard. Sets DOMAIN (the certificate's main name) and
+# WILDCARD_SAN. A preset DOMAIN wins: an operator who already named the host is not
+# asked to pick it out of a list.
+ssl_cf_domain() {
+    local wildcard=""
+    case "$DEPLOY_WILDCARD" in yes|true|1) wildcard="1" ;; esac
+
+    if [[ -n "$DOMAIN" ]]; then
+        act "using the preset domain ${TEAL}${DOMAIN}${R}"
+        if [[ -n "$wildcard" ]]; then
+            WILDCARD_SAN="*.${DOMAIN}"
+        fi
+        return 0
+    fi
+    [[ -r /dev/tty ]] || { warn "no domain (set DEPLOY_DOMAIN=...), skipping real SSL."; return 1; }
+
+    msg "Reading the domains this token can see"
+    local zones=""
+    if ! zones="$("$BIN" cf zones)"; then
+        warn "could not list the token's domains. It needs 'Zone : Zone : Read' on at least one zone."
+        return 1
+    fi
+
+    local -a names=() states=()
+    local zname zstate
+    while IFS=$'\t' read -r zname zstate; do
+        [[ -n "$zname" ]] || continue
+        names+=("$zname")
+        states+=("$zstate")
+    done <<< "$zones"
+    (( ${#names[@]} > 0 )) || { warn "that token can see no domains."; return 1; }
+
+    local idx=0
+    if (( ${#names[@]} == 1 )); then
+        act "one domain on this token: ${TEAL}${names[0]}${R}"
+    else
+        local i
+        {
+            printf '%s::%s %sDomains on this Cloudflare token%s\n' "$B$BLUE" "$R" "$WHITE" "$R"
+            for i in "${!names[@]}"; do
+                if [[ "${states[$i]}" == "active" ]]; then
+                    printf '    %s%d)%s %s\n' "$GREEN" "$(( i + 1 ))" "$R" "${names[$i]}"
+                else
+                    printf '    %s%d)%s %s %s(%s)%s\n' "$GREEN" "$(( i + 1 ))" "$R" "${names[$i]}" \
+                        "$D" "${states[$i]}" "$R"
+                fi
+            done
+            printf '  choose [1-%d]: ' "${#names[@]}"
+        } > /dev/tty
+        local pick=""
+        read -r pick < /dev/tty || pick=""
+        if ! [[ "$pick" =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#names[@]} )); then
+            warn "'${pick}' is not one of the listed domains, skipping real SSL."
+            return 1
+        fi
+        idx=$(( pick - 1 ))
+    fi
+    DOMAIN="${names[$idx]}"
+    # A zone Cloudflare has not activated yet is not answering DNS for that name, so
+    # the challenge could never validate. Say so now rather than after the timeout.
+    if [[ "${states[$idx]}" != "active" ]]; then
+        warn "Cloudflare reports ${DOMAIN} as '${states[$idx]}', not active: its nameservers are not delegated to Cloudflare yet, so the DNS challenge will fail."
+    fi
+
+    # Scope. A wildcard is DNS-01 only (Let's Encrypt does not validate *.example.com
+    # over HTTP), which is why the option lives on this path and not the manual one.
+    if [[ -z "$wildcard" ]]; then
+        {
+            printf '%s::%s %sCertificate for %s%s\n' "$B$BLUE" "$R" "$WHITE" "$DOMAIN" "$R"
+            printf '    %s1)%s Subdomain  (e.g. panel.%s) %s[default]%s\n' "$GREEN" "$R" "$DOMAIN" "$D" "$R"
+            printf '    %s2)%s Wildcard   (*.%s, and %s itself)\n' "$GREEN" "$R" "$DOMAIN" "$DOMAIN"
+            printf '  choose [1/2]: '
+        } > /dev/tty
+        local scope=""
+        read -r scope < /dev/tty || scope=""
+        if [[ "$scope" == "2" ]]; then
+            wildcard="1"
+        fi
+    fi
+
+    if [[ -n "$wildcard" ]]; then
+        # The apex goes FIRST because acme.sh names the certificate directory after
+        # the first -d: leading with the wildcard would put a glob character in every
+        # path, and --install-cert would have to be passed "*.example.com" too.
+        WILDCARD_SAN="*.${DOMAIN}"
+        act "certificate will cover ${TEAL}${DOMAIN}${R} and ${TEAL}*.${DOMAIN}${R}"
+        return 0
+    fi
+
+    printf '  %ssubdomain%s (the label before .%s, blank for %s itself): ' \
+        "$BLUE" "$R" "$DOMAIN" "$DOMAIN" > /dev/tty
+    local label=""
+    read -r label < /dev/tty || label=""
+    [[ -n "$label" ]] || return 0
+    if ! [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+        warn "'${label}' is not a valid host name, skipping real SSL."
+        return 1
+    fi
+    # Accept the full host as readily as the bare label: "panel" and
+    # "panel.example.com" are the same request typed two ways.
+    case "$label" in
+        "$DOMAIN"|*".$DOMAIN") DOMAIN="$label" ;;
+        *)                     DOMAIN="${label}.${DOMAIN}" ;;
+    esac
+    act "certificate will cover ${TEAL}${DOMAIN}${R}"
+}
+
+# Put acme.sh's Cloudflare hook on disk, given the acme.sh being used. acme.sh 3.1.4
+# does NOT fetch a missing dnsapi plugin: without dns_cf.sh it prints "Cannot find
+# DNS API hook" and asks the operator to add the TXT record by hand, which is no
+# automation at all. A fresh --install copies the bundled hook in from the scratch
+# directory; this covers the other case, an acme.sh that was already on the box
+# before vpn-ui.
+ssl_ensure_dns_cf_hook() {
+    # $HOME/.acme.sh is acme.sh's LE_WORKING_DIR, which its _findHook searches;
+    # prefer it over the script's own directory, which for a distro-packaged client
+    # is /usr/bin and not somewhere plugins belong.
+    local acme_home="$HOME/.acme.sh"
+    [[ -d "$acme_home" ]] || acme_home="$(dirname "$1")"
+    [[ -s "$acme_home/dnsapi/dns_cf.sh" ]] && return 0
+
+    local hookdir; hookdir="$(mktemp -d)"
+    if "$BIN" install-acme "$hookdir/acme.sh" >/dev/null 2>&1 && [[ -s "$hookdir/dnsapi/dns_cf.sh" ]]; then
+        install -d -m 0755 "$acme_home/dnsapi"
+        install -m 0755 "$hookdir/dnsapi/dns_cf.sh" "$acme_home/dnsapi/dns_cf.sh"
+    fi
+    rm -rf "$hookdir"
+
+    [[ -s "$acme_home/dnsapi/dns_cf.sh" ]] || {
+        warn "acme.sh's Cloudflare DNS hook is missing and could not be installed, skipping real SSL."
+        return 1
+    }
+}
+
+# Obtain a REAL certificate (Let's Encrypt via acme.sh) and point the panel's HTTPS
+# at it. Two ways to prove control of the domain:
+#
+#   cloudflare: DNS-01 through the Cloudflare API. Needs an API token, nothing else.
+#               The domain does not have to resolve here and :80 stays free, and it
+#               is the only way to get a wildcard certificate.
+#   manual:     standalone HTTP-01, the original flow. Needs a public DNS A record
+#               for $DOMAIN pointing at this host and TCP :80 free during issuance.
+#
+# The same cert files can be reused for SSTP so stock Windows trusts it. Best-effort:
+# on any failure it warns and leaves the panel's current TLS untouched (returns
+# non-zero). Callers guard with `|| ...` so set -e is suspended inside; unguarded
+# failures won't abort deploy.
 obtain_letsencrypt_cert() {
-    if [[ -z "$DOMAIN" && -r /dev/tty ]]; then
+    # The challenge is chosen FIRST because it decides what has to be asked for: a
+    # token and a zone, or a domain that already points at this box. Presets win, so
+    # an unattended DEPLOY_DOMAIN install behaves exactly as it always has.
+    case "$SSL_METHOD" in
+        cloudflare|manual) ;;
+        *)
+            if [[ -n "$CF_Token" ]]; then
+                SSL_METHOD="cloudflare"
+            elif [[ -n "$DOMAIN" || ! -r /dev/tty ]]; then
+                SSL_METHOD="manual"
+            else
+                {
+                    printf '%s::%s %sDomain validation%s\n' "$B$BLUE" "$R" "$WHITE" "$R"
+                    printf '    %s1)%s Cloudflare API token  (DNS-01: automatic, no port needed, allows a wildcard)\n' "$GREEN" "$R"
+                    printf '    %s2)%s Manual                (HTTP-01: the domain must already point here, TCP :80 free) %s[default]%s\n' "$GREEN" "$R" "$D" "$R"
+                    printf '  choose [1/2]: '
+                } > /dev/tty
+                local how=""
+                read -r how < /dev/tty || how=""
+                case "$how" in
+                    1) SSL_METHOD="cloudflare" ;;
+                    *) SSL_METHOD="manual" ;;
+                esac
+            fi
+            ;;
+    esac
+
+    if [[ "$SSL_METHOD" == "cloudflare" ]]; then
+        ssl_cf_token  || return 1
+        ssl_cf_domain || return 1
+    elif [[ -z "$DOMAIN" && -r /dev/tty ]]; then
         printf '  %sdomain%s (DNS A record must point here): ' "$BLUE" "$R" > /dev/tty
         read -r DOMAIN < /dev/tty || DOMAIN=""
     fi
@@ -116,8 +343,10 @@ obtain_letsencrypt_cert() {
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || \
         { warn "need curl or wget for acme.sh, skipping real SSL."; return 1; }
 
-    # acme.sh standalone binds :80. Warn (don't fail) if it's already taken.
-    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ':80$'; then
+    # acme.sh standalone binds :80. Warn (don't fail) if it's already taken. The
+    # DNS-01 path never touches the port, so the warning would only mislead there.
+    if [[ "$SSL_METHOD" == "manual" ]] && command -v ss >/dev/null 2>&1 && \
+       ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ':80$'; then
         warn "TCP :80 is in use, acme.sh standalone may fail to bind it."
     fi
 
@@ -129,7 +358,11 @@ obtain_letsencrypt_cert() {
     # installs both cross-distro (see EnsureAcmeDeps). No-op when already present;
     # best-effort, since --install --force below still issues without cron (only
     # auto-renew is lost). Guarded so a failure never aborts under the caller's set -e.
-    msg "Ensuring acme.sh dependencies (cron + standalone server)"
+    if [[ "$SSL_METHOD" == "cloudflare" ]]; then
+        msg "Ensuring acme.sh dependencies (cron, for unattended renewal)"
+    else
+        msg "Ensuring acme.sh dependencies (cron + standalone server)"
+    fi
     "$BIN" acme-deps 2>&1 | sed 's/^/  /' || true
 
     local ACME="$HOME/.acme.sh/acme.sh"
@@ -174,9 +407,25 @@ obtain_letsencrypt_cert() {
 
     "$ACME" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
 
-    msg "Issuing Let's Encrypt certificate for ${DOMAIN} (standalone HTTP-01)"
+    # One issuance, two challenges. $DOMAIN is always the FIRST -d, which is the name
+    # acme.sh calls the certificate: everything below (the fullchain check, the
+    # --install-cert) addresses the certificate by it, wildcard or not.
+    local -a issue_args=(--issue -d "$DOMAIN")
+    local challenge="standalone HTTP-01"
+    if [[ "$SSL_METHOD" == "cloudflare" ]]; then
+        ssl_ensure_dns_cf_hook "$ACME" || return 1
+        if [[ -n "$WILDCARD_SAN" ]]; then
+            issue_args+=(-d "$WILDCARD_SAN")
+        fi
+        issue_args+=(--dns dns_cf)
+        challenge="Cloudflare DNS-01"
+    else
+        issue_args+=(--standalone)
+    fi
+
+    msg "Issuing Let's Encrypt certificate for ${DOMAIN}${WILDCARD_SAN:+ + $WILDCARD_SAN} (${challenge})"
     # RSA-2048 for the widest client trust (legacy Windows SSTP included).
-    if ! "$ACME" --issue -d "$DOMAIN" --standalone --keylength 2048; then
+    if ! "$ACME" "${issue_args[@]}" --keylength 2048; then
         # acme returns non-zero for two very different reasons and only one is fatal:
         #   - an existing cert is still valid ("skip") -> a real chain IS on disk, proceed;
         #   - issuance FAILED, e.g. the HTTP-01 check timed out because Let's Encrypt
@@ -189,7 +438,11 @@ obtain_letsencrypt_cert() {
         # key in $CERT_DIR.
         if [[ ! -s "$HOME/.acme.sh/${DOMAIN}/fullchain.cer" && ! -s "$HOME/.acme.sh/${DOMAIN}_ecc/fullchain.cer" ]]; then
             warn "acme.sh could not issue a certificate for ${DOMAIN}."
-            warn "Let's Encrypt validates over HTTP: ${DOMAIN} must resolve to THIS server's public IP and TCP :80 must be reachable from the internet (not firewalled, not behind a proxy/CDN for a different host). The panel's TLS was left unchanged."
+            if [[ "$SSL_METHOD" == "cloudflare" ]]; then
+                warn "Let's Encrypt validated over DNS: the token needs 'Zone : DNS : Edit' on ${DOMAIN} (not only on another zone), and the zone must be active in Cloudflare, meaning its nameservers are delegated there. The panel's TLS was left unchanged."
+            else
+                warn "Let's Encrypt validates over HTTP: ${DOMAIN} must resolve to THIS server's public IP and TCP :80 must be reachable from the internet (not firewalled, not behind a proxy/CDN for a different host). The panel's TLS was left unchanged."
+            fi
             return 1
         fi
     fi
@@ -212,7 +465,7 @@ obtain_letsencrypt_cert() {
     # Point the panel's web server (and subscription server) at the real cert.
     "$BIN" cert -webCert "$CERT_DIR/fullchain.pem" -webCertKey "$CERT_DIR/privkey.pem" >/dev/null 2>&1 \
         || { warn "applying cert to panel failed."; return 1; }
-    ok "real certificate installed for ${DOMAIN}"
+    ok "real certificate installed for ${DOMAIN}${WILDCARD_SAN:+ + $WILDCARD_SAN}"
     return 0
 }
 
@@ -449,7 +702,13 @@ usage: ${0##*/}            open the management menu
        ${0##*/} --help     this message
 
 environment:
-  VPNUI_BIN   path to the panel binary (default: /opt/vpn-ui/vpn-ui-amd64)
+  VPNUI_BIN         path to the panel binary (default: /opt/vpn-ui/vpn-ui-amd64)
+  DEPLOY_DOMAIN     domain to issue the certificate for (skips the prompt)
+  DEPLOY_EMAIL      Let's Encrypt account email (optional)
+  DEPLOY_CF_TOKEN   Cloudflare API token: validates over DNS-01 instead of HTTP-01.
+                    Needs 'Zone : Zone : Read' + 'Zone : DNS : Edit'. Without a
+                    DEPLOY_DOMAIN the token's domains are offered as a list.
+  DEPLOY_WILDCARD   1 issues *.DOMAIN alongside DOMAIN (Cloudflare token only)
 EOF
 }
 

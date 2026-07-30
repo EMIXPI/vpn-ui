@@ -66,20 +66,39 @@
         <div :style="{ marginBottom: '4px', color: '#888' }">IPsec pre-shared key</div>
         <a-input :value="peer.ipsecPsk" read-only @click="copy(peer.ipsecPsk)"></a-input>
       </a-form-item>
+      <!-- One section per platform rather than a single blob: the customer runs exactly one
+           of them, and RouterOS syntax pasted into a shell (or the reverse) fails in ways
+           that look like the tunnel is broken. -->
       <div :style="{ marginBottom: '4px', color: '#888' }">
-        Router setup (click to copy)
+        MikroTik RouterOS setup (click to copy)
       </div>
       <a-textarea
-        :value="peer.config"
+        :value="peer.configMikrotik"
         read-only
         :auto-size="{ minRows: 6, maxRows: 22 }"
-        @click="copy(peer.config)"
+        @click="copy(peer.configMikrotik)"
         :style="{ fontFamily: 'monospace', fontSize: '12px' }"
       ></a-textarea>
       <a-button
         type="primary"
         :style="{ marginTop: '8px' }"
-        @click="download(peer, index)"
+        @click="download(peer, 'mikrotik')"
+      >Download .txt</a-button>
+
+      <div :style="{ margin: '16px 0 4px', color: '#888' }">
+        Linux setup (click to copy)
+      </div>
+      <a-textarea
+        :value="peer.configLinux"
+        read-only
+        :auto-size="{ minRows: 6, maxRows: 22 }"
+        @click="copy(peer.configLinux)"
+        :style="{ fontFamily: 'monospace', fontSize: '12px' }"
+      ></a-textarea>
+      <a-button
+        type="primary"
+        :style="{ marginTop: '8px' }"
+        @click="download(peer, 'linux')"
       >Download .txt</a-button>
     </div>
     {{ template "component/aSubBlock" "gre" }}
@@ -158,11 +177,14 @@
           app.$message.success('{{ i18n "copied" }}');
         });
       },
-      download(peer, index) {
+      // platform is 'mikrotik' or 'linux': one file per recipe, matching the two sections.
+      download(peer, platform) {
+        const text = platform === 'linux' ? peer.configLinux : peer.configMikrotik;
+        if (!text) return;
         const base = greConfigModal.email || 'client';
         const suffix = greConfigModal.peers.length > 1 ? '-peer' + (peer.peerIndex + 1) : '';
-        const name = base + suffix + '-gre.txt';
-        const blob = new Blob([peer.config], { type: 'text/plain;charset=utf-8' });
+        const name = base + suffix + '-gre-' + platform + '.txt';
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;

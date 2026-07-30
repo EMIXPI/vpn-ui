@@ -354,9 +354,23 @@
       </div>
       <div class="bo-divider"></div>
       <div class="bo-btn-row">
-        <button type="button" class="bo-icon-btn" v-if="ipLimitEnable" @click="openXrayLogs()">
+        <!-- Xray's own output, the same source Core Settings reads. This tile's log
+             button used to open the ACCESS log instead, which the shipped template
+             disables ("access": "none"), so the one button on the Xray tile answered
+             with an empty modal on every default install. -->
+        {{ if .perms.accessCoreSettings }}
+        <button type="button" class="bo-icon-btn" @click="openCoreLogs('xray')">
           <svg class="bo-icon bo-icon-16" aria-hidden="true"><use href="#bo-i-file"></use></svg>{{ i18n "pages.index.logs" }}
         </button>
+        {{ end }}
+        <!-- The access log is a different thing: per-connection rows with Direct /
+             Blocked filters. Gated on whether that file is actually being written,
+             not on ipLimitEnable, which is now an unconditional true. -->
+        {{ if .perms.superAdmin }}
+        <button type="button" class="bo-icon-btn" v-if="xrayAccessLogEnable" @click="openXrayLogs()">
+          <svg class="bo-icon bo-icon-16" aria-hidden="true"><use href="#bo-i-file"></use></svg>{{ i18n "pages.xray.accessLog" }}
+        </button>
+        {{ end }}
         <button type="button" class="bo-icon-btn bo-icon-btn--danger" @click="stopXrayService">
           <svg class="bo-icon bo-icon-16" aria-hidden="true"><use href="#bo-i-stop"></use></svg>{{ i18n "pages.index.stopXray" }}
         </button>
@@ -451,6 +465,19 @@
           <button type="button" class="bo-btn bo-btn--primary"
             v-if="panelUpdate.available && !panelUpdate.updating"
             @click="openUpdateModal">{{ i18n "pages.index.updateNow" }}</button>
+          <!-- Update from a local file. Offered whether or not the release check
+               found anything: its whole point is the box that cannot reach GitHub,
+               where the check is exactly what fails. The input is hidden and driven
+               by the button so the tile keeps its own styling. -->
+          {{ if .perms.superAdmin }}
+          <button type="button" class="bo-btn bo-btn--ghost bo-btn--icon"
+            v-if="!panelUpdate.updating" @click="pickPanelBinary">
+            <svg class="bo-icon bo-icon-14" aria-hidden="true"><use href="#bo-i-download"></use></svg>
+            {{ i18n "pages.index.updateFromFile" }}
+          </button>
+          <input type="file" ref="panelBinaryInput" :style="{ display: 'none' }"
+            @change="onPanelBinaryPicked">
+          {{ end }}
           <!-- Always offered, unlike Update Now: it is the one action on this
                tile that does not depend on the release check having run. -->
           <button type="button" class="bo-btn bo-btn--ghost bo-btn--icon"
@@ -491,6 +518,45 @@
       <svg class="bo-icon bo-icon-14" aria-hidden="true"><use href="#bo-i-info"></use></svg>
       {{ i18n "pages.index.updateModalIntro" }}
     </p>
+  </a-modal>
+
+  <!-- Update-from-file confirmation. Opens only after the server has read the
+       uploaded binary, so both versions here came out of the file rather than off
+       its name. A DOWNGRADE has to be typed out before OK arms, and then confirmed
+       once more: two deliberate acts, not the same click twice. -->
+  <a-modal id="panel-upload-modal" v-model="uploadModal.visible"
+    title='{{ i18n "pages.index.updateFromFile" }}' :closable="true"
+    :class="themeSwitcher.currentTheme"
+    :ok-text='uploadModal.info.direction === "downgrade"
+      ? "{{ i18n "pages.index.updateDowngradeNow" }}"
+      : "{{ i18n "pages.index.updateNow" }}"'
+    cancel-text='{{ i18n "cancel" }}'
+    :ok-button-props="{ props: { disabled: !uploadOkArmed, type: uploadModal.info.direction === 'downgrade' ? 'danger' : 'primary' } }"
+    @cancel="cancelPanelUpload" @ok="confirmPanelUpload">
+    <div class="bo-relnotes-head">
+      <span class="bo-relnotes-ver num">v[[ uploadModal.info.current ]]</span>
+      <svg class="bo-icon bo-icon-14" aria-hidden="true"><use href="#bo-i-swap"></use></svg>
+      <span class="bo-relnotes-ver bo-relnotes-ver--new num">v[[ uploadModal.info.new ]]</span>
+    </div>
+    <a-alert v-if="uploadModal.info.direction === 'downgrade'" type="warning" show-icon
+      :style="{ marginTop: '12px' }"
+      message='{{ i18n "pages.index.updateDowngradeTitle" }}'
+      description='{{ i18n "pages.index.updateDowngradeBody" }}'></a-alert>
+    <a-alert v-else-if="uploadModal.info.direction === 'same'" type="info" show-icon
+      :style="{ marginTop: '12px' }"
+      message='{{ i18n "pages.index.updateSameVersion" }}'></a-alert>
+    <a-alert v-else-if="uploadModal.info.direction === 'unknown'" type="warning" show-icon
+      :style="{ marginTop: '12px' }"
+      message='{{ i18n "pages.index.updateUnknownVersion" }}'></a-alert>
+    <p v-else :style="{ marginTop: '12px' }">{{ i18n "pages.index.updateModalIntro" }}</p>
+    <!-- Typing the version is the first of the two confirmations, and the reason the
+         second one is not just the same click again. -->
+    <div v-if="uploadModal.info.direction === 'downgrade'" :style="{ marginTop: '12px' }">
+      <div :style="{ marginBottom: '4px', color: 'var(--text-3)' }">
+        {{ i18n "pages.index.updateDowngradeConfirmLabel" }} <span class="num">v[[ uploadModal.info.new ]]</span>
+      </div>
+      <a-input v-model.trim="uploadModal.typed" :placeholder="uploadModal.info.new"></a-input>
+    </div>
   </a-modal>
 
   <!-- Post-update confirmation. Shown once, on the first overview load after the
@@ -1303,10 +1369,13 @@
     level: 'info',
     syslog: false,
     loading: false,
-    // 'panel' is the Xray tile's button (panel log only), 'all' is the Manage
-    // tile's (panel plus every core). The modal's own controls re-run whichever
-    // one opened it, so changing the row count cannot silently switch views.
+    // 'panel' is the Xray error popover (panel log only), 'core' is one named
+    // core's own output (the Xray tile's log button), 'all' is the Manage tile's
+    // (panel plus every core). The modal's own controls re-run whichever one
+    // opened it, so changing the row count cannot silently switch views.
     mode: 'panel',
+    // Which core 'core' mode is showing, so a reload asks for the same one.
+    coreName: '',
     // Plain-text mirror of what is on screen, for the download button. The
     // rendered copy is HTML and the aggregated view has no `logs` array.
     plain: '',
@@ -1373,6 +1442,15 @@
       this.mode = 'all';
       this.logs = [];
       this.render((sections || []).map((s) => ({ source: s.name, text: s.text })));
+    },
+    // A single core's output, badged with its name so it reads the same as the
+    // aggregated view and the download button still has plain text to hand over.
+    showCore(name, text) {
+      this.visible = true;
+      this.mode = 'core';
+      this.coreName = name;
+      this.logs = [];
+      this.render([{ source: name, text: text || '' }]);
     },
     hide() {
       this.visible = false;
@@ -1513,6 +1591,9 @@
       showAlert: false,
       showIp: false,
       ipLimitEnable: false,
+      // Starts false so the access-log button cannot flash on and then vanish
+      // for the common case, which is that the log is off.
+      xrayAccessLogEnable: false,
       customGeoColumns,
       customGeoList: [],
       customGeoLoading: false,
@@ -1534,6 +1615,10 @@
       },
       coreStatuses: [],
       panelUpdate: { checking: false, checked: false, available: false, latest: '', current: '', notes: '', publishedAt: '', url: '', updating: false, cancelling: false, error: '', percent: 0, phase: '', speed: 0, bytes: 0, total: 0 },
+      // Update from a local file. `info` is what the SERVER read out of the uploaded
+      // binary, never anything derived from the filename; `typed` is the downgrade
+      // confirmation the operator has to spell out.
+      uploadModal: { visible: false, typed: '', info: { token: '', current: '', new: '', direction: '', size: 0 } },
       // Panel egress location, checked when the overview opens (see
       // fetchPanelLocation). `checked` is what lets the row distinguish "still
       // looking" from "looked and failed".
@@ -1690,6 +1775,15 @@
       releaseDateText() {
         const d = this.panelUpdate.publishedAt ? new Date(this.panelUpdate.publishedAt) : null;
         return d && !isNaN(d.getTime()) ? d.toLocaleDateString() : '';
+      },
+      // A downgrade has to be spelled out before OK arms. Every other direction is a
+      // plain confirmation, because installing a newer or identical build is not the
+      // move that needs slowing down.
+      uploadOkArmed() {
+        if (this.uploadModal.info.direction !== 'downgrade') return true;
+        const want = String(this.uploadModal.info.new || '').replace(/^v/, '');
+        const typed = String(this.uploadModal.typed || '').replace(/^v/, '');
+        return want !== '' && typed === want;
       },
       cpuLine() {
         const s = this.status;
@@ -1933,7 +2027,26 @@
       // quiet=true is the live tail's refresh: same request, but no spinner and
       // the scroll position is preserved unless the reader is following the end.
       reloadLogs(quiet) {
-        return logModal.mode === 'all' ? this.openAllLogs(quiet) : this.openLogs(quiet);
+        if (logModal.mode === 'all') return this.openAllLogs(quiet);
+        if (logModal.mode === 'core') return this.openCoreLogs(logModal.coreName, quiet);
+        return this.openLogs(quiet);
+      },
+      // One core's log, the same endpoint and therefore the same content Core
+      // Settings shows for it. Kept separate from openAllLogs so the Xray tile
+      // does not have to fan out to every daemon to answer for one.
+      async openCoreLogs(name, quiet) {
+        if (!name) return;
+        if (!quiet) logModal.loading = true;
+        try {
+          const msg = await HttpUtil.get('/panel/core/logs/' + encodeURIComponent(name));
+          if (!msg || !msg.success) return;
+          LiveLog.keepPinned('#log-modal .log-container',
+            () => logModal.showCore(name, msg.obj || ''));
+        } finally {
+          // In a finally so a failed fetch cannot leave the title spinner
+          // running forever with the modal already open.
+          if (!quiet) logModal.loading = false;
+        }
       },
       async openAllLogs(live) {
         // The Manage tile's log button aggregates the panel log and every
@@ -2185,13 +2298,159 @@
         this.panelUpdate.bytes = 0;
         this.panelUpdate.total = 0;
       },
+      // --- update from a local file -------------------------------------
+      pickPanelBinary() {
+        const el = this.$refs.panelBinaryInput;
+        if (!el) return;
+        // Cleared first so choosing the SAME file twice still fires change: the
+        // second pick of an identical value is not a change event otherwise, and the
+        // button would look dead after a failed upload.
+        el.value = '';
+        el.click();
+      },
+      async onPanelBinaryPicked(e) {
+        const file = e && e.target && e.target.files && e.target.files[0];
+        if (!file) return;
+        await this.uploadPanelBinary(file);
+      },
+      // Upload and INSPECT. Nothing is installed here: the answer is the pair of
+      // versions the confirmation is built on.
+      async uploadPanelBinary(file) {
+        this.panelUpdate.updating = true;
+        this.panelUpdate.cancelling = false;
+        this.panelUpdate.error = '';
+        this.panelUpdate.percent = 0;
+        this.panelUpdate.phase = 'uploading';
+        this.panelUpdate.speed = 0;
+        this.panelUpdate.bytes = 0;
+        this.panelUpdate.total = file.size || 0;
+
+        const body = new FormData();
+        // Field name must match what the handler streams: it walks the parts and takes
+        // the one called "binary".
+        body.append('binary', file);
+        // Speed is measured here rather than server-side: the browser is the end that
+        // knows how many bytes it has actually put on the wire. Smoothed the way the
+        // server smooths its download rate (see progressReader.sampleSpeed: 500ms
+        // samples, EMA alpha 0.3), because raw per-event deltas swing between zero and
+        // multiples of the true rate and are unreadable.
+        let lastAt = Date.now();
+        let lastLoaded = 0;
+        try {
+          const res = await axios.post('/panel/api/server/uploadPanelBinary', body, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (p) => {
+              const total = p.total || file.size || 0;
+              this.panelUpdate.bytes = p.loaded;
+              this.panelUpdate.total = total;
+              this.panelUpdate.percent = total ? Math.min(99, Math.floor(p.loaded * 99 / total)) : 0;
+              // The bytes are flushed but the server is still checking the file, which
+              // takes a moment on a 300MB upload it has to exec. Still saying
+              // "uploading" through that reads as a stall.
+              if (total && p.loaded >= total) {
+                this.panelUpdate.phase = 'checking';
+                this.panelUpdate.speed = 0;
+                return;
+              }
+              const now = Date.now();
+              const dt = (now - lastAt) / 1000;
+              if (dt >= 0.5) {
+                const bps = (p.loaded - lastLoaded) / dt;
+                this.panelUpdate.speed = this.panelUpdate.speed > 0
+                  ? 0.3 * bps + 0.7 * this.panelUpdate.speed
+                  : bps;
+                lastAt = now;
+                lastLoaded = p.loaded;
+              }
+            },
+          });
+          const msg = res && res.data;
+          if (!msg || !msg.success) {
+            // resetPanelUpdate clears `error`, so the reason is set after it.
+            this.resetPanelUpdate();
+            this.panelUpdate.error = (msg && msg.msg) || 'upload failed';
+            return;
+          }
+          this.uploadModal.info = msg.obj || { token: '', current: '', new: '', direction: '' };
+          this.uploadModal.typed = '';
+          this.uploadModal.visible = true;
+          // The bar stays up behind the dialog: the file IS on the server now, and
+          // backing out is what removes it again.
+          this.panelUpdate.percent = 100;
+          this.panelUpdate.speed = 0;
+          this.panelUpdate.phase = 'staged';
+        } catch (err) {
+          this.resetPanelUpdate();
+          this.panelUpdate.error = '' + err;
+        }
+      },
+      // Backing out deletes the staged file rather than leaving a stranger's binary
+      // sitting next to the running one.
+      async cancelPanelUpload() {
+        this.uploadModal.visible = false;
+        this.uploadModal.typed = '';
+        this.resetPanelUpdate();
+        try { await HttpUtil.post('/panel/api/server/discardPanelBinary'); } catch (e) { /* nothing staged */ }
+      },
+      confirmPanelUpload() {
+        if (!this.uploadOkArmed) return;
+        // Second confirmation, and only for a downgrade. The first was typing the
+        // version out; this one states the consequence in one line.
+        if (this.uploadModal.info.direction === 'downgrade') {
+          const to = this.uploadModal.info.new;
+          const from = this.uploadModal.info.current;
+          this.$confirm({
+            title: '{{ i18n "pages.index.updateDowngradeTitle" }}',
+            content: '{{ i18n "pages.index.updateDowngradeFinal" }}'
+              .replace('%FROM%', 'v' + from).replace('%TO%', 'v' + to),
+            okText: '{{ i18n "pages.index.updateDowngradeNow" }}',
+            okType: 'danger',
+            cancelText: '{{ i18n "cancel" }}',
+            class: themeSwitcher.currentTheme,
+            onOk: () => { this.uploadModal.visible = false; this.applyPanelBinary(); },
+          });
+          return;
+        }
+        this.uploadModal.visible = false;
+        this.applyPanelBinary();
+      },
+      // Install the staged binary. From here it is the download updater's ending:
+      // same swap, same rollback copy, same restart, so the same "restarting" hold
+      // and page reload apply.
+      async applyPanelBinary() {
+        this.panelUpdate.updating = true;
+        this.panelUpdate.phase = 'installing';
+        this.panelUpdate.percent = 99;
+        this.panelUpdate.speed = 0;
+        try {
+          // The token names the exact file inspection measured, so this can only
+          // install the binary the confirmation was actually about.
+          const msg = await HttpUtil.post('/panel/api/server/applyPanelBinary',
+            { token: this.uploadModal.info.token || '' });
+          if (!msg || !msg.success) {
+            this.resetPanelUpdate();
+            this.panelUpdate.error = (msg && msg.msg) || 'update failed';
+            return;
+          }
+          this.panelUpdate.phase = 'restarting';
+          this.panelUpdate.percent = 100;
+          setTimeout(() => location.reload(), 9000);
+        } catch (e) {
+          this.resetPanelUpdate();
+          this.panelUpdate.error = '' + e;
+        }
+      },
       // Download rate, shown only while bytes are actually moving.
       panelUpdateSpeedText() {
-        if (this.panelUpdate.phase !== 'downloading' || !this.panelUpdate.speed) return '';
+        if (!this.panelUpdate.speed) return '';
+        if (this.panelUpdate.phase !== 'downloading' && this.panelUpdate.phase !== 'uploading') return '';
         return SizeFormatter.sizeFormat(this.panelUpdate.speed) + '/s';
       },
       panelUpdatePhaseText() {
         const map = {
+          uploading: '{{ i18n "pages.index.updateUploading" }}',
+          checking: '{{ i18n "pages.index.updateChecking" }}',
+          staged: '{{ i18n "pages.index.updateStaged" }}',
           downloading: '{{ i18n "pages.index.updateDownloading" }}',
           installing: '{{ i18n "pages.index.updateInstalling" }}',
           restarting: '{{ i18n "pages.index.updateRestarting" }}',
@@ -2240,7 +2499,7 @@
         return { running: '#52c41a', idle: '#1890ff', stopped: '#faad14', not_installed: '#8c8c8c', error: '#f5222d' }[state] || '#8c8c8c';
       },
       coreStateText(state) {
-        return { running: 'Running', idle: 'Idle', stopped: 'Stopped', not_installed: 'Not installed', error: 'Error', unknown: '—' }[state] || state;
+        return { running: 'Running', idle: 'Idle', stopped: 'Stopped', not_installed: 'Not installed', error: 'Error', unknown: '-' }[state] || state;
       },
       openGeofiles() {
         this.geofilesModal.visible = true;
@@ -2510,28 +2769,32 @@
           return;
         }
       },
+      // The spinner reset sits in a finally in both of these: an early return on a
+      // failed fetch used to leave the title spinner turning forever.
       async openLogs(quiet) {
         if (!quiet) logModal.loading = true;
-        const msg = await HttpUtil.post('/panel/api/server/logs/' + logModal.rows, { level: logModal.level, syslog: logModal.syslog });
-        if (!msg.success) {
-          return;
-        }
-        LiveLog.keepPinned('#log-modal .log-container', () => logModal.show(msg.obj));
-        if (!quiet) {
-          await PromiseUtil.sleep(500);
-          logModal.loading = false;
+        try {
+          const msg = await HttpUtil.post('/panel/api/server/logs/' + logModal.rows, { level: logModal.level, syslog: logModal.syslog });
+          if (!msg.success) {
+            return;
+          }
+          LiveLog.keepPinned('#log-modal .log-container', () => logModal.show(msg.obj));
+          if (!quiet) await PromiseUtil.sleep(500);
+        } finally {
+          if (!quiet) logModal.loading = false;
         }
       },
       async openXrayLogs(quiet) {
         if (!quiet) xraylogModal.loading = true;
-        const msg = await HttpUtil.post('/panel/api/server/xraylogs/' + xraylogModal.rows, { filter: xraylogModal.filter, showDirect: xraylogModal.showDirect, showBlocked: xraylogModal.showBlocked, showProxy: xraylogModal.showProxy });
-        if (!msg.success) {
-          return;
-        }
-        LiveLog.keepPinned('#xraylog-modal .log-container', () => xraylogModal.show(msg.obj));
-        if (!quiet) {
-          await PromiseUtil.sleep(500);
-          xraylogModal.loading = false;
+        try {
+          const msg = await HttpUtil.post('/panel/api/server/xraylogs/' + xraylogModal.rows, { filter: xraylogModal.filter, showDirect: xraylogModal.showDirect, showBlocked: xraylogModal.showBlocked, showProxy: xraylogModal.showProxy });
+          if (!msg.success) {
+            return;
+          }
+          LiveLog.keepPinned('#xraylog-modal .log-container', () => xraylogModal.show(msg.obj));
+          if (!quiet) await PromiseUtil.sleep(500);
+        } finally {
+          if (!quiet) xraylogModal.loading = false;
         }
       },
       downloadXrayLogs() {
@@ -2667,6 +2930,7 @@
       const msg = await HttpUtil.post('/panel/setting/defaultSettings');
       if (msg.success) {
         this.ipLimitEnable = msg.obj.ipLimitEnable;
+        this.xrayAccessLogEnable = !!msg.obj.xrayAccessLogEnable;
       }
 
       // Initial status fetch

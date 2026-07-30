@@ -433,6 +433,67 @@ func (s *InboundService) checkPortExist(listen string, port int, ignoreId int) (
 	return count > 0, nil
 }
 
+// greBookkeepingPortBase is where the search for a GRE inbound's port starts. 47 is GRE's
+// IP protocol number, so the stored numbers at least read as GRE to whoever opens the DB.
+const greBookkeepingPortBase = 47
+
+// NormalizeGrePort settles a GRE inbound's port server-side, which is why the form has no
+// port box for GRE at all. GRE is IP protocol 47: it binds nothing and has no ports, so
+// the number is pure bookkeeping. It cannot simply be dropped, because the inbound tag is
+// built from it ("inbound-<port>") and the routing rules, the paired dokodemo-door inbound
+// and the traffic rows are all keyed on that tag. The row therefore still needs a port
+// that is valid and unique, with nobody left to type one.
+//
+// On add (id == 0) a port that cannot be used, whether missing, out of range or already
+// claimed, is replaced with the lowest free one, so creating a GRE inbound can never fail
+// on a conflict the operator can neither see nor fix. On update the stored port is kept
+// whenever the request carries no usable one: renumbering an existing GRE inbound would
+// move its tag out from under everything keyed on it.
+func (s *InboundService) NormalizeGrePort(inbound *model.Inbound, id int) error {
+	if inbound == nil || inbound.Protocol != model.GRE {
+		return nil
+	}
+
+	if inbound.Port >= 1 && inbound.Port <= 65535 {
+		exist, err := s.checkPortExist(inbound.Listen, inbound.Port, id)
+		if err != nil {
+			return err
+		}
+		if !exist {
+			return nil
+		}
+	}
+
+	if id > 0 {
+		old, err := s.GetInbound(id)
+		if err != nil {
+			return err
+		}
+		inbound.Port = old.Port
+		return nil
+	}
+
+	// Every port in use, regardless of which address its inbound listens on. Stricter
+	// than checkPortExist, which lets two inbounds share a port on different addresses:
+	// a GRE port that is unique panel-wide cannot trip that check whatever Listen ends
+	// up being, and it keeps the tags unique too.
+	var used []int
+	if err := database.GetDB().Model(model.Inbound{}).Pluck("port", &used).Error; err != nil {
+		return err
+	}
+	taken := make(map[int]bool, len(used))
+	for _, port := range used {
+		taken[port] = true
+	}
+	for port := greBookkeepingPortBase; port <= 65535; port++ {
+		if !taken[port] {
+			inbound.Port = port
+			return nil
+		}
+	}
+	return common.NewError("no free port left to key a GRE inbound on")
+}
+
 func (s *InboundService) GetClients(inbound *model.Inbound) ([]model.Client, error) {
 	settings := map[string][]model.Client{}
 	json.Unmarshal([]byte(inbound.Settings), &settings)

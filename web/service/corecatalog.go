@@ -81,6 +81,15 @@ type coreSpec struct {
 	// the panel process. Those are always available and never offered for
 	// install or removal.
 	builtin bool
+
+	// usesRadius marks a core that authenticates against the in-binary RADIUS
+	// server. RADIUS ships inside the panel and has no install step of its own,
+	// so this is the only thing that decides whether it has anything on this
+	// host to serve. Deliberately NOT a feats entry: feats also drive sharersOf
+	// and the uninstall reconcile sweep, and RADIUS is never installed or
+	// removed, so listing it there would make all six consumers claim to share
+	// a requirement with each other.
+	usesRadius bool
 }
 
 // coreCatalog is ordered the way the setup dialog lists the cores: the
@@ -91,6 +100,7 @@ var coreCatalog = []coreSpec{
 	{
 		name: "l2tp", title: "L2TP", backend: "xl2tpd",
 		desc:       "L2TP/IPsec dial-in, native on Windows, macOS, iOS and Android",
+		usesRadius: true,
 		modules:    []string{"ppp_generic", "l2tp_ppp", "ppp_mppe"},
 		optModules: []string{"af_key", "esp4", "xfrm_user"},
 		daemons:    []string{"xl2tpd", "xl2tpd-control"},
@@ -104,10 +114,11 @@ var coreCatalog = []coreSpec{
 	},
 	{
 		name: "pptp", title: "PPTP", backend: "pptpd",
-		desc:    "Legacy PPTP dial-in for old clients",
-		modules: []string{"ppp_generic", "nf_conntrack_pptp", "ip_gre", "ppp_mppe"},
-		daemons: []string{"pptpd", "pptpctrl"},
-		feats:   []string{featPppd, featPptpCtrl, featKernelMods},
+		desc:       "Legacy PPTP dial-in for old clients",
+		usesRadius: true,
+		modules:    []string{"ppp_generic", "nf_conntrack_pptp", "ip_gre", "ppp_mppe"},
+		daemons:    []string{"pptpd", "pptpctrl"},
+		feats:      []string{featPppd, featPptpCtrl, featKernelMods},
 		paths: []string{
 			"/etc/pptpd.conf",
 			"/etc/ppp/pptpd-options",
@@ -115,9 +126,10 @@ var coreCatalog = []coreSpec{
 	},
 	{
 		name: "openvpn", title: "OpenVPN", backend: "OpenVPN",
-		desc:    "OpenVPN over TCP and UDP with downloadable .ovpn profiles",
-		modules: []string{"tun"},
-		daemons: []string{"openvpn"},
+		desc:       "OpenVPN over TCP and UDP with downloadable .ovpn profiles",
+		usesRadius: true,
+		modules:    []string{"tun"},
+		daemons:    []string{"openvpn"},
 		// /etc/openvpn itself is the DISTRO package's directory and is deliberately
 		// NOT listed; only what the panel creates inside it is removed. "server" is
 		// the plain subdir the panel makes, which "server-*" does not match.
@@ -125,9 +137,10 @@ var coreCatalog = []coreSpec{
 	},
 	{
 		name: "openconnect", title: "OpenConnect (cisco)", backend: "ocserv",
-		desc:    "AnyConnect-compatible TLS VPN",
-		modules: []string{"tun"},
-		daemons: []string{"ocserv", "ocserv-worker", "occtl"},
+		desc:       "AnyConnect-compatible TLS VPN",
+		usesRadius: true,
+		modules:    []string{"tun"},
+		daemons:    []string{"ocserv", "ocserv-worker", "occtl"},
 		// The config ROOT as well as the per-inbound files: a full uninstall that
 		// left /etc/ocserv behind meant a later reinstall silently re-adopted the
 		// old certificates and ocserv.conf.
@@ -136,9 +149,10 @@ var coreCatalog = []coreSpec{
 	},
 	{
 		name: "sstp", title: "SSTP", backend: "accel-ppp",
-		desc:    "Microsoft SSTP over HTTPS, native on Windows",
-		modules: []string{"ppp_generic"},
-		feats:   []string{featAccel},
+		desc:       "Microsoft SSTP over HTTPS, native on Windows",
+		usesRadius: true,
+		modules:    []string{"ppp_generic"},
+		feats:      []string{featAccel},
 		// The config ROOT as well as the per-inbound files: a glob alone leaves the
 		// directory behind once the last inbound is gone.
 		paths: []string{"/etc/vpn-ui-sstp"},
@@ -147,6 +161,7 @@ var coreCatalog = []coreSpec{
 	{
 		name: "ikev2", title: "IKEv2", backend: "strongSwan (charon)",
 		desc:       "IKEv2/IPsec, native on Windows, macOS, iOS and Android",
+		usesRadius: true,
 		optModules: []string{"af_key", "esp4", "xfrm_user"},
 		feats:      []string{featStrongswan},
 		// /etc/vpn-ui-ikev2 is deliberately NOT here. Despite the name it is the
@@ -304,6 +319,18 @@ func needsFeature(names []string, feat string) bool {
 	return false
 }
 
+// anyCoreUsesRadius reports whether any of the given cores authenticates against
+// the in-binary RADIUS server. Asked of the INSTALLED set, it is the whole of
+// "does this host have a reason to run RADIUS".
+func anyCoreUsesRadius(names []string) bool {
+	for _, c := range specsFor(names) {
+		if c.usesRadius {
+			return true
+		}
+	}
+	return false
+}
+
 // sharersOf lists the other installable cores that claim at least one feature
 // with the named core. The setup UI shows this so "removing IKEv2 will not take
 // IPsec away from L2TP" is visible before the operator commits, rather than
@@ -417,7 +444,12 @@ func (s *CoreService) inboundCountsByCore() map[string]int {
 // installedCoreNames is the set of cores this host is provisioned for, in
 // catalog order.
 func (s *CoreService) installedCoreNames() []string {
-	set := s.provisionedProtocolSet()
+	return coreNamesFromSet(s.provisionedProtocolSet())
+}
+
+// coreNamesFromSet is installedCoreNames over an already-read set, so a caller
+// that needs both the set and the list does not re-read the setting twice.
+func coreNamesFromSet(set map[string]bool) []string {
 	var out []string
 	for _, c := range coreCatalog {
 		if !c.builtin && set[c.name] {

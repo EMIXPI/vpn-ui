@@ -332,16 +332,7 @@
          own public address, and that address IS how the server tells peers apart (GRE
          carries no credentials and has no handshake to identify anyone by). -->
     <template v-if="inbound.protocol === Protocols.GRE">
-        <a-divider>GRE peer routers</a-divider>
-        <a-alert type="info" show-icon :style="{ marginBottom: '12px' }">
-            <template slot="description">
-                Enter each router's own public IP. Leave one BLANK if the customer's
-                address is dynamic or unknown: that peer is then served by the shared
-                tunnel and its return path is learned from its first packets. A fixed
-                address is slightly more efficient and needs no learning, so prefer it
-                when the customer has one.
-            </template>
-        </a-alert>
+        <a-divider></a-divider>
         <a-form-item v-for="pi in grePeerCount(inbound)" :key="'grepeer-' + pi">
             <template slot="label">
                 <a-tooltip>

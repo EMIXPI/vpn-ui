@@ -555,6 +555,34 @@ func (a *InboundController) getClientTrafficsById(c *gin.Context) {
 	jsonObj(c, clientTraffics, nil)
 }
 
+// coreMissingForProtocol refuses an inbound whose core this host is not set up for,
+// writing the response and reporting true when it did.
+//
+// The predicate is the CATALOG, not a hardcoded protocol list. The list this replaced
+// named six protocols and had never been extended, so wg-c, AmneziaWG, MTProto and GRE
+// could all be created with no core installed, and uninstalling a core left its
+// protocol just as creatable as before. Asking ProtocolNeedsSetup instead means a core
+// added later is covered by its catalog row alone, which is the contract the rest of
+// corecatalog.go already keeps. Xray-native protocols and the in-binary cores (SSH)
+// map to no core and are never gated.
+//
+// The UI guards this too; this is defense-in-depth against a direct API call.
+func coreMissingForProtocol(c *gin.Context, protocol model.Protocol) bool {
+	var coreService service.CoreService
+	if !coreService.ProtocolNeedsSetup(string(protocol)) {
+		return false
+	}
+	// Nothing set up at all, versus set up but not for this core: the operator has to
+	// run Initialize Setup in the first case and install the core in the second, so the
+	// two cannot share a message.
+	if !coreService.IsProvisioned() {
+		pureJsonMsg(c, http.StatusOK, false, I18nWeb(c, "pages.inbounds.toasts.setupRequired"))
+		return true
+	}
+	pureJsonMsg(c, http.StatusOK, false, I18nWeb(c, "pages.inbounds.toasts.setupRequiredForProtocol"))
+	return true
+}
+
 // addInbound creates a new inbound configuration.
 func (a *InboundController) addInbound(c *gin.Context) {
 	inbound := &model.Inbound{}
@@ -564,27 +592,19 @@ func (a *InboundController) addInbound(c *gin.Context) {
 		return
 	}
 
-	// VPN protocols (L2TP/PPTP/OpenVPN) require the host backend to be provisioned
-	// first (kernel modules, daemons, IPsec). Block creation with a clear message
-	// until the operator runs setup from Core Settings. The UI guards this too;
-	// this is defense-in-depth against a direct API call.
-	if inbound.Protocol == model.L2TP || inbound.Protocol == model.PPTP || inbound.Protocol == model.OPENVPN || inbound.Protocol == model.OPENCONNECT || inbound.Protocol == model.SSTP || inbound.Protocol == model.IKEV2 {
-		var coreService service.CoreService
-		if !coreService.IsProvisioned() {
-			pureJsonMsg(c, http.StatusOK, false, I18nWeb(c, "pages.inbounds.toasts.setupRequired"))
-			return
-		}
-		// Provisioned, but this protocol was added after the last setup run (an
-		// upgrade that introduced a new protocol) — its host prerequisites aren't
-		// in place yet, so require a re-run of setup for it specifically.
-		if coreService.ProtocolNeedsSetup(string(inbound.Protocol)) {
-			pureJsonMsg(c, http.StatusOK, false, I18nWeb(c, "pages.inbounds.toasts.setupRequiredForProtocol"))
-			return
-		}
+	if coreMissingForProtocol(c, inbound.Protocol) {
+		return
 	}
 
 	user := session.GetLoginUser(c)
 	inbound.UserId = user.Id
+	// A GRE inbound carries a port for bookkeeping only and the form has no box for it,
+	// so the server picks one (no-op for every other protocol). Ahead of the tag, which
+	// is built from the port.
+	if err := a.inboundService.NormalizeGrePort(inbound, 0); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
 	if inbound.Listen == "" || inbound.Listen == "0.0.0.0" || inbound.Listen == "::" || inbound.Listen == "::0" {
 		inbound.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
 	} else {
@@ -726,6 +746,20 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 	err = c.ShouldBind(inbound)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundUpdateSuccess"), err)
+		return
+	}
+	// An inbound whose core was uninstalled cannot serve anything, so it must not be
+	// edited back into service. Gated on the RESULT being enabled rather than on the
+	// edit itself: turning a stranded inbound off has to stay possible (the enable
+	// toggle posts through this same route), or the only way out would be deleting it.
+	if inbound.Enable && coreMissingForProtocol(c, inbound.Protocol) {
+		return
+	}
+	// The GRE form posts no port, so keep the one already stored: UpdateInbound rebuilds
+	// the tag from it, and renumbering would strand the routing rules keyed on the old
+	// tag (no-op for every other protocol).
+	if err := a.inboundService.NormalizeGrePort(inbound, id); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	// Assign/validate VPN client IP ranges (no-op for non-VPN protocols),
@@ -1373,9 +1407,21 @@ func (a *InboundController) importInbound(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
+	// Import is a create by another name, and it was the one path with no gate at all:
+	// an exported inbound for a core this host never installed came straight in.
+	if coreMissingForProtocol(c, inbound.Protocol) {
+		return
+	}
+
 	user := session.GetLoginUser(c)
 	inbound.Id = 0
 	inbound.UserId = user.Id
+	// An imported GRE inbound brings the exporting panel's bookkeeping port, which may
+	// already belong to something here. Re-pick it before the tag is built.
+	if err := a.inboundService.NormalizeGrePort(inbound, 0); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
 	if inbound.Listen == "" || inbound.Listen == "0.0.0.0" || inbound.Listen == "::" || inbound.Listen == "::0" {
 		inbound.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
 	} else {

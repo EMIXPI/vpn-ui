@@ -373,6 +373,15 @@
                           :style="{ display: 'block', whiteSpace: 'nowrap' }">UDP:
                           [[ dbInbound.port ]]</span>
                       </template>
+                      <!-- GRE is IP protocol 47 and binds no port. The row still carries
+                           one because the inbound tag is built from it, but the server
+                           assigns it and the form has no box for it, so printing it here
+                           would show a number the operator never chose and cannot change.
+                           Matches what the TXT/PDF export already prints. -->
+                      <a-tooltip v-else-if="dbInbound.protocol === 'gre'">
+                        <template slot="title">GRE is IP protocol 47 and has no ports</template>
+                        <span :style="{ color: '#888' }">n/a</span>
+                      </a-tooltip>
                       <template v-else>[[ dbInbound.port ]]</template>
                     </template>
                     <template slot="protocol" slot-scope="text, dbInbound">
@@ -2504,17 +2513,30 @@
           },
         });
       },
+      // Which core serves a protocol, mirroring protocolCoreName in corecatalog.go.
+      // The names are identical except for wg-c, and that one exception is why the
+      // check below used to miss WireGuard entirely: missingProtocols carries CORE
+      // names, so `includes('wg-c')` was never true however uninstalled wgc was.
+      // Returns '' for the Xray-native protocols and the in-binary cores, which need
+      // no host setup and must never be gated.
+      protocolCoreName(protocol) {
+        if (protocol === Protocols.WGC) return 'wgc';
+        const hasCore = [Protocols.L2TP, Protocols.PPTP, Protocols.OPENVPN,
+          Protocols.OPENCONNECT, Protocols.SSTP, Protocols.IKEV2, Protocols.AWG,
+          Protocols.GRE, Protocols.MTPROTO].includes(protocol);
+        return hasCore ? protocol : '';
+      },
       async submit(url, data, modal) {
-        // Block creating a VPN inbound (L2TP/PPTP/OpenVPN) before the backend is
-        // set up; point the user at Core Settings. `data` is a plain object for
-        // add/clone and FormData for update, so data.protocol only matches creates.
-        if (typeof url === 'string' && url.endsWith('/inbounds/add') &&
-            data && [Protocols.L2TP, Protocols.PPTP, Protocols.OPENVPN, Protocols.OPENCONNECT, Protocols.SSTP, Protocols.IKEV2, Protocols.WGC, Protocols.AWG, Protocols.MTPROTO, Protocols.SSH].includes(data.protocol)) {
-          // Not provisioned at all -> general message; provisioned but this protocol was
-          // added by a later update (still in missingProtocols) -> protocol-specific
-          // message. Both use the SAME modal (matching the initial setup prompt), not a toast.
+        // Block creating an inbound whose core is not installed and point the user at
+        // Core Settings. `data` is a plain object for add/clone and FormData for
+        // update, so data.protocol only matches creates; the server gates the rest.
+        const core = data && !(data instanceof FormData) ? this.protocolCoreName(data.protocol) : '';
+        if (typeof url === 'string' && url.endsWith('/inbounds/add') && core) {
+          // Not provisioned at all -> general message; provisioned but this core is not
+          // installed (never set up, or uninstalled since) -> core-specific message.
+          // Both use the SAME modal (matching the initial setup prompt), not a toast.
           const protocolNeedsSetup = this.provisioned && Array.isArray(this.missingProtocols)
-            && this.missingProtocols.includes(data.protocol);
+            && this.missingProtocols.includes(core);
           if (!this.provisioned || protocolNeedsSetup) {
             if (modal && typeof modal.close === 'function') modal.close();
             this.showSetupRequired(protocolNeedsSetup);

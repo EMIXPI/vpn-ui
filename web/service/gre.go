@@ -1166,7 +1166,13 @@ type GrePeerConfig struct {
 	// shared charon: without it charon cannot tell which pre-shared key to use. See greIkeID.
 	IpsecId string `json:"ipsecId"`
 	FouPort int    `json:"fouPort"`
-	Config  string `json:"config"`
+	// Config is the whole recipe (values + both platforms) and is what the subscription
+	// hands out as a .txt. The panel instead shows the two platform recipes separately,
+	// because a customer runs one of them, never both, and a single blob invites pasting
+	// RouterOS syntax into a Linux shell.
+	Config         string `json:"config"`
+	ConfigMikrotik string `json:"configMikrotik"`
+	ConfigLinux    string `json:"configLinux"`
 }
 
 // RenderPeerConfigs returns the router-side setup for every peer slot of an account.
@@ -1236,7 +1242,10 @@ func (s *GreService) RenderPeerConfigs(inbound *model.Inbound, email, endpointHo
 			if settings.FouEnable && !cfg.Dynamic {
 				cfg.FouPort = settings.fouPort()
 			}
-			cfg.Config = renderGreRecipe(cfg, len(client.peerList()) > 1, d)
+			multi := len(client.peerList()) > 1
+			cfg.Config = renderGreRecipe(cfg, multi, d)
+			cfg.ConfigMikrotik = renderGreMikrotik(cfg, multi, d)
+			cfg.ConfigLinux = renderGreLinux(cfg, multi, d)
 			out = append(out, cfg)
 		}
 		break
@@ -1280,18 +1289,65 @@ func renderGreRecipe(c GrePeerConfig, multi bool, idx int) string {
 		b.WriteString(fmt.Sprintf("FOU (UDP encap) port     : %d  [Linux/OpenWrt peers only]\n", c.FouPort))
 	}
 
-	b.WriteString("\n# IMPORTANT, read before you route all traffic through this tunnel.\n")
-	b.WriteString("# The tunnel's OWN packets travel to the server over your normal internet\n")
-	b.WriteString("# connection. If you point the default route at the tunnel without first\n")
-	b.WriteString(fmt.Sprintf("# pinning a host route to %s via your existing gateway, those\n", c.ServerIp))
-	b.WriteString("# packets try to travel through the tunnel itself. That loop takes the tunnel\n")
-	b.WriteString("# down and, because the default route now points into it, your internet with\n")
-	b.WriteString("# it. Both recipes below add that host route FIRST.\n")
+	b.WriteString("\n")
+	b.WriteString(greOuterRouteNote(c, "Both recipes below add that host route FIRST."))
 
 	b.WriteString("\n# MikroTik RouterOS\n")
+	b.WriteString(greMikrotikCommands(c))
+	b.WriteString("\n# Linux (iproute2)\n")
+	b.WriteString(greLinuxCommands(c))
+	return b.String()
+}
+
+// renderGreMikrotik is the RouterOS half on its own: the panel shows one recipe per
+// platform, so each has to carry the routing warning and stand alone.
+func renderGreMikrotik(c GrePeerConfig, multi bool, idx int) string {
+	var b strings.Builder
+	if multi {
+		b.WriteString(fmt.Sprintf("# Peer %d\n", idx+1))
+	}
+	b.WriteString(greOuterRouteNote(c, "The commands below add that host route FIRST."))
+	b.WriteString("\n")
+	b.WriteString(greMikrotikCommands(c))
+	return b.String()
+}
+
+// renderGreLinux is the iproute2 half on its own. See renderGreMikrotik.
+func renderGreLinux(c GrePeerConfig, multi bool, idx int) string {
+	var b strings.Builder
+	if multi {
+		b.WriteString(fmt.Sprintf("# Peer %d\n", idx+1))
+	}
+	b.WriteString(greOuterRouteNote(c, "The commands below add that host route FIRST."))
+	b.WriteString("\n")
+	b.WriteString(greLinuxCommands(c))
+	return b.String()
+}
+
+// greOuterRouteNote is the warning that has to precede every recipe: it prevents the one
+// failure the customer cannot debug, where the default route swallows the tunnel's own
+// outer packets and takes their internet down with the tunnel.
+func greOuterRouteNote(c GrePeerConfig, closing string) string {
+	return "# IMPORTANT, read before you route all traffic through this tunnel.\n" +
+		"# The tunnel's OWN packets travel to the server over your normal internet\n" +
+		"# connection. If you point the default route at the tunnel without first\n" +
+		fmt.Sprintf("# pinning a host route to %s via your existing gateway, those\n", c.ServerIp) +
+		"# packets try to travel through the tunnel itself. That loop takes the tunnel\n" +
+		"# down and, because the default route now points into it, your internet with\n" +
+		"# it. " + closing + "\n"
+}
+
+// greMikrotikCommands is the bare RouterOS recipe, no heading. The MTU is written out
+// explicitly because the two recipes are shown on their own now, away from the settings
+// block that used to carry it, and GRE never negotiates it.
+func greMikrotikCommands(c GrePeerConfig) string {
+	var b strings.Builder
 	b.WriteString(fmt.Sprintf("/interface gre add name=gre-vpnui remote-address=%s", c.ServerIp))
 	if !c.Dynamic {
 		b.WriteString(fmt.Sprintf(" local-address=%s", c.PeerIp))
+	}
+	if c.Mtu > 0 {
+		b.WriteString(fmt.Sprintf(" mtu=%d", c.Mtu))
 	}
 	b.WriteString(" clamp-tcp-mss=yes keepalive=10s,10\n")
 	b.WriteString(fmt.Sprintf("/ip address add address=%s/32 interface=gre-vpnui\n", c.InnerIp))
@@ -1308,8 +1364,17 @@ func renderGreRecipe(c GrePeerConfig, multi bool, idx int) string {
 		b.WriteString(fmt.Sprintf("/ip ipsec policy add src-address=%s/32 dst-address=%s/32 protocol=gre tunnel=no action=encrypt\n",
 			firstNonEmpty(c.PeerIp, "YOUR-PUBLIC-IP"), c.ServerIp))
 	}
+	if c.FouPort > 0 {
+		b.WriteString("# NOTE: RouterOS has no FOU support. Use the Linux recipe on a peer\n" +
+			"# that needs UDP encapsulation.\n")
+	}
+	return b.String()
+}
 
-	b.WriteString("\n# Linux (iproute2)\n")
+// greLinuxCommands is the bare iproute2 recipe, no heading. See greMikrotikCommands on the
+// explicit MTU.
+func greLinuxCommands(c GrePeerConfig) string {
+	var b strings.Builder
 	dev := "gre-vpnui"
 	if c.FouPort > 0 {
 		b.WriteString(fmt.Sprintf("ip fou add port %d ipproto 47\n", c.FouPort))
@@ -1322,11 +1387,14 @@ func renderGreRecipe(c GrePeerConfig, multi bool, idx int) string {
 		// requests work. There is no narrower knob: rx-gro-list and
 		// rx-udp-gro-forwarding are already off and make no difference.
 		b.WriteString("ethtool -K $(ip route show default | awk '{print $5; exit}') gro off" +
-			"   # REQUIRED for FOU, see note above\n")
+			"   # REQUIRED for FOU, coalesced UDP is not decapsulated correctly\n")
 	} else {
 		b.WriteString(fmt.Sprintf("ip link add %s type gre remote %s ttl 64\n", dev, c.ServerIp))
 	}
 	b.WriteString(fmt.Sprintf("ip addr add %s/32 dev %s\n", c.InnerIp, dev))
+	if c.Mtu > 0 {
+		b.WriteString(fmt.Sprintf("ip link set %s mtu %d\n", dev, c.Mtu))
+	}
 	b.WriteString(fmt.Sprintf("ip link set %s up\n", dev))
 	// Computed rather than a placeholder: the client can read its current gateway itself, so
 	// this block stays copy-pasteable and cannot be pasted in the wrong order.
