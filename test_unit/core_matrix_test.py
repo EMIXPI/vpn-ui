@@ -68,6 +68,10 @@ CORES = {
     },
     "wgc": {"bins": [], "feats": [], "mods": [], "optmods": ["wireguard"]},
     "awg": {"bins": [], "feats": ["amneziawg"], "mods": [], "optmods": ["amneziawg"]},
+    # GRE bundles nothing: ip_gre is in-tree AND already required by PPTP, so it is not
+    # repeated as a gre requirement. fou is optional (absent on some minimal kernels) and
+    # only needed for the UDP-encapsulation mode.
+    "gre": {"bins": [], "feats": [], "mods": [], "optmods": ["fou"]},
     "mtproto": {"bins": ["telemt"], "feats": [], "mods": [], "optmods": []},
 }
 

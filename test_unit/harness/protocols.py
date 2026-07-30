@@ -19,11 +19,12 @@ from .clients import sstp as sstp_mod
 from .clients import ikev2 as ikev2_mod
 from .clients import wgc as wgc_mod
 from .clients import awg as awg_mod
+from .clients import gre as gre_mod
 from .clients import ssh as ssh_mod
 from .clients.base import Client
 from .model import Phase, SubTest, Status
 from .model import (PHASE_OPENVPN, PHASE_L2TP, PHASE_PPTP, PHASE_OPENCONNECT,
-                    PHASE_SSTP, PHASE_WGC, PHASE_AWG, PHASE_SSH, PHASE_SSH_UDP,
+                    PHASE_SSTP, PHASE_WGC, PHASE_AWG, PHASE_GRE, PHASE_SSH, PHASE_SSH_UDP,
                     IKEV2_PHASE_BY_MODE)
 
 # Grace for a client edit to land. telemt itself is NOT restarted (the panel rewrites
@@ -39,12 +40,12 @@ MTPROTO_RELOAD_WAIT = 8.0
 # so PEER["ssh"] is never read.
 PEER = {"openvpn": "l2tp", "l2tp": "pptp", "pptp": "openvpn",
         "openconnect": "openvpn", "sstp": "openvpn", "ikev2": "openvpn",
-        "wg-c": "openvpn", "awg": "openvpn"}
+        "wg-c": "openvpn", "awg": "openvpn", "gre": "openvpn"}
 # Non-ikev2 protocols map straight to their phase. ikev2 is split per auth mode
 # (IKEV2_PHASE_BY_MODE), resolved inside run() from its `mode` arg.
 PHASE = {"openvpn": PHASE_OPENVPN, "l2tp": PHASE_L2TP, "pptp": PHASE_PPTP,
          "openconnect": PHASE_OPENCONNECT, "sstp": PHASE_SSTP, "wg-c": PHASE_WGC,
-         "awg": PHASE_AWG, "ssh": PHASE_SSH}
+         "awg": PHASE_AWG, "gre": PHASE_GRE, "ssh": PHASE_SSH}
 
 # Connect variant used when dialing the SECOND same-protocol inbound (TEST 1,
 # _multi_inbound_check): l2tp uses RAW (the client's IPsec config is pinned to the
@@ -52,7 +53,7 @@ PHASE = {"openvpn": PHASE_OPENVPN, "l2tp": PHASE_L2TP, "pptp": PHASE_PPTP,
 # udp/new, pptp has no variant. sstp/ikev2 have no variant (single-variant protocols).
 _SECOND_VARIANT = {"openvpn": ("udp", "new"), "l2tp": "raw", "pptp": None,
                    "openconnect": "dtls", "sstp": None, "ikev2": None,
-                   "wg-c": None, "awg": None, "ssh": None}
+                   "wg-c": None, "awg": None, "gre": None, "ssh": None}
 
 
 def _connect(client: Client, sc, proto: str, which: str, variant=None, ib=None):
@@ -79,6 +80,11 @@ def _connect(client: Client, sc, proto: str, which: str, variant=None, ib=None):
         return wgc_mod.connect(client, ib, which, server_ip=sc.server_ip)
     if proto == "awg":
         return awg_mod.connect(client, ib, which, server_ip=sc.server_ip)
+    if proto == "gre":
+        # `variant` carries the encapsulation mode (raw / ipsec / fou) rather than a
+        # transport pair; the mode sub-tests pass it explicitly.
+        return gre_mod.connect(client, ib, which, server_ip=sc.server_ip,
+                               mode=variant or "raw")
     if proto == "ssh":
         return ssh_mod.connect(client, ib, which, server_ip=sc.server_ip)
     raise ValueError(proto)
@@ -93,6 +99,7 @@ def _disconnect(client: Client, proto: str):
      "ikev2": ikev2_mod.disconnect,
      "wg-c": wgc_mod.disconnect,
      "awg": awg_mod.disconnect,
+     "gre": gre_mod.disconnect,
      "ssh": ssh_mod.disconnect}[proto](client)
 
 
@@ -1085,6 +1092,34 @@ def run(proto: str, cA: Client, cB: Client, cC: Client, sc, cfg: dict, result, p
 
     dns_domain = (cfg.get("dns_resolve") or {}).get("domain", "cloudflare.com")
 
+    # ---- GRE: pin account A's peer, leave account B's dynamic ----------
+    # The panel demultiplexes GRE peers two ways and both must be exercised. Account A
+    # gets client A's REAL bridge address, so the server builds a point-to-point netdev
+    # for it; account B keeps the blank slot it was created with, so it is served by the
+    # shared catch-all netdev with a learned reverse path. Doing it here (not in setup) is
+    # unavoidable: the client VMs do not exist when the inbound is built.
+    if proto == "gre" and panel is not None and ib is not None:
+        gp = phase.add(SubTest("peer-provision"))
+        try:
+            a_ip = gre_mod.lan_ip(cA)
+            if not a_ip:
+                raise AssertionError("could not read client A's bridge address")
+            panel.set_gre_peer(ib.inbound_id, ib.accounts["A"].email, 0, a_ip)
+            server_setup._fetch_gre_configs(panel, ib)
+            a_cfg = (ib.gre_configs.get("A") or [{}])[0]
+            b_cfg = (ib.gre_configs.get("B") or [{}])[0]
+            if a_cfg.get("dynamic", True):
+                raise AssertionError(f"account A still dynamic after setting peerIp={a_ip}")
+            if not b_cfg.get("dynamic", False):
+                raise AssertionError("account B should have stayed dynamic (blank peer)")
+            gp.status = Status.PASS
+            gp.detail = (f"A static peer {a_ip} (point-to-point netdev), "
+                         f"B dynamic (catch-all + learner)")
+        except Exception as e:  # noqa: BLE001
+            gp.status = Status.FAIL
+            gp.detail = str(e)[:200]
+        log(f"-> {gp.name} [{gp.status.value}] {gp.detail}")
+
     # ---- connect variants on A (each tested in isolation) --------------
     # Disconnect before AND after every variant so leftover state (e.g. an
     # IPsec SA from the l2tp-ipsec test) can't contaminate the next variant.
@@ -1124,6 +1159,18 @@ def run(proto: str, cA: Client, cB: Client, cC: Client, sc, cfg: dict, result, p
             ist = SubTest("ipsec-not-stuck", Status.ERROR, str(e)[:150])
         phase.add(ist)
         log(f"-> {ist.name} [{ist.status.value}] {ist.detail}")
+
+    # ---- GRE encapsulation modes: IPsec-required and FOU ---------------
+    # The raw path was just covered by the connect variants above. These two flip the
+    # inbound's own switches and re-dial, which is the only way to prove them: both are
+    # server-side toggles with no client-visible negotiation.
+    if proto == "gre" and panel is not None and ib is not None:
+        for st in _gre_mode_checks(cA, sc, ib, panel, log, server_exec):
+            phase.add(st)
+            log(f"-> {st.name} [{st.status.value}] {st.detail}")
+        _disconnect(cA, proto)
+        cA.disconnect_all()
+        time.sleep(2)
 
     # Whether the shared check suite can run. The User Limit Strategy test below is
     # INDEPENDENT of it — it reconfigures the inbound (daemon restart = clean slate)
@@ -1302,6 +1349,12 @@ def run(proto: str, cA: Client, cB: Client, cC: Client, sc, cfg: dict, result, p
                               "WireGuard: K device keypairs are structural — no dynamic "
                               "(K+1)th admission to reject/evict"))
             log(f"-> {nm} [na] structural K (no dynamic admission)")
+    elif proto == "gre":
+        for nm in ("strategy-reject", "strategy-accept"):
+            phase.add(SubTest(nm, Status.NA,
+                              "GRE: K peer slots are structural (and GRE has no handshake "
+                              "or session) — no dynamic (K+1)th admission to reject/evict"))
+            log(f"-> {nm} [na] structural K (no admission event)")
     elif proto == "ssh" and ib is not None and getattr(ib, "user_limit", 1) > 1 and panel is not None:
         _ssh_strategy_check(cA, cB, cC, sc, ib, panel, log, phase)
     elif ib is not None and getattr(ib, "user_limit", 1) > 1 and panel is not None:
@@ -1332,6 +1385,34 @@ def run(proto: str, cA: Client, cB: Client, cC: Client, sc, cfg: dict, result, p
     if proto == "openconnect" and ib is not None and getattr(ib, "user_limit", 1) > 1:
         _oc_same_nat_check(cA, sc, ib, log, phase, server_exec)
 
+    # ---- GRE: informational nft/data-plane dump ------------------------
+    # Recorded as NA (it asserts nothing) purely so every run carries the counters needed
+    # to tell a GRE-specific drop from an upstream problem. Without it the first
+    # "tunnel up, gateway reachable, no internet" failure had to be diagnosed by guesswork.
+    if proto == "gre" and server_exec is not None:
+        dump = SubTest("gre-nft-counters", Status.NA, "informational")
+        try:
+            parts = []
+            for label, cmd in (
+                    ("gre rules in prerouting",
+                     "nft -a list chain ip vpn prerouting 2>&1 | grep -E 'gre-antispoof|gre-blocked|10\\.9\\.' || echo none"),
+                    ("gre accounting counters",
+                     "nft list chain ip vpn gre_acct_in 2>&1 | head -20; nft list chain ip vpn gre_acct_out 2>&1 | head -20"),
+                    ("gre devices", "ip -d link show type gre 2>&1 | grep -E '^[0-9]+:|gre remote'"),
+                    ("gre routes/neigh",
+                     "ip route show | grep '10\\.9\\.'; "
+                     "for d in $(ip -o link show type gre | sed 's/^[0-9]*: //; s/@.*//'); do "
+                     "echo \"-- $d\"; ip neigh show dev \"$d\"; done"),
+                    ("xray dokodemo listeners", "ss -lntp 2>/dev/null | grep -E ':123[0-9][0-9]' || echo none"),
+            ):
+                _, o, _ = server_exec(cmd, timeout=25)
+                parts.append(f"== {label} ==\n{str(o)[:1200]}")
+            dump.log = "\n".join(parts)
+        except Exception as e:  # noqa: BLE001
+            dump.log = f"(capture failed: {e})"
+        phase.add(dump)
+        log(f"-> {dump.name} [na] captured")
+
     # ---- User Limit: traffic AGGREGATION across the account's devices --
     # Prove the account's counted traffic is the SUM over its K simultaneous
     # devices, not per-device / not just one. Runs AFTER the strategy check (which
@@ -1339,7 +1420,11 @@ def run(proto: str, cA: Client, cB: Client, cC: Client, sc, cfg: dict, result, p
     # resets the counter fresh and, in termination, DISABLES account A — so this
     # must precede it). Independent of the shared suite; wrapped so a raising test
     # can't abort the phase.
-    if proto in ("wg-c", "awg"):
+    if proto == "gre":
+        phase.add(SubTest("multi-user-total", Status.NA,
+                          "GRE gateway model: the account's peers share one billed block, "
+                          "so there is no per-peer split to aggregate"))
+    elif proto in ("wg-c", "awg"):
         phase.add(SubTest("multi-user-total", Status.NA,
                           "WireGuard gateway model: one keypair per account, no per-device "
                           "traffic split to aggregate"))
@@ -1840,6 +1925,140 @@ def _oc_same_nat_check(cA, sc, ib, log, phase, server_exec=None):
         cA.sh("pkill -f openconnect 2>/dev/null; true")
         time.sleep(1)
     log(f"-> same-nat-limit [{st.status.value}] {st.detail}")
+
+
+def _gre_mode_checks(cA, sc, ib, panel, log, server_exec=None) -> list:
+    """Prove GRE's two optional encapsulation modes end to end, then restore raw mode.
+
+    ipsec-required: flip ipsecEnable on and allowRaw OFF, so the server accepts protocol
+    47 only inside an ESP SA. Then check BOTH halves, because either alone is a false
+    pass: a bare tunnel must now FAIL (proving the drop rule bites) and an
+    IPsec-negotiated one must SUCCEED (proving the SA and charon config are right). A
+    test that only checked the second half would pass even with the gate disabled.
+
+    fou: flip FOU on and dial with UDP encapsulation, which is the only path available to
+    a peer behind a NAT that drops protocol 47.
+    """
+    out = []
+    settings = None
+    try:
+        settings = panel.get_inbound(ib.inbound_id)
+    except Exception as e:  # noqa: BLE001
+        out.append(SubTest("gre-ipsec-mode", Status.ERROR, f"read inbound: {str(e)[:150]}"))
+        return out
+
+    def _set(**changes):
+        panel.patch_gre_settings(ib.inbound_id, **changes)
+        server_setup._fetch_gre_configs(panel, ib)
+        time.sleep(6)   # let the panel rewrite charon/nft and reconcile the data plane
+
+    # Server-side evidence, so an IPsec failure is attributable instead of a bare "no SA".
+    # The first run of this test could not distinguish "the panel never configured charon"
+    # from "charon is configured but never answered", which are opposite bugs.
+    SWANCTL = "/usr/libexec/vpn-ui-strongswan/sbin/swanctl"
+
+    def _server_ipsec_state():
+        if server_exec is None:
+            return "(no server_exec available)"
+        parts = []
+        for label, cmd in (
+                ("conf.d", "ls -la /etc/swanctl/conf.d/ 2>&1"),
+                ("gre conf", "cat /etc/swanctl/conf.d/gre-*.conf 2>&1"),
+                ("list-conns", f"{SWANCTL} --list-conns 2>&1 || swanctl --list-conns 2>&1"),
+                ("list-sas", f"{SWANCTL} --list-sas 2>&1 || swanctl --list-sas 2>&1"),
+                ("udp 500/4500 listeners", "ss -lunp 2>/dev/null | grep -E ':(500|4500)' || echo none"),
+                ("charon process", "ps aux | grep -c '[c]haron'"),
+                ("nft input chain", "nft list chain ip vpn input 2>&1 | head -20"),
+        ):
+            try:
+                _, out, _ = server_exec(cmd, timeout=25)
+            except Exception as e:  # noqa: BLE001
+                out = f"(failed: {e})"
+            parts.append(f"== server {label} ==\n{str(out)[:900]}")
+        try:
+            parts.append("== server ipsec core log ==\n" + (panel.core_logs("ipsec") or "")[-2500:])
+        except Exception as e:  # noqa: BLE001
+            parts.append(f"== server ipsec core log == (failed: {e})")
+        return "\n".join(parts)
+
+    # ---- Did the PANEL configure charon at all? ------------------------
+    # Independent of the test client's own strongSwan, so a failure here is squarely a
+    # product bug and a pass here narrows any later failure to the negotiation itself.
+    conn_st = SubTest("gre-ipsec-conn")
+    try:
+        _set(ipsecEnable=True, allowRaw=False)
+        loaded = ""
+        if server_exec is not None:
+            _, loaded, _ = server_exec(
+                f"{SWANCTL} --list-conns 2>&1 || swanctl --list-conns 2>&1", timeout=25)
+        want = f"gre-{ib.inbound_id}"
+        if server_exec is None:
+            conn_st.status, conn_st.detail = Status.NA, "no server_exec available"
+        elif want in str(loaded):
+            conn_st.status = Status.PASS
+            conn_st.detail = f"charon loaded connection {want}"
+        else:
+            conn_st.status = Status.FAIL
+            conn_st.detail = f"charon has no connection {want} after enabling IPsec"
+        conn_st.log = str(loaded)[:1500] + "\n\n" + _server_ipsec_state()
+    except Exception as e:  # noqa: BLE001
+        conn_st.status, conn_st.detail = Status.ERROR, str(e)[:200]
+    out.append(conn_st)
+
+    # ---- IPsec required ------------------------------------------------
+    st = SubTest("gre-ipsec-mode")
+    try:
+        gre_mod.disconnect(cA)
+        raw_ok, _, raw_log = gre_mod.connect(cA, ib, "A", server_ip=sc.server_ip, mode="raw")
+        gre_mod.disconnect(cA)
+        sec_ok, _, sec_log = gre_mod.connect(cA, ib, "A", server_ip=sc.server_ip, mode="ipsec")
+        gre_mod.disconnect(cA)
+        if raw_ok:
+            st.status = Status.FAIL
+            st.detail = "bare GRE still passed while IPsec was required (drop rule missing)"
+            st.log = raw_log
+        elif not sec_ok:
+            st.status = Status.FAIL
+            # Distinguish the two very different causes: charon never negotiating an SA
+            # (config/proposal problem) versus an established SA that carries nothing
+            # (policy/traffic-selector problem). Reporting one message for both made the
+            # first failure of this test undiagnosable from the summary.
+            if "never reached INSTALLED" in sec_log:
+                st.detail = "no IPsec SA was established (charon never installed a child SA)"
+            else:
+                st.detail = "IPsec SA established but the tunnel carried no traffic"
+            st.log = sec_log + "\n\n" + _server_ipsec_state()
+        else:
+            st.status = Status.PASS
+            st.detail = "bare GRE dropped, ESP-transport GRE carried traffic"
+            st.log = sec_log
+    except Exception as e:  # noqa: BLE001
+        st.status = Status.ERROR
+        st.detail = str(e)[:200]
+    out.append(st)
+
+    # ---- FOU (UDP encapsulation) ---------------------------------------
+    st2 = SubTest("gre-fou-mode")
+    try:
+        _set(ipsecEnable=False, allowRaw=True, fouEnable=True)
+        gre_mod.disconnect(cA)
+        fou_ok, _, fou_log = gre_mod.connect(cA, ib, "A", server_ip=sc.server_ip, mode="fou")
+        gre_mod.disconnect(cA)
+        st2.status = Status.PASS if fou_ok else Status.FAIL
+        st2.detail = ("GRE over UDP carried traffic" if fou_ok
+                      else "FOU-encapsulated GRE passed no traffic")
+        st2.log = fou_log
+    except Exception as e:  # noqa: BLE001
+        st2.status = Status.ERROR
+        st2.detail = str(e)[:200]
+    out.append(st2)
+
+    # ---- restore raw mode for the rest of the suite ---------------------
+    try:
+        _set(ipsecEnable=False, allowRaw=True, fouEnable=False)
+    except Exception as e:  # noqa: BLE001
+        log(f"-> WARNING: could not restore GRE raw mode: {str(e)[:150]}")
+    return out
 
 
 def _wgc_psk_check(spare, sc, panel, log, proto="wg-c") -> SubTest:

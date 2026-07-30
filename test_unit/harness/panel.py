@@ -428,6 +428,58 @@ class Panel:
             f"/panel/api/inbounds/{inbound_id}/awg-configs?email={quote(email)}"
         ).get("obj", []) or []
 
+    def gre_configs(self, inbound_id: int, email: str) -> list:
+        """Fetch a GRE account's per-peer router setup. Returns a list of
+        {peerIndex, peerIp, dynamic, serverIp, innerIp, gatewayIp, mode, ipsecPsk,
+        fouPort, config} (one per peer slot = the account's User Limit K). Unlike the
+        wg endpoints nothing is minted here: GRE has no key material, so this is a pure
+        render of the addresses the panel already assigned."""
+        from urllib.parse import quote
+        return self._get(
+            f"/panel/api/inbounds/{inbound_id}/gre-configs?email={quote(email)}"
+        ).get("obj", []) or []
+
+    def patch_gre_settings(self, inbound_id: int, **changes) -> dict:
+        """Flip GRE inbound switches (ipsecEnable / allowRaw / fouEnable / ...) in place,
+        preserving everything else in the settings blob (clients and their peer slots
+        above all: update_inbound rewrites the whole settings JSON, so a partial body
+        would drop every account)."""
+        cur = self.get_inbound(inbound_id) or {}
+        settings = json.loads(cur.get("settings") or "{}")
+        settings.update(changes)
+        return self.update_inbound(inbound_id, cur.get("remark") or "test-gre",
+                                   int(cur.get("port") or 47), "gre", settings,
+                                   listen=cur.get("listen") or "")
+
+    def set_gre_peer(self, inbound_id: int, email: str, peer_index: int,
+                     peer_ip: str) -> dict:
+        """Set one account's peer-slot public IP. Blank means 'dynamic', which is a
+        supported state, not an empty field: that peer is then served by the shared
+        catch-all tunnel with a learned reverse path."""
+        cur = self.get_inbound(inbound_id) or {}
+        settings = json.loads(cur.get("settings") or "{}")
+        clients = settings.get("clients") or []
+        found = False
+        for c in clients:
+            if c.get("email") != email:
+                continue
+            peers = c.get("peers")
+            if not isinstance(peers, list):
+                peers = []
+            while len(peers) <= peer_index:
+                peers.append({})
+            peers[peer_index] = dict(peers[peer_index] or {})
+            peers[peer_index]["peerIp"] = peer_ip
+            c["peers"] = peers
+            found = True
+            break
+        if not found:
+            raise AssertionError(f"account {email} not found on gre inbound {inbound_id}")
+        settings["clients"] = clients
+        return self.update_inbound(inbound_id, cur.get("remark") or "test-gre",
+                                   int(cur.get("port") or 47), "gre", settings,
+                                   listen=cur.get("listen") or "")
+
     def download_ovpn(self, inbound_id: int, proto: str) -> str:
         """proto in {udp,tcp}. Returns raw .ovpn text."""
         r = self.s.get(self._url(f"/panel/api/inbounds/{inbound_id}/ovpn/{proto}"),

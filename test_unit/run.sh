@@ -67,6 +67,11 @@ Tests (ids mirror harness/model.py:ALL_PHASES; always run in this fixed order):
   ikev2-psk           full suite, rbridge-sweep path (1 account, K=2) - IKEv2 + PSK
   ikev2-eap-tls       full suite, rbridge-sweep path (1 account, K=2) - IKEv2 + EAP-TLS
   wg-c            full suite, rbridge-sweep path (kernel WireGuard via wgctrl, gateway /29, +psk-mode) - WireGuard (C)
+  awg             same suite against AmneziaWG (obfuscated kernel wireguard, DKMS module)
+  gre             full suite over kernel ip_gre site-to-site (router peers). Covers BOTH
+                  demux paths in one run (account A a static peer -> point-to-point netdev,
+                  account B dynamic -> shared catch-all + learned reverse path), plus the
+                  ipsec-required and FOU encapsulation modes
   mtproto         alias: runs every MTProto phase below (telemt)
   mtproto-classic   handshake + relay to a real Telegram DC + wrong-secret control + usage - obfuscated2
   mtproto-secure    same, "dd" random-padding secret - MTProto Proxy (secure)

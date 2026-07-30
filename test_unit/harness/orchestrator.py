@@ -153,6 +153,7 @@ def run_job(spec: dict, index: int, cfg: dict,
         return phase in cfg.get("_selected", ALL_PHASES)
 
     need_clients = any(_sel(p) for p in ("openvpn", "l2tp", "pptp", "openconnect", "sstp", "ikev2", "wg-c", "awg",
+                                         "gre",
                                          "mtproto", "mtproto-classic", "mtproto-secure", "mtproto-tls",
                                          "mtproto-toggle", "ssh", "ssh-udp"))
     need_setup = (need_clients or _sel(PHASE_SETUP)
@@ -260,7 +261,7 @@ def run_job(spec: dict, index: int, cfg: dict,
             return incus.exec(server_vm, cmd, timeout=timeout)
 
         # --- protocol suites (filtered by the --tests selection) ---
-        for proto in [p for p in ("openvpn", "l2tp", "pptp", "openconnect", "sstp", "wg-c", "awg", "ssh") if _sel(p)]:
+        for proto in [p for p in ("openvpn", "l2tp", "pptp", "openconnect", "sstp", "wg-c", "awg", "gre", "ssh") if _sel(p)]:
             if _aborting():
                 break
             log(f":: {proto} — connect variants + checks + peer reachability")

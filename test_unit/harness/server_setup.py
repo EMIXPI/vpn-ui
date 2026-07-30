@@ -23,10 +23,11 @@ from .panel import Panel
 
 # protocol base octet for the 10.<base>.<id>.<host> tunnel address
 BASE = {"l2tp": 0, "pptp": 1, "ovpn-udp": 2, "ovpn-tcp": 3, "openconnect": 4,
-        "sstp": 5, "ikev2": 6, "wg-c": 7, "awg": 8}
+        "sstp": 5, "ikev2": 6, "wg-c": 7, "awg": 8, "gre": 9}
 
 PSK = "TestPSK-9182"  # L2TP/IPsec pre-shared key
 IKEV2_PSK = "TestIkev2PSK-7f3a91"  # IKEv2 psk-mode shared key (single-account inbound)
+GRE_PSK = "TestGrePSK-4c81de"  # GRE-over-IPsec (ESP transport) pre-shared key
 # Distinct IKE server identity (IDr) for the eap-tls inbound. The always-present primary
 # eap-mschapv2 inbound presents id=server_ip; two EAP conns with the SAME server id on the
 # ONE shared charon can't be disambiguated (an EAP initiator looks identical until the
@@ -61,6 +62,9 @@ WGC_USER_LIMIT = 6
 # AmneziaWG = the SAME gateway model as wg-c (one keypair per account, block sized by the
 # User Limit -> a /29), just obfuscated. So it uses the identical per-account block sizing.
 AWG_USER_LIMIT = 6
+# GRE: K = peer ROUTERS per account, sized like the wg family (aligned power-of-two
+# block). 2 is enough to prove the block allocator and leaves the second slot free.
+GRE_USER_LIMIT = 2
 
 # ---- MTProto Proxy -----------------------------------------------------------
 # 8443, not 443: the panel itself may hold 443, and MTProto needs a real TCP port
@@ -138,6 +142,10 @@ SECOND_PORTS = {
     # The SSH server binds its OWN per-inbound TCP listener, so this 2nd inbound really
     # binds a distinct port (like openvpn/wg-c). Distinct from the primary 2222.
     "ssh":        {"udp": 2223},
+    # GRE is IP protocol 47 and binds NO port at all, so this is only a unique DB label
+    # (like l2tp/pptp/ikev2 above). A 2nd GRE inbound is distinguished purely by its own
+    # /16 block, which is exactly what this test exercises.
+    "gre":        {"udp": 48},
 }
 
 # Nominal DB port labels for the EXTRA ikev2 auth-mode inbounds (psk / eap-tls).
@@ -279,6 +287,27 @@ def build_second_inbound(panel: Panel, proto: str) -> Inbound:
             tcp_port=0, accounts={"A": acct}, user_limit=1)
         _fetch_awg_configs(panel, second)
         return second
+    if proto == "gre":
+        # A 2nd GRE inbound: its own 10.9 /24 block, single account (K=1). Its peer slot is
+        # left BLANK on purpose, so this inbound's account is served by the shared catch-all
+        # netdev. That is the interesting case for a multi-inbound test: two GRE inbounds
+        # necessarily SHARE one catch-all (only one unkeyed device may bind a given local
+        # address), so this asserts the shared device demultiplexes two inbounds' accounts
+        # by inner address rather than clobbering one another.
+        settings = {
+            "mtu": 0, "ttl": 64,
+            "ipsecEnable": False, "ipsecPsk": GRE_PSK, "allowRaw": True,
+            "fouEnable": False, "fouPort": 15547,
+            "clientToClient": True, "crossInbound": True,
+            "userLimit": 1,
+            "clients": [_dict_client(acct)],
+        }
+        inb = panel.add_inbound("test-gre-2", ports["udp"], "gre", settings)
+        second = Inbound(
+            protocol="gre", inbound_id=inb["id"], udp_port=ports["udp"],
+            tcp_port=0, accounts={"A": acct}, psk=GRE_PSK, user_limit=1)
+        _fetch_gre_configs(panel, second)
+        return second
     if proto == "ssh":
         # A distinct in-binary SSH listener on its own TCP port with a single account
         # (K=1). No addressing/certs: password auth only. externalProxy omitted (the
@@ -382,6 +411,12 @@ class Inbound:
     # per-device client configs, fetched from the wgc-configs endpoint after build.
     wg_configs: dict = field(default_factory=dict)
 
+    # gre: {which: [ {peerIndex, innerIp, gatewayIp, serverIp, mode, ipsecPsk, ...} ]} —
+    # the router-side values rendered by the gre-configs endpoint. Its own field rather
+    # than wg_configs because the shape is different (no key material, no config file:
+    # a GRE peer is described by addresses and a mode).
+    gre_configs: dict = field(default_factory=dict)
+
     # mtproto: {which: {mode: secret_hex}}, the per-account secret in each of the
     # three client-facing shapes (bare / dd… / ee…+domain), built at inbound
     # creation. MTProto has no config file to fetch: the secret IS the credential.
@@ -408,7 +443,7 @@ class Inbound:
             base = BASE["ovpn-tcp"] if transport == "tcp" else BASE["ovpn-udp"]
         else:
             base = BASE[self.protocol]
-        if self.protocol in ("wg-c", "awg") and self.user_limit > 1:
+        if self.protocol in ("wg-c", "awg", "gre") and self.user_limit > 1:
             # gateway model: one aligned power-of-two block per account; its IP is the
             # block's first address (nextPow2 rounding, mirrors Go wgcAccountBlock).
             bs = 1
@@ -741,6 +776,46 @@ def run(panel: Panel, server_ip: str, cfg: dict, result: JobResult,
 
     log(f"-> awg-inbound [{aws.status.value}] {aws.detail}")
 
+    # ---- GRE inbound ----------------------------------------------------
+    # Kernel ip_gre site-to-site (protocol id `gre`, base 10.9/16). Daemon-less like the
+    # wg family, and the same gateway addressing model (an account owns an aligned block,
+    # one address per peer router). Two things are GRE-specific:
+    #   * accounts carry `peers`, each holding a customer router's public IP. Account A's
+    #     is filled in AT PHASE TIME with client A's real bridge address (the harness does
+    #     not know it here) so the server builds a point-to-point netdev for it; account
+    #     B's is left BLANK on purpose so it is served by the shared catch-all netdev and
+    #     its reverse path is learned. That covers both demux paths in one phase.
+    #   * raw mode is the default (ipsecEnable=false, allowRaw=true). The phase flips the
+    #     inbound to IPsec-required and to FOU for its own sub-tests.
+    log("-> creating gre inbound (kernel ip_gre, 2 accounts, user-limit 2, raw mode)...")
+    grs = phase.add(SubTest("gre-inbound"))
+    try:
+        settings = {
+            "mtu": 0, "ttl": 64,
+            "ipsecEnable": False, "ipsecPsk": GRE_PSK, "allowRaw": True,
+            "fouEnable": False, "fouPort": 15547,
+            "clientToClient": True, "crossInbound": True,
+            "userLimit": GRE_USER_LIMIT,
+            "clients": [_dict_client(_acct("gre", 0)),
+                        _dict_client(_acct("gre", 1))],
+        }
+        inb = panel.add_inbound("test-gre", 47, "gre", settings)
+        iid = inb["id"]
+        gre_ib = Inbound(
+            protocol="gre", inbound_id=iid, udp_port=47, tcp_port=0,
+            accounts={"A": _acct("gre", 0), "B": _acct("gre", 1)},
+            psk=GRE_PSK, user_limit=GRE_USER_LIMIT)
+        _fetch_gre_configs(panel, gre_ib)
+        sc.inbounds["gre"] = gre_ib
+        n_cfg = sum(len(v) for v in gre_ib.gre_configs.values())
+        grs.status = Status.PASS
+        grs.detail = f"inbound {iid}, IP proto 47 (portless), 2 accounts, {n_cfg} peer slots"
+    except Exception as e:  # noqa: BLE001
+        grs.status = Status.ERROR
+        grs.detail = str(e)[:300]
+
+    log(f"-> gre-inbound [{grs.status.value}] {grs.detail}")
+
     # ---- MTProto Proxy inbound ------------------------------------------
     # telemt (protocol id `mtproto`). The ODD ONE: a userspace relay, so there is NO
     # tunnel, NO 10.x block, NO BASE entry and NO RADIUS. All three connection modes
@@ -956,6 +1031,18 @@ def _fetch_wg_configs(panel: Panel, inbound: Inbound) -> None:
             inbound.wg_configs[which] = panel.wgc_configs(inbound.inbound_id, acct.email)
         except Exception:  # noqa: BLE001
             inbound.wg_configs[which] = []
+
+
+def _fetch_gre_configs(panel: Panel, inbound: Inbound) -> None:
+    """Populate inbound.gre_configs[which] with the panel-rendered router-side values for
+    every account. Best-effort per account, so a fetch failure surfaces later as a clear
+    'no GRE peer config' connect failure rather than a setup crash."""
+    inbound.gre_configs = {}
+    for which, acct in inbound.accounts.items():
+        try:
+            inbound.gre_configs[which] = panel.gre_configs(inbound.inbound_id, acct.email)
+        except Exception:  # noqa: BLE001
+            inbound.gre_configs[which] = []
 
 
 def _fetch_awg_configs(panel: Panel, inbound: Inbound) -> None:
