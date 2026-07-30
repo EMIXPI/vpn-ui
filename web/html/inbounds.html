@@ -935,6 +935,7 @@
 {{template "modals/clientsBulkModal"}}
 {{template "modals/wgcConfigModal"}}
 {{template "modals/awgConfigModal"}}
+{{template "modals/greConfigModal"}}
 {{template "modals/sshConfigModal"}}
 <a-modal id="copy-clients-modal"
   :title="copyClientsModal.title"
@@ -2369,6 +2370,12 @@
         // backend-minted keys + obfuscation params); the modal fetches them from
         // the awg-configs API.
         awgConfigModal.show(dbInboundId, client);
+      },
+      showGreConfig(dbInboundId, client) {
+        // GRE "configs" are the router-side values rendered server-side (no profile file
+        // and nothing to scan: the client is a router); the modal fetches them from the
+        // gre-configs API.
+        greConfigModal.show(dbInboundId, client);
       },
       showSshConfig(dbInboundId, client) {
         // SSH configs are rendered server-side (a sing-box ssh outbound plus a

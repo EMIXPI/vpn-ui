@@ -248,6 +248,8 @@ func reconfigureAfterCascade(res service.DeleteResult) {
 			ic.onWgcChanged()
 		case model.AWG:
 			ic.onAwgChanged()
+		case model.GRE:
+			ic.onGreChanged()
 		case model.MTPROTO:
 			ic.onMtprotoChanged()
 		case model.SSH:

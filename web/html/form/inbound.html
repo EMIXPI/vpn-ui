@@ -122,6 +122,15 @@
                 {{ i18n "pages.inbounds.port" }}
                 <a-icon type="question-circle"></a-icon>
             </a-tooltip>
+            <a-tooltip v-else-if="inbound.protocol === 'gre'">
+                <template slot="title">
+                    NOT USED by GRE. GRE is IP protocol 47 and has no ports at all, so
+                    this value is ignored and several GRE inbounds may share it. Peers are
+                    told apart by address, not by port.
+                </template>
+                {{ i18n "pages.inbounds.port" }}
+                <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
             <template v-else>{{ i18n "pages.inbounds.port" }}</template>
         </template>
         <a-input
@@ -614,6 +623,11 @@
 <!-- awg (AmneziaWG) -->
 <template v-if="inbound.protocol === Protocols.AWG">
     {{template "form/awg"}}
+</template>
+
+<!-- gre (GRE) -->
+<template v-if="inbound.protocol === Protocols.GRE">
+    {{template "form/gre"}}
 </template>
 
 <!-- mtproto (MTProto Proxy) -->

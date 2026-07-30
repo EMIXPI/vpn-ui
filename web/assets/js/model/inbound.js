@@ -17,6 +17,7 @@ const Protocols = {
     IKEV2: 'ikev2',
     WGC: 'wg-c',
     AWG: 'awg',
+    GRE: 'gre',
     MTPROTO: 'mtproto',
     SSH: 'ssh',
 };
@@ -46,7 +47,7 @@ function getClientIdentity(protocol, client) {
         case Protocols.HYSTERIA:
             return client.auth;
         default:
-            // vmess/vless (uuid) and the email-identity protocols (wg-c, awg,
+            // vmess/vless (uuid) and the email-identity protocols (wg-c, awg, gre,
             // mtproto, ssh), whose models expose id via a `get id()` returning email.
             return client.id;
     }
@@ -74,6 +75,7 @@ const ProtocolLabels = {
     ikev2: 'IKEv2',
     'wg-c': 'WireGuard (C)',
     'awg': 'AmneziaWG',
+    gre: 'GRE',
     mtproto: 'MTProto Proxy',
     ssh: 'SSH',
 };
@@ -2162,6 +2164,7 @@ class Inbound extends XrayCommonClass {
             case Protocols.IKEV2: return this.settings.ikev2Users;
             case Protocols.WGC: return this.settings.wgcUsers;
             case Protocols.AWG: return this.settings.awgUsers;
+            case Protocols.GRE: return this.settings.greUsers;
             case Protocols.MTPROTO: return this.settings.mtprotoUsers;
             case Protocols.SSH: return this.settings.sshUsers;
             default: return null;
@@ -2920,6 +2923,7 @@ Inbound.Settings = class extends XrayCommonClass {
             case Protocols.IKEV2: return new Inbound.Ikev2Settings(protocol);
             case Protocols.WGC: return new Inbound.WgcSettings(protocol);
             case Protocols.AWG: return new Inbound.AwgSettings(protocol);
+            case Protocols.GRE: return new Inbound.GreSettings(protocol);
             case Protocols.MTPROTO: return new Inbound.MtprotoSettings(protocol);
             case Protocols.SSH: return new Inbound.SshSettings(protocol);
             default: return null;
@@ -2946,6 +2950,7 @@ Inbound.Settings = class extends XrayCommonClass {
             case Protocols.IKEV2: return Inbound.Ikev2Settings.fromJson(json);
             case Protocols.WGC: return Inbound.WgcSettings.fromJson(json);
             case Protocols.AWG: return Inbound.AwgSettings.fromJson(json);
+            case Protocols.GRE: return Inbound.GreSettings.fromJson(json);
             case Protocols.MTPROTO: return Inbound.MtprotoSettings.fromJson(json);
             case Protocols.SSH: return Inbound.SshSettings.fromJson(json);
             default: return null;
@@ -5272,6 +5277,259 @@ Inbound.AwgSettings.AwgUser = class extends XrayCommonClass {
     this.totalGB = NumberFormatter.toFixed(gb * SizeFormatter.ONE_GB, 0);
   }
 };
+
+// GRE inbound settings. Same gateway addressing model as wg-c/awg (auto-managed block,
+// User-Limit-sized per-account block, client-to-client / cross-inbound), but there is NO
+// key material of any kind: GRE carries no credentials, so an account is identified by its
+// address alone and a "device" is a customer ROUTER identified by its public IP.
+//
+// The JSON field names here MUST match the Go greSettings struct (web/service/gre.go).
+//
+// ipsecEnable/allowRaw mirror the L2TP pair and give the same three states (raw only,
+// IPsec only, both). fouEnable is deliberately SEPARATE rather than bundled with IPsec:
+// FOU is a Linux/OpenWrt-only UDP encapsulation, so tying it to the encrypted mode would
+// lock MikroTik/Cisco/Keenetic out of encryption entirely.
+Inbound.GreSettings = class extends Inbound.Settings {
+  constructor(
+    protocol,
+    // mtu 0 = let the kernel choose. The right default differs per encapsulation
+    // (1476 raw, 1464 under FOU) and the kernel already knows which, so pinning a
+    // number here would be wrong for the other mode.
+    mtu = 0,
+    ttl = 64,
+    ipsecEnable = false,
+    ipsecPsk = RandomUtil.randomSeq(24),
+    allowRaw = true,
+    fouEnable = false,
+    fouPort = 15547,
+    greUsers = [new Inbound.GreSettings.GreUser()],
+    clientToClient = false,
+    crossInbound = false,
+    ipRanges = [],
+    // User Limit K = how many peer ROUTERS an account may attach, and the panel gives it
+    // K consecutive inner addresses (one per peer). The cap is structural: only K
+    // addresses exist, so there is nothing to enforce at connect time. GRE has no session
+    // and no auth event, so a runtime limit could not be enforced anyway.
+    userLimit = 1,
+    // Kept for parity with the shared form; GRE enforces K structurally, so there is no
+    // "evict the oldest" admission decision to make.
+    userLimitStrategy = "accept",
+  ) {
+    super(protocol);
+    this.mtu = mtu;
+    this.ttl = ttl;
+    this.ipsecEnable = ipsecEnable;
+    this.ipsecPsk = ipsecPsk;
+    this.allowRaw = allowRaw;
+    this.fouEnable = fouEnable;
+    this.fouPort = fouPort;
+    this.greUsers = greUsers;
+    this.clientToClient = clientToClient;
+    this.crossInbound = crossInbound;
+    // Panel-managed, auto-assigned block. Read-only in the form.
+    this.ipRanges = ipRanges;
+    this.userLimit = userLimit;
+    this.userLimitStrategy = userLimitStrategy;
+  }
+
+  static fromJson(json = {}) {
+    return new Inbound.GreSettings(
+      Protocols.GRE,
+      json.mtu ?? 0,
+      json.ttl ?? 64,
+      json.ipsecEnable ?? false,
+      json.ipsecPsk ?? "",
+      json.allowRaw ?? true,
+      json.fouEnable ?? false,
+      json.fouPort ?? 15547,
+      Inbound.GreSettings.GreUser.fromJson(json.clients),
+      json.clientToClient ?? false,
+      json.crossInbound ?? false,
+      Array.isArray(json.ipRanges) ? json.ipRanges.slice() : [],
+      json.userLimit ?? 1,
+      json.userLimitStrategy ?? "accept",
+    );
+  }
+
+  toJson() {
+    return {
+      mtu: this.mtu,
+      ttl: this.ttl,
+      ipsecEnable: this.ipsecEnable,
+      ipsecPsk: this.ipsecPsk,
+      allowRaw: this.allowRaw,
+      fouEnable: this.fouEnable,
+      fouPort: this.fouPort,
+      clients: Inbound.GreSettings.GreUser.toJsonArray(this.greUsers),
+      clientToClient: this.clientToClient,
+      crossInbound: this.crossInbound,
+      ipRanges: this.ipRanges || [],
+      userLimit: this.userLimit,
+      userLimitStrategy: this.userLimitStrategy,
+    };
+  }
+};
+
+// A GRE account. Identity is `email` — there is no username, password or key, because the
+// protocol carries none. `peers` holds one slot per User Limit peer router.
+//
+// A peer's `peerIp` is the customer router's own public address. Leaving it EMPTY is a
+// deliberate, supported choice, not an incomplete record: that peer is then served by the
+// shared catch-all tunnel and its return path is learned from its first packets, which is
+// what lets a customer on a dynamic IP (or one who does not know their address yet) work.
+Inbound.GreSettings.GreUser = class extends XrayCommonClass {
+  constructor(
+    email = RandomUtil.randomLowerAndNum(9),
+    enable = true,
+    peers = [],
+    expiryTime = 0,
+    tgId = "",
+    subId = RandomUtil.randomLowerAndNum(16),
+    comment = "",
+    totalGB = 0,
+    limitIp = 0,
+    reset = 0,
+    slot = undefined,
+    created_at = undefined,
+    updated_at = undefined,
+  ) {
+    super();
+    this.email = email;
+    this.enable = enable;
+    // MUST round-trip: the backend sizes clients[].peers to the User Limit and every save
+    // posts the whole client back, so a model that drops the field would wipe the
+    // operator's peer addresses on the next edit. Same trap AwgUser.devices documents.
+    this.peers = Array.isArray(peers) ? peers : [];
+    this.expiryTime = expiryTime;
+    this.tgId = tgId;
+    this.subId = subId;
+    this.comment = comment;
+    this.totalGB = totalGB;
+    this.limitIp = limitIp;
+    this.reset = reset;
+    // MUST round-trip: see AwgUser.slot. undefined means "server allocates"; the browser
+    // never invents one, and forgetting it would move every account's tunnel address when
+    // an earlier account is deleted.
+    this.slot = slot;
+    this.created_at = created_at;
+    this.updated_at = updated_at;
+  }
+
+  // See AwgUser.id / MtprotoUser.id: email-as-identity, so the live object needs this or
+  // every id-keyed path (edit, row-key) sees undefined and posts to /updateClient/undefined.
+  get id() {
+    return this.email;
+  }
+
+  static fromJson(json = []) {
+    if (!Array.isArray(json))
+      return [new Inbound.GreSettings.GreUser()];
+    return json.map(
+      (j) =>
+        new Inbound.GreSettings.GreUser(
+          j.email,
+          j.enable ?? true,
+          Array.isArray(j.peers) ? j.peers : [],
+          j.expiryTime ?? 0,
+          j.tgId ?? "",
+          j.subId ?? "",
+          j.comment ?? "",
+          j.totalGB ?? 0,
+          j.limitIp ?? j.ipLimit ?? 0,
+          j.reset ?? 0,
+          j.slot,
+          j.created_at,
+          j.updated_at,
+        ),
+    );
+  }
+
+  static toJsonArray(users) {
+    return users.map((u) => u.toJson());
+  }
+
+  toJson() {
+    return {
+      id: this.email, // identity = email (no username/key); keeps shared id-based logic working
+      email: this.email,
+      enable: this.enable,
+      peers: this.peers,
+      expiryTime: this.expiryTime,
+      tgId: this.tgId,
+      subId: this.subId,
+      comment: this.comment,
+      totalGB: this.totalGB,
+      limitIp: this.limitIp,
+      reset: this.reset,
+      slot: this.slot,
+      created_at: this.created_at,
+      updated_at: this.updated_at,
+    };
+  }
+
+  get _expiryTime() {
+    if (this.expiryTime === 0) {
+      return null;
+    }
+    if (this.expiryTime < 0) {
+      return this.expiryTime / -86400000;
+    }
+    return moment(this.expiryTime);
+  }
+
+  set _expiryTime(t) {
+    if (t == null || t === "") {
+      this.expiryTime = 0;
+    } else {
+      this.expiryTime = t.valueOf();
+    }
+  }
+
+  get _totalGB() {
+    return NumberFormatter.toFixed(this.totalGB / SizeFormatter.ONE_GB, 2);
+  }
+
+  set _totalGB(gb) {
+    this.totalGB = NumberFormatter.toFixed(gb * SizeFormatter.ONE_GB, 0);
+  }
+};
+
+// Peer-slot accessors for the GRE client form.
+//
+// The backend sizes clients[].peers to the inbound's User Limit on save, but a brand-new
+// account has an empty array and the operator still has to be able to type into every
+// slot. These render K rows without ever growing the array DURING render: mutating state
+// from a v-for expression re-triggers the render and loops. The array is only extended in
+// the setter, i.e. from a real user event.
+function grePeerCount(inbound) {
+  const k = inbound && inbound.settings ? inbound.settings.userLimit : 1;
+  // 0 means "the maximum", matching wgcEffectiveK on the Go side.
+  if (k === 0 || k === undefined || k === null) return 64;
+  return Math.max(1, Math.min(64, Math.floor(k)));
+}
+
+function grePeerAt(client, i) {
+  if (!client || !Array.isArray(client.peers)) return null;
+  return client.peers[i] || null;
+}
+
+function grePeerField(client, i, field) {
+  const p = grePeerAt(client, i);
+  return p && p[field] ? p[field] : "";
+}
+
+function greSetPeerField(client, i, field, value) {
+  if (!client) return;
+  if (!Array.isArray(client.peers)) {
+    Vue.set(client, "peers", []);
+  }
+  while (client.peers.length <= i) {
+    client.peers.push({ peerIp: "", remark: "" });
+  }
+  const next = Object.assign({}, client.peers[i]);
+  next[field] = (value || "").trim();
+  Vue.set(client.peers, i, next);
+}
 
 // MTProto Proxy (Telegram) inbound settings.
 //

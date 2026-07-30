@@ -168,6 +168,17 @@ var coreCatalog = []coreSpec{
 		feats:      []string{featAmneziawg},
 	},
 	{
+		name: "gre", title: "GRE", backend: "GRE (kernel)",
+		desc: "Site-to-site router tunnels, optionally wrapped in IPsec",
+		// ip_gre is already a REQUIRED module for PPTP, so it is not repeated here; fou
+		// backs the optional UDP encapsulation and is absent on some minimal kernels.
+		optModules: []string{greFouModule},
+		// The IPsec mode rides the shared charon, so its connection files go with GRE while
+		// featStrongswan itself stays (L2TP/IKEv2 may still need it) - same reference-counted
+		// arrangement as the IKEv2 entry above.
+		globs: []string{"/etc/swanctl/conf.d/gre-*.conf"},
+	},
+	{
 		name: "mtproto", title: "MTProto Proxy", backend: "telemt",
 		desc:    "Telegram MTProto proxy",
 		daemons: []string{"telemt"},
@@ -394,6 +405,8 @@ func (s *CoreService) inboundCountsByCore() map[string]int {
 	add("wgc", len(wgc), err)
 	awg, err := s.awgService.GetAwgInbounds()
 	add("awg", len(awg), err)
+	gre, err := s.greService.GetGreInbounds()
+	add("gre", len(gre), err)
 	mt, err := s.mtprotoService.GetMtprotoInbounds()
 	add("mtproto", len(mt), err)
 	ssh, err := s.sshService.GetSshInbounds()

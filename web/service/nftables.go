@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/mhsanaei/3x-ui/v2/database/model"
@@ -21,7 +22,8 @@ const nftConfigFile = "/etc/vpn-ui/vpn.nft"
 // stay a superset of every protocolBase /16, so widen it when adding protocols.
 // Widened /13 -> /12 for AmneziaWG (base 8 -> 10.8/16): base 7 (wg-c) was the last
 // /16 inside the old /13, so 10.8.x fell outside firewalld trust + the routing
-// blackhole backstop until this widening.
+// blackhole backstop until this widening. The /12 reaches 10.15.255.255, so GRE
+// (base 9 -> 10.9/16) needed no further widening; bases 10-15 are still spare.
 const vpnAddrSpace = "10.0.0.0/12"
 
 // NftService manages nftables rules for L2TP, PPTP, and OpenVPN traffic accounting, TPROXY, and NAT.
@@ -94,6 +96,21 @@ func writeClientToClientRules(b *strings.Builder, subnets []string, enabled bool
 	}
 	for _, src := range subnets {
 		for _, dst := range subnets {
+			// The tunnel's own gateway address lives INSIDE the client subnet, so the
+			// client-to-client deny would otherwise swallow it and a client could not
+			// reach the address the panel tells it to route through. That is not
+			// client-to-client traffic: it terminates on this host. Verified on a live
+			// peer -- with the deny in place a gateway ping got 100% loss and worked the
+			// moment the toggle flipped, which reads as a dead tunnel even though
+			// forwarding was fine the whole time.
+			//
+			// Scoped to daddr INSIDE the subnet on purpose. A bare `fib daddr type local`
+			// would also match the server's public address and divert client traffic away
+			// from the TPROXY rules below, changing how every protocol egresses.
+			if !enabled {
+				b.WriteString(fmt.Sprintf(
+					"add rule ip vpn prerouting ip saddr %s ip daddr %s fib daddr type local accept\n", src, dst))
+			}
 			b.WriteString(fmt.Sprintf("add rule ip vpn prerouting ip saddr %s ip daddr %s %s\n", src, dst, verdict))
 		}
 	}
@@ -150,6 +167,7 @@ func (s *NftService) ApplyNftRules() error {
 	ikev2 := Ikev2Service{}
 	wg := WgcService{}
 	awg := AwgService{}
+	gre := GreService{}
 
 	l2tpInbounds, err := l2tp.GetL2tpInbounds()
 	if err != nil {
@@ -183,9 +201,13 @@ func (s *NftService) ApplyNftRules() error {
 	if err != nil {
 		return err
 	}
+	greInbounds, err := gre.GetGreInbounds()
+	if err != nil {
+		return err
+	}
 
 	// If no VPN inbounds, remove the table entirely
-	if len(l2tpInbounds) == 0 && len(pptpInbounds) == 0 && len(ovpnInbounds) == 0 && len(ocservInbounds) == 0 && len(sstpInbounds) == 0 && len(ikev2Inbounds) == 0 && len(wgcInbounds) == 0 && len(awgInbounds) == 0 {
+	if len(l2tpInbounds) == 0 && len(pptpInbounds) == 0 && len(ovpnInbounds) == 0 && len(ocservInbounds) == 0 && len(sstpInbounds) == 0 && len(ikev2Inbounds) == 0 && len(wgcInbounds) == 0 && len(awgInbounds) == 0 && len(greInbounds) == 0 {
 		s.runCmd("nft", "delete", "table", "ip", "vpn")
 		os.Remove(nftConfigFile)
 		return nil
@@ -314,6 +336,16 @@ func (s *NftService) ApplyNftRules() error {
 			continue
 		}
 		allNets = append(allNets, vpnNet{subnets: awgCIDRs(inbound, st), c2c: st.ClientToClient, cross: st.CrossInbound})
+	}
+	for _, inbound := range greInbounds {
+		if !inbound.Enable {
+			continue
+		}
+		st, err := gre.parseSettings(inbound)
+		if err != nil {
+			continue
+		}
+		allNets = append(allNets, vpnNet{subnets: greCIDRs(inbound, st), c2c: st.ClientToClient, cross: st.CrossInbound})
 	}
 	writeCrossInboundRules(&b, allNets)
 
@@ -498,6 +530,162 @@ func (s *NftService) ApplyNftRules() error {
 		}
 	}
 
+	// GRE rules — in 10.9.{id}. The kernel strips the GRE header before nftables sees
+	// anything, so the inner packet is ordinary TCP/UDP from a 10.9.x source and rides the
+	// same TPROXY rule shape as every other tunnel protocol.
+	//
+	// GRE needs two rule kinds none of the others do, both because it has no cryptographic
+	// handshake to lean on. See GreNftView.
+	//
+	// The anti-spoof allow-set is aggregated PER NETDEV ACROSS EVERY INBOUND before a single
+	// rule is emitted for it. That is load-bearing rather than tidy: only one unkeyed
+	// catch-all may bind a given local address, so every GRE inbound on one server address
+	// SHARES that netdev. Emitting one rule per inbound therefore had each inbound's rule
+	// drop every other inbound's accounts (`saddr != {its own addresses} drop`), which made
+	// a second GRE inbound completely unusable.
+	var greViews []GreNftView
+	for _, inbound := range greInbounds {
+		if !inbound.Enable {
+			continue
+		}
+		settings, err := gre.parseSettings(inbound)
+		if err != nil {
+			continue
+		}
+		greViews = append(greViews, gre.NftView(inbound, settings))
+	}
+	greIfaces, greAllowedByIface, greBlocked := mergeGreViews(greViews)
+	// 1. Anti-spoofing, per netdev. Without this any GRE peer could source another
+	//    account's inner address and have its traffic billed to them (or bypass its own
+	//    quota), because there is no per-peer crypto identity to contradict it.
+	for _, iface := range greIfaces {
+		addrs := greAllowedByIface[iface]
+		if len(addrs) == 0 {
+			b.WriteString(fmt.Sprintf("add rule ip vpn prerouting iifname \"%s\" counter drop comment \"gre-antispoof-all\"\n", iface))
+			continue
+		}
+		b.WriteString(fmt.Sprintf(
+			"add rule ip vpn prerouting iifname \"%s\" ip saddr != { %s } counter drop comment \"gre-antispoof\"\n",
+			iface, strings.Join(addrs, ", ")))
+	}
+	// 2. Hard block for accounts that are disabled, expired or over quota. Every other
+	//    protocol enforces this by refusing the handshake; here the account's route and
+	//    neighbour entry are withdrawn, but the promiscuous catch-all would still
+	//    decapsulate its packets, so the drop has to be explicit.
+	for _, cidr := range greBlocked {
+		b.WriteString(fmt.Sprintf("add rule ip vpn prerouting ip saddr %s counter drop comment \"gre-blocked\"\n", cidr))
+	}
+
+	for _, inbound := range greInbounds {
+		if !inbound.Enable {
+			continue
+		}
+		settings, err := gre.parseSettings(inbound)
+		if err != nil {
+			continue
+		}
+		port := gre.GetTproxyPort(inbound)
+		srcs := greCIDRs(inbound, settings)
+		// Clamp TCP MSS in BOTH directions, so a customer whose path is smaller than the
+		// tunnel device cannot negotiate segments the path will silently drop. GRE does not
+		// negotiate MTU and PMTU discovery through it is unreliable, so without this a
+		// constrained peer sees the classic black hole: small requests work, anything with
+		// full-size segments hangs.
+		//
+		// Both rules are needed, and clamping only one is worse than it looks. A SYN's MSS
+		// option constrains what the PEER sends, so the reply direction (daddr, the SYN-ACK)
+		// limits the client's uploads, while the request direction (saddr, the client's own
+		// SYN) is what limits every server's DOWNLOAD to it. Verified on a live customer
+		// router: with only the first rule the client still advertised mss=1436 into a 1388
+		// tunnel, and TLS handshakes hung on the certificate flight while small replies
+		// arrived fine.
+		//
+		// Only the reply direction can use `rt mtu` -- see greSettings.clampMss.
+		mss := settings.clampMss()
+		for _, src := range srcs {
+			b.WriteString(fmt.Sprintf(
+				"add rule ip vpn postrouting ip daddr %s tcp flags syn tcp option maxseg size set rt mtu counter comment \"gre-mss-clamp\"\n",
+				src))
+			b.WriteString(fmt.Sprintf(
+				"add rule ip vpn postrouting ip saddr %s tcp flags syn tcp option maxseg size gt %d tcp option maxseg size set %d counter comment \"gre-mss-clamp-out\"\n",
+				src, mss, mss))
+		}
+		writeClientToClientRules(&b, srcs, settings.ClientToClient)
+		for _, src := range srcs {
+			b.WriteString(fmt.Sprintf("add rule ip vpn prerouting ip saddr %s meta mark != 0xff ip protocol tcp tproxy to :%d meta mark set mark or 0x1 accept\n", src, port))
+			b.WriteString(fmt.Sprintf("add rule ip vpn prerouting ip saddr %s meta mark != 0xff ip protocol udp tproxy to :%d meta mark set mark or 0x1 accept\n", src, port))
+		}
+	}
+
+	// GRE raw-vs-IPsec filter. Mirrors the L2TP gate above, on protocol 47 instead of
+	// UDP/1701: when IPsec is required and raw is not allowed, accept only protocol-47
+	// packets that arrived inside an ESP SA (`meta secpath exists`) and drop the rest.
+	// Verified against the kernel: an ESP-wrapped peer keeps working while a bare-GRE peer
+	// is dropped.
+	// The gate has to be scoped, because protocol 47 is demultiplexed by ADDRESS PAIR and
+	// nothing else. A blanket `ip protocol 47 drop` refuses bare GRE for EVERY inbound, so
+	// one inbound switched to IPsec-only used to take every other inbound's raw peers down
+	// with it -- verified live: a healthy peer on another inbound went from 0% to 100% loss
+	// the moment this was set, and recovered when it was cleared.
+	//
+	// Enforcing it after decapsulation, where the inner source identifies the account, is not
+	// possible: `meta secpath exists` does NOT survive GRE decapsulation. Measured on the same
+	// box, 11 inner packets from an ESP-protected peer, 0 of them matching secpath.
+	//
+	// So: a pinned peer is gated on its own outer address, and the blanket rule is used only
+	// when NO enabled inbound allows raw, where it cannot be collateral damage.
+	greIpsecOnly := false      // at least one inbound requires IPsec
+	greAnyRawAllowed := false  // at least one inbound still accepts bare GRE
+	var greIpsecPeers []string // pinned peers of IPsec-only inbounds
+	greIpsecDynamic := []int{} // IPsec-only inbounds that also have dynamic peers
+	for _, inbound := range greInbounds {
+		if !inbound.Enable {
+			continue
+		}
+		settings, err := gre.parseSettings(inbound)
+		if err != nil {
+			continue
+		}
+		if !settings.IpsecEnable || settings.AllowRaw {
+			greAnyRawAllowed = true
+			continue
+		}
+		greIpsecOnly = true
+		hasDynamic := false
+		for _, client := range settings.Clients {
+			for _, p := range client.peerList() {
+				if ip := strings.TrimSpace(p.PeerIp); ip != "" {
+					greIpsecPeers = append(greIpsecPeers, ip)
+				} else {
+					hasDynamic = true
+				}
+			}
+		}
+		if hasDynamic {
+			greIpsecDynamic = append(greIpsecDynamic, inbound.Id)
+		}
+	}
+	if greIpsecOnly && !greAnyRawAllowed {
+		b.WriteString("add rule ip vpn input ip protocol 47 meta secpath exists accept\n")
+		b.WriteString("add rule ip vpn input ip protocol 47 drop\n")
+	} else if greIpsecOnly {
+		sort.Strings(greIpsecPeers)
+		for _, peer := range greIpsecPeers {
+			b.WriteString(fmt.Sprintf(
+				"add rule ip vpn input ip saddr %s ip protocol 47 meta secpath exists accept\n", peer))
+			b.WriteString(fmt.Sprintf(
+				"add rule ip vpn input ip saddr %s ip protocol 47 counter drop comment \"gre-ipsec-only\"\n", peer))
+		}
+		// Say this out loud rather than pretending the setting took effect: a dynamic peer
+		// arrives on the shared catch-all and cannot be told apart from another inbound's
+		// raw peer before decapsulation.
+		for _, id := range greIpsecDynamic {
+			logger.Warning("GRE: inbound", id,
+				"requires IPsec but has dynamic peer slots while another inbound allows raw GRE;",
+				"bare GRE cannot be refused for those peers - pin their peer IPs to enforce it")
+		}
+	}
+
 	// Write and load atomically
 	if err := os.MkdirAll("/etc/vpn-ui", 0755); err != nil {
 		return err
@@ -569,7 +757,7 @@ func nftAcctChain(protocol, dir string) string {
 // hyphen-free so they match nftAcctChain's output ("wgc", not "wg-c"). Kept in one place
 // so adding a protocol means adding one entry rather than editing four rule blocks.
 var acctProtocols = []string{
-	"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wgc", "awg",
+	"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wgc", "awg", "gre",
 }
 
 // acctRuleHandles returns the handles of every rule in `chain` that references the named
@@ -886,6 +1074,48 @@ func wgcCIDRs(inbound *model.Inbound, settings *wgcSettings) []string {
 func awgCIDRs(inbound *model.Inbound, settings *awgSettings) []string {
 	n, p := awgBlockFor(inbound, settings)
 	return []string{fmt.Sprintf("%s/%d", n.String(), p)}
+}
+
+func greCIDRs(inbound *model.Inbound, settings *greSettings) []string {
+	n, p := greBlockFor(inbound, settings)
+	return []string{fmt.Sprintf("%s/%d", n.String(), p)}
+}
+
+// mergeGreViews folds every GRE inbound's view into ONE allow-set per netdev, plus the
+// combined block list. Returns the netdev names in sorted order and their sorted addresses,
+// so a regenerated ruleset is byte-identical when nothing changed.
+//
+// Merging is REQUIRED, not cosmetic. Only one unkeyed catch-all may bind a given local
+// address, so every GRE inbound on one server address shares that netdev. Emitting one
+// anti-spoof rule per inbound made each inbound's rule drop every other inbound's accounts,
+// which left a second GRE inbound unable to pass any traffic at all.
+func mergeGreViews(views []GreNftView) (ifaces []string, allowed map[string][]string, blocked []string) {
+	set := map[string]map[string]bool{}
+	for _, v := range views {
+		for iface, addrs := range v.Allowed {
+			if set[iface] == nil {
+				set[iface] = map[string]bool{}
+			}
+			for _, a := range addrs {
+				set[iface][a] = true
+			}
+		}
+		blocked = append(blocked, v.Blocked...)
+	}
+	allowed = make(map[string][]string, len(set))
+	ifaces = make([]string, 0, len(set))
+	for iface, addrSet := range set {
+		ifaces = append(ifaces, iface)
+		list := make([]string, 0, len(addrSet))
+		for a := range addrSet {
+			list = append(list, a)
+		}
+		sort.Strings(list)
+		allowed[iface] = list
+	}
+	sort.Strings(ifaces)
+	sort.Strings(blocked)
+	return ifaces, allowed, blocked
 }
 
 func (s *NftService) runCmd(name string, args ...string) error {

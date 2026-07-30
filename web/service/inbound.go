@@ -644,7 +644,7 @@ func (s *InboundService) checkEmailsExistForClients(clients []model.Client) (str
 // protocols), silently killing the clients' route to the internet. Changes to
 // them are applied by a full Xray restart instead.
 func isVpnProtocol(p model.Protocol) bool {
-	return p == model.L2TP || p == model.PPTP || p == model.OPENVPN || p == model.OPENCONNECT || p == model.SSTP || p == model.IKEV2 || p == model.WGC || p == model.AWG
+	return p == model.L2TP || p == model.PPTP || p == model.OPENVPN || p == model.OPENCONNECT || p == model.SSTP || p == model.IKEV2 || p == model.WGC || p == model.AWG || p == model.GRE
 }
 
 // isRelayProtocol reports whether p is a relay: it terminates its own protocol outside
@@ -905,7 +905,7 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	}
 
 	// Check for duplicate L2TP/PPTP/OpenVPN/SSTP usernames
-	if inbound.Protocol == "l2tp" || inbound.Protocol == "pptp" || inbound.Protocol == "openvpn" || inbound.Protocol == "sstp" || inbound.Protocol == "ikev2" || inbound.Protocol == "wg-c" || inbound.Protocol == "awg" || inbound.Protocol == "ssh" {
+	if inbound.Protocol == "l2tp" || inbound.Protocol == "pptp" || inbound.Protocol == "openvpn" || inbound.Protocol == "sstp" || inbound.Protocol == "ikev2" || inbound.Protocol == "wg-c" || inbound.Protocol == "awg" || inbound.Protocol == "gre" || inbound.Protocol == "ssh" {
 		dupUser, err := s.checkPPPUsernamesForDuplicates(string(inbound.Protocol), clients)
 		if err != nil {
 			return inbound, false, err
@@ -1426,7 +1426,7 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	}
 
 	// Check for duplicate L2TP/PPTP/OpenVPN/SSTP usernames
-	if oldInbound.Protocol == "l2tp" || oldInbound.Protocol == "pptp" || oldInbound.Protocol == "openvpn" || oldInbound.Protocol == "sstp" || oldInbound.Protocol == "ikev2" || oldInbound.Protocol == "wg-c" || oldInbound.Protocol == "awg" || oldInbound.Protocol == "ssh" {
+	if oldInbound.Protocol == "l2tp" || oldInbound.Protocol == "pptp" || oldInbound.Protocol == "openvpn" || oldInbound.Protocol == "sstp" || oldInbound.Protocol == "ikev2" || oldInbound.Protocol == "wg-c" || oldInbound.Protocol == "awg" || oldInbound.Protocol == "gre" || oldInbound.Protocol == "ssh" {
 		dupUser, err := s.checkPPPUsernamesForDuplicates(string(oldInbound.Protocol), clients)
 		if err != nil {
 			return false, err
@@ -1621,7 +1621,7 @@ func (s *InboundService) buildTargetClientFromSource(source model.Client, target
 		// protocols keyed on the password (see clientIdentityKey).
 		target.ID = s.generateRandomCredential(targetProtocol)
 		target.Password = s.generateRandomCredential(targetProtocol)
-	case model.WGC, model.AWG, model.MTPROTO, model.SSH:
+	case model.WGC, model.AWG, model.GRE, model.MTPROTO, model.SSH:
 		// Email-identity protocols: their settings JSON stores id=email and the
 		// panel's client models derive id from email, so a random credential here
 		// would name an account that does not exist.
@@ -1938,7 +1938,7 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	}
 
 	// Check for duplicate L2TP/PPTP/OpenVPN/SSTP usernames (allow keeping the same username)
-	if oldInbound.Protocol == "l2tp" || oldInbound.Protocol == "pptp" || oldInbound.Protocol == "openvpn" || oldInbound.Protocol == "sstp" || oldInbound.Protocol == "ikev2" || oldInbound.Protocol == "wg-c" || oldInbound.Protocol == "awg" || oldInbound.Protocol == "ssh" {
+	if oldInbound.Protocol == "l2tp" || oldInbound.Protocol == "pptp" || oldInbound.Protocol == "openvpn" || oldInbound.Protocol == "sstp" || oldInbound.Protocol == "ikev2" || oldInbound.Protocol == "wg-c" || oldInbound.Protocol == "awg" || oldInbound.Protocol == "gre" || oldInbound.Protocol == "ssh" {
 		oldUsername := oldClients[clientIndex].ID
 		newUsername := clients[0].ID
 		if newUsername != oldUsername {
@@ -3993,7 +3993,7 @@ func (s *InboundService) MigrationAccountSlots() {
 // The Xray protocols are deliberately absent. Their clients have always been given a
 // subId on creation, so an empty one there is an admin who cleared the field in the
 // client form, and minting one would undo that choice.
-var subBackfillProtocols = []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg", "mtproto", "ssh"}
+var subBackfillProtocols = []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg", "gre", "mtproto", "ssh"}
 
 // MigrationSubIds gives every VPN-protocol account that has none its own subscription
 // id. One id per client (clients that share a subId share one subscription link, which

@@ -128,6 +128,7 @@ type CoreService struct {
 	ikev2Service   Ikev2Service
 	wgcService     WgcService
 	awgService     AwgService
+	greService     GreService
 	mtprotoService MtprotoService
 	sshService     SshService
 	xrayService    XrayService
@@ -328,6 +329,7 @@ func (s *CoreService) GetCoresStatus() []CoreStatus {
 		s.ikev2Status(),
 		s.wgcStatus(),
 		s.awgStatus(),
+		s.greStatus(),
 		s.mtprotoStatus(),
 		s.sshStatus(),
 		s.radiusStatus(),
@@ -570,6 +572,31 @@ func (s *CoreService) wgcStatus() CoreStatus {
 	return cs
 }
 
+// greStatus reports the GRE core. Like wg-c and awg it has no daemon: the data plane is the
+// in-tree ip_gre module plus the netdevs GreService reconciles over netlink. ip_gre is
+// frequently compiled into the kernel rather than built as a module, so availability is
+// probed via the fallback device the driver registers, not only via /sys/module.
+func (s *CoreService) greStatus() CoreStatus {
+	cs := CoreStatus{Name: "gre"}
+	inbounds, _ := s.greService.GetGreInbounds()
+	cs.Inbounds = len(inbounds)
+	if !s.greService.GreAvailable() {
+		cs.State = CoreNotInstalled
+		cs.Detail = "kernel GRE (ip_gre) not available (run Core Settings setup)"
+		return cs
+	}
+	cs.Version = "kernel"
+	switch {
+	case cs.Inbounds == 0:
+		cs.State = CoreIdle
+	case s.greService.AnyInterfaceUp():
+		cs.State = CoreRunning
+	default:
+		cs.State = CoreStopped
+	}
+	return cs
+}
+
 // awgStatus reports the AmneziaWG core. Like wg-c it has no daemon: the data plane is the
 // out-of-tree amneziawg kernel module (DKMS-built) + the panel's wgctrl-managed interfaces.
 func (s *CoreService) awgStatus() CoreStatus {
@@ -799,6 +826,8 @@ func (s *CoreService) RestartCore(name string) error {
 		return s.wgcService.RestartServices()
 	case "awg":
 		return s.awgService.RestartServices()
+	case "gre":
+		return s.greService.RestartServices()
 	case "mtproto":
 		return s.mtprotoService.RestartServices()
 	case "ssh":
@@ -817,7 +846,7 @@ func (s *CoreService) RestartCore(name string) error {
 // one failing core doesn't abort the rest.
 func (s *CoreService) RestartAll() error {
 	var errs []string
-	for _, name := range []string{"xray", "l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wgc", "awg", "mtproto", "ssh", "radius"} {
+	for _, name := range []string{"xray", "l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wgc", "awg", "gre", "mtproto", "ssh", "radius"} {
 		if err := s.RestartCore(name); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 		}
@@ -854,6 +883,8 @@ func (s *CoreService) StopCore(name string) error {
 		return s.wgcService.StopServices()
 	case "awg":
 		return s.awgService.StopServices()
+	case "gre":
+		return s.greService.StopServices()
 	case "mtproto":
 		return s.mtprotoService.StopServices()
 	case "ssh":
@@ -902,6 +933,19 @@ func (s *CoreService) CoreLogs(name string) string {
 			up = "yes"
 		}
 		return fmt.Sprintf("AmneziaWG runs in-kernel via the wgctrl fork (no daemon log).\nModule version: %s\nInterface(s) up: %s", amneziawgModuleVersion(), up)
+	case "gre":
+		if !s.greService.GreAvailable() {
+			return "GRE: kernel GRE (ip_gre) not available on this host."
+		}
+		up := "no"
+		if s.greService.AnyInterfaceUp() {
+			up = "yes"
+		}
+		fou := "no"
+		if s.greService.FouAvailable() {
+			fou = "yes"
+		}
+		return fmt.Sprintf("GRE runs in-kernel via netlink (no daemon log).\nTunnel(s) up: %s\nFOU (UDP encap) available: %s", up, fou)
 	case "mtproto":
 		return procMgr.LogsByPrefix("mtproto-server-")
 	case "ssh":

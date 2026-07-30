@@ -151,6 +151,8 @@ func protocolBase(proto string) int {
 		return 7
 	case "awg":
 		return 8
+	case "gre":
+		return 9
 	default: // l2tp
 		return 0
 	}
@@ -307,7 +309,7 @@ func usedVpnSubnets(excludeId int) map[string]bool {
 		return used
 	}
 	var inbounds []*model.Inbound
-	db.Where("protocol IN ?", []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg"}).Find(&inbounds)
+	db.Where("protocol IN ?", []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg", "gre"}).Find(&inbounds)
 	for _, ib := range inbounds {
 		if ib.Id == excludeId {
 			continue
@@ -391,7 +393,7 @@ func AutoExpandVpnRanges(protocol string) bool {
 // re-allocated rather than rejected on conflict.
 func normalizeRanges(inbound *model.Inbound, excludeId int) error {
 	proto := string(inbound.Protocol)
-	if proto != "l2tp" && proto != "pptp" && proto != "openvpn" && proto != "openconnect" && proto != "sstp" && proto != "ikev2" && proto != "wg-c" && proto != "awg" {
+	if proto != "l2tp" && proto != "pptp" && proto != "openvpn" && proto != "openconnect" && proto != "sstp" && proto != "ikev2" && proto != "wg-c" && proto != "awg" && proto != "gre" {
 		return nil
 	}
 
@@ -443,6 +445,10 @@ func normalizeRanges(inbound *model.Inbound, excludeId int) error {
 	case "awg":
 		// AmneziaWG: identical gateway model to wg-c, in the 10.8 /16 (base 8).
 		normalized, err = normalizeBlockRanges(inbound.Id, clientCount, nextPow2(wgcDecodeUserLimit(raw)), protocolBase("awg"), -1, used, ranges)
+	case "gre":
+		// GRE: same gateway model again, in the 10.9 /16 (base 9). An account owns one
+		// aligned block and each of its K peer routers takes one address out of it.
+		normalized, err = normalizeBlockRanges(inbound.Id, clientCount, nextPow2(wgcDecodeUserLimit(raw)), protocolBase("gre"), -1, used, ranges)
 	default:
 		normalized, err = normalizePppRanges(proto, ranges, clientCount, userLimit, used)
 	}
@@ -455,7 +461,7 @@ func normalizeRanges(inbound *model.Inbound, excludeId int) error {
 	delete(raw, "ipRange") // superseded by ipRanges
 
 	// L2TP/PPTP: keep localIp in sync with the first range's .1 (the PPP gateway).
-	if proto != "openvpn" && proto != "openconnect" && proto != "ikev2" && proto != "wg-c" && proto != "awg" && len(normalized) > 0 {
+	if proto != "openvpn" && proto != "openconnect" && proto != "ikev2" && proto != "wg-c" && proto != "awg" && proto != "gre" && len(normalized) > 0 {
 		if s, _, ok := parseRange(normalized[0]); ok {
 			lb, _ := json.Marshal(fmt.Sprintf("%d.%d.%d.1", s[0], s[1], s[2]))
 			raw["localIp"] = lb
@@ -827,7 +833,7 @@ func slotsForNewAccounts(existing []model.Client, n int) []int {
 }
 
 var slotPoolProtocols = []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp",
-	"ikev2", "wg-c", "awg"}
+	"ikev2", "wg-c", "awg", "gre"}
 
 // slotPoolProtocol reports whether a protocol's accounts draw a tunnel address from a pool,
 // which is the only case a slot means anything. mtproto and ssh relay (identity is the
@@ -986,7 +992,7 @@ func vpnAccountsCapacity(subnets []string, k int) int {
 func maxVpnAccounts(inbound *model.Inbound) (int, bool) {
 	proto := string(inbound.Protocol)
 	switch proto {
-	case "l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg":
+	case "l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg", "gre":
 	default:
 		return 0, false
 	}
@@ -1016,9 +1022,9 @@ func maxVpnAccounts(inbound *model.Inbound) (int, bool) {
 	case "l2tp", "pptp", "sstp":
 		// PPP: no per-inbound cap, grows across the whole /16.
 		return free * accountsPerSubnet(decodeUserLimit(raw)), true
-	case "wg-c", "awg":
-		// Gateway model: block sizing rounds the wg-c/awg User Limit up to a power of two;
-		// the single contiguous block is capped at 64 /24s (a /18).
+	case "wg-c", "awg", "gre":
+		// Gateway model: block sizing rounds the wg-c/awg/gre User Limit up to a power of
+		// two; the single contiguous block is capped at 64 /24s (a /18).
 		n24 := free
 		if n24 > 64 {
 			n24 = 64

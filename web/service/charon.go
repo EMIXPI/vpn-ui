@@ -37,7 +37,9 @@ func swanctlBin() string {
 }
 
 // charonNeeded reports whether the shared charon should be running: true when any
-// enabled IKEv2 inbound exists, or any enabled L2TP inbound has IPsec enabled.
+// enabled IKEv2 inbound exists, or any enabled L2TP inbound has IPsec enabled, or any
+// enabled GRE inbound has IPsec enabled (GRE-over-IPsec is ESP transport on this same
+// daemon).
 func charonNeeded() bool {
 	db := database.GetDB()
 	if db == nil {
@@ -52,6 +54,13 @@ func charonNeeded() bool {
 	db.Model(&model.Inbound{}).Where("protocol = ? AND enable = ?", "l2tp", true).Find(&l2tps)
 	for _, ib := range l2tps {
 		if l2tpInboundHasIpsec(ib) {
+			return true
+		}
+	}
+	var gres []*model.Inbound
+	db.Model(&model.Inbound{}).Where("protocol = ? AND enable = ?", "gre", true).Find(&gres)
+	for _, ib := range gres {
+		if greInboundHasIpsec(ib) {
 			return true
 		}
 	}

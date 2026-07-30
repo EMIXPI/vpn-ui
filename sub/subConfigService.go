@@ -10,9 +10,10 @@ import (
 
 // Config-file downloads for the subscriber page.
 //
-// Three protocols cannot be configured from a link alone: OpenVPN needs its .ovpn
-// profile (CA + tls-crypt + cipher list) and WireGuard (C) / AmneziaWG need a .conf per
-// device (keys, address, DNS, and awg's obfuscation values). The subscriber page
+// Four protocols cannot be configured from a link alone: OpenVPN needs its .ovpn
+// profile (CA + tls-crypt + cipher list), WireGuard (C) / AmneziaWG need a .conf per
+// device (keys, address, DNS, and awg's obfuscation values), and GRE has no client app at
+// all, so its artifact is the plain-text set of values to type into a router. The subscriber page
 // therefore offers them as downloads, rendered by the same service functions the panel's
 // own download buttons use, so a profile taken from the subscription is byte-for-byte the
 // profile the admin sees: inbound settings and external proxies included.
@@ -53,7 +54,7 @@ func (s *SubService) ConfigFiles(subId string, host string) []SubConfigFile {
 	seen := map[string]bool{}
 	for _, inbound := range inbounds {
 		switch inbound.Protocol {
-		case model.OPENVPN, model.WGC, model.AWG:
+		case model.OPENVPN, model.WGC, model.AWG, model.GRE:
 		default:
 			continue
 		}
@@ -167,6 +168,30 @@ func (s *SubService) inboundConfigFiles(inbound *model.Inbound, email, host stri
 				Label:       wgLabel("AmneziaWG", cfg.Remark, inbound.Remark),
 				Filename:    configFilename(inbound.Remark, "awg", wgVariant(cfg.Remark, i), "conf"),
 				ContentType: "application/x-wireguard-profile",
+				Content:     cfg.Config,
+			})
+		}
+		return out
+
+	case model.GRE:
+		// GRE has no client app and therefore no profile format: the artifact is the set of
+		// values the customer types into their router, so it ships as plain text.
+		cfgs, err := s.greService.RenderPeerConfigs(inbound, email, host)
+		if err != nil {
+			return nil
+		}
+		out := make([]SubConfigFile, 0, len(cfgs))
+		for i, cfg := range cfgs {
+			variant := ""
+			if len(cfgs) > 1 {
+				variant = fmt.Sprintf("peer%d", cfg.PeerIndex+1)
+			}
+			out = append(out, SubConfigFile{
+				Key:         fmt.Sprintf("gre-%d-%d", inbound.Id, i),
+				Protocol:    string(model.GRE),
+				Label:       wgLabel("GRE", cfg.Remark, inbound.Remark),
+				Filename:    configFilename(inbound.Remark, "gre", variant, "txt"),
+				ContentType: "text/plain; charset=utf-8",
 				Content:     cfg.Config,
 			})
 		}

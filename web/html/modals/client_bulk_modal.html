@@ -352,6 +352,8 @@
                     return new Inbound.WgcSettings.WgUser();
                 case Protocols.AWG:
                     return new Inbound.AwgSettings.AwgUser();
+                case Protocols.GRE:
+                    return new Inbound.GreSettings.GreUser();
                 case Protocols.MTPROTO:
                     return new Inbound.MtprotoSettings.MtprotoUser();
                 case Protocols.SSH:

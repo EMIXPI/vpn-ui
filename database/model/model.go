@@ -29,6 +29,7 @@ const (
 	IKEV2       Protocol = "ikev2"
 	WGC         Protocol = "wg-c"
 	AWG         Protocol = "awg"
+	GRE         Protocol = "gre"
 	MTPROTO     Protocol = "mtproto"
 	SSH         Protocol = "ssh"
 	// UI stores Hysteria v1 and v2 both as "hysteria" and uses
@@ -401,6 +402,25 @@ type Client struct {
 	UserLimit     *int                  `json:"userLimit,omitempty"`     // max devices (distinct IPs); nil=absent, 0=no limit
 	ExternalProxy []ClientExternalProxy `json:"externalProxy,omitempty"` // alternate link endpoints (links only)
 
+	// GRE per-account peer slots, one entry per peer the account may connect from, sized to
+	// the inbound's User Limit. Here for the same reason as the MTProto block above: creating
+	// an inbound round-trips every client through THIS struct, so a pinned peer address sent
+	// by the UI was silently dropped and the account came up as a dynamic peer instead --
+	// wrong device, wrong reverse path, and no error anywhere. Editing an existing inbound
+	// never hit it, because that path mutates the settings map in place and keeps keys it does
+	// not know. omitempty so no other protocol's client JSON grows a byte.
+	//
+	// An EMPTY element is meaningful and must survive: it is a deliberately unpinned peer
+	// slot, and the array's LENGTH is the slot count.
+	Peers []ClientGrePeer `json:"peers,omitempty"`
+
 	CreatedAt int64 `json:"created_at,omitempty"` // Creation timestamp
 	UpdatedAt int64 `json:"updated_at,omitempty"` // Last update timestamp
+}
+
+// ClientGrePeer is one GRE peer slot. The JSON tags MUST match the service-side grePeer, or
+// normalizing a client through Client silently rewrites what the data plane reads.
+type ClientGrePeer struct {
+	PeerIp string `json:"peerIp,omitempty"`
+	Remark string `json:"remark,omitempty"`
 }

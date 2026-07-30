@@ -212,6 +212,11 @@ class DBInbound {
                 // AmneziaWG is account-based (email identity, one keypair per account),
                 // the same gateway model as WireGuard (C) plus DPI obfuscation.
                 return true;
+            case Protocols.GRE:
+                // GRE is account-based (email identity, one address block per account).
+                // There is no credential of any kind: an account IS its addresses, and
+                // each of its peer routers takes one of them.
+                return true;
             case Protocols.MTPROTO:
                 // MTProto Proxy is account-based: one secret per account, many
                 // accounts per inbound (the proxy matches the presented secret).

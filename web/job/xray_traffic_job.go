@@ -27,6 +27,7 @@ type XrayTrafficJob struct {
 	ikev2Service    service.Ikev2Service
 	wgcService      service.WgcService
 	awgService      service.AwgService
+	greService      service.GreService
 	mtprotoService  service.MtprotoService
 	sshService      service.SshService
 	nftService      service.NftService
@@ -59,6 +60,7 @@ func NewXrayTrafficJob(rs *service.RadiusService) *XrayTrafficJob {
 	j.sweeper.Register(&j.ikev2Service)
 	j.sweeper.Register(&j.wgcService)
 	j.sweeper.Register(&j.awgService)
+	j.sweeper.Register(&j.greService)
 	return j
 }
 
@@ -115,6 +117,13 @@ func (j *XrayTrafficJob) Run() {
 	if err := j.awgService.GenerateAllConfigs(); err != nil {
 		logger.Debug("awg: peer reconcile failed:", err)
 	}
+	// GRE: same contract, and it matters MORE here than for the WireGuard family. GRE has no
+	// handshake to refuse, so this reconcile IS the enforcement: it deletes a disabled
+	// account's point-to-point device and withdraws its route and learned neighbour entry,
+	// leaving it with no reverse path at all.
+	if err := j.greService.GenerateAllConfigs(); err != nil {
+		logger.Debug("gre: peer reconcile failed:", err)
+	}
 	// IKEv2 psk/eap-tls: same hard-enforcement contract, for the same reason. Those two
 	// modes authenticate locally at charon (no RADIUS round-trip that could re-check the
 	// account), so the sweep below only terminates the SA and the client re-dials into the
@@ -137,6 +146,7 @@ func (j *XrayTrafficJob) Run() {
 		"ikev2":       j.radiusService.GetSessions("ikev2"),
 		"wg-c":        j.radiusService.GetSessions("wg-c"),
 		"awg":         j.radiusService.GetSessions("awg"),
+		"gre":         j.radiusService.GetSessions("gre"),
 	}
 	clientTraffics = append(clientTraffics, j.nftService.CollectAndResetTraffic(vpnSessions)...)
 

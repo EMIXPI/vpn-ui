@@ -53,12 +53,13 @@ const AccountExport = {
           || proto === Protocols.SSH);
         const isWgc = (proto === Protocols.WGC);
         const isAwg = (proto === Protocols.AWG);
+        const isGre = (proto === Protocols.GRE);
         const isMtproto = (proto === Protocols.MTPROTO);
         const isSsh = (proto === Protocols.SSH);
         // MTProto has no username (identity = email, the wg-c model) and no UUID; its
         // credential is the secret, which is already embedded in each link.
         const username = vpnUserPass ? (client.id || client.email || '') : (client.email || '');
-        const uuid = (!vpnUserPass && !isWgc && !isAwg && !isMtproto && client.id
+        const uuid = (!vpnUserPass && !isWgc && !isAwg && !isGre && !isMtproto && client.id
           && client.id !== client.password && client.id !== client.email) ? client.id : '';
 
         const base = {
@@ -136,6 +137,25 @@ const AccountExport = {
           continue;
         }
 
+        // GRE: there is no key, password or link at all, and no client app: the account's
+        // artifact is the block of values the customer types into their router. So the TXT
+        // config block carries that recipe and there is NOTHING to put in a QR (a router
+        // setup is not a scannable URI), which is why qr is left empty rather than being
+        // handed the recipe text like awg's .conf.
+        if (isGre) {
+          const peers = await AccountExport._fetchConfigs(dbInbound.id, client.email, 'gre-configs');
+          if (!peers.length) { cards.push(base); continue; }
+          for (const peer of peers) {
+            const label = peer.remark || ('Peer ' + ((peer.peerIndex || 0) + 1));
+            cards.push(Object.assign({}, base, {
+              remark: base.remark + (peers.length > 1 ? ' (' + label + ')' : ''),
+              qr: '',
+              configText: peer.config || '',
+            }));
+          }
+          continue;
+        }
+
         // SSH: fetch the ssh:// share link (one per endpoint) for the QR while keeping
         // the server/port/user/pass rows. The backend builds the link so the modal QR
         // and this export stay identical.
@@ -202,7 +222,8 @@ const AccountExport = {
     const p = (dbInbound.protocol || '').toLowerCase();
     return p === Protocols.L2TP || p === Protocols.PPTP || p === Protocols.OPENVPN
       || p === Protocols.OPENCONNECT || p === Protocols.SSTP || p === Protocols.IKEV2
-      || p === Protocols.WGC || p === Protocols.AWG || p === Protocols.MTPROTO || p === Protocols.SSH;
+      || p === Protocols.WGC || p === Protocols.AWG || p === Protocols.GRE
+      || p === Protocols.MTPROTO || p === Protocols.SSH;
   },
 
   // _protocolLabel is the human display name shown in the TXT/PDF. The VPN protocols
@@ -230,6 +251,12 @@ const AccountExport = {
       case Protocols.IKEV2: return 'IKEv2';
       case Protocols.WGC: return 'WireGuard (C)';
       case Protocols.AWG: return 'AmneziaWG';
+      case Protocols.GRE: {
+        // Mirrors the L2TP label: the encryption mode is the thing an operator most needs
+        // to see at a glance, because bare GRE is cleartext.
+        if (!s.ipsecEnable) return 'GRE/RAW';
+        return s.allowRaw ? 'GRE/IPsec (raw allowed)' : 'GRE/IPsec';
+      }
       case Protocols.SSH: return 'SSH';
       case Protocols.MTPROTO: return 'MTProto'; // mode appended per-card in buildCards
       default: return (dbInbound.protocol || '').toUpperCase();
@@ -250,6 +277,9 @@ const AccountExport = {
   },
 
   _portText(dbInbound, inbound) {
+    // GRE is IP protocol 47 and has no ports at all, so printing the inbound's stored
+    // number would be actively misleading: nothing listens on it.
+    if ((dbInbound.protocol || '').toLowerCase() === Protocols.GRE) return 'n/a (IP proto 47)';
     if (dbInbound.isOpenvpn) {
       const s = inbound.settings || {};
       const parts = [];
@@ -266,6 +296,11 @@ const AccountExport = {
       const ipsecOn = s.ipsecEnable !== undefined ? !!s.ipsecEnable
         : (s.ipsec !== undefined ? !!s.ipsec : true);
       return ipsecOn ? (s.ipsecPsk || s.psk || '') : '';
+    }
+    // GRE: the IPsec PSK is per INBOUND (shared by its accounts), like L2TP's.
+    if ((dbInbound.protocol || '').toLowerCase() === Protocols.GRE) {
+      const s = inbound.settings || {};
+      return s.ipsecEnable ? (s.ipsecPsk || '') : '';
     }
     // WireGuard (C) / AmneziaWG: when preshared-key mode is on, each account has its own PSK.
     const wgLike = (dbInbound.protocol || '').toLowerCase();

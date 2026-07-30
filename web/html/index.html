@@ -2228,13 +2228,13 @@
         this.showAlert = false;
       },
       vpnCoreStatuses() {
-        const order = ['l2tp', 'ipsec', 'pptp', 'openvpn', 'openconnect', 'sstp', 'ikev2', 'wgc', 'awg', 'mtproto', 'ssh', 'radius'];
+        const order = ['l2tp', 'ipsec', 'pptp', 'openvpn', 'openconnect', 'sstp', 'ikev2', 'wgc', 'awg', 'gre', 'mtproto', 'ssh', 'radius'];
         const byName = {};
         (this.coreStatuses || []).forEach(c => { byName[c.name] = c; });
         return order.map(n => byName[n] || { name: n, state: 'unknown' });
       },
       coreLabel(name) {
-        return { l2tp: 'L2TP', ipsec: 'IPsec', pptp: 'PPTP', openvpn: 'OpenVPN', openconnect: 'OpenConnect (cisco)', sstp: 'SSTP', ikev2: 'IKEv2', wgc: 'WireGuard (C)', awg: 'AmneziaWG', mtproto: 'MTProto Proxy', ssh: 'SSH', radius: 'RADIUS' }[name] || name;
+        return { l2tp: 'L2TP', ipsec: 'IPsec', pptp: 'PPTP', openvpn: 'OpenVPN', openconnect: 'OpenConnect (cisco)', sstp: 'SSTP', ikev2: 'IKEv2', wgc: 'WireGuard (C)', awg: 'AmneziaWG', gre: 'GRE', mtproto: 'MTProto Proxy', ssh: 'SSH', radius: 'RADIUS' }[name] || name;
       },
       coreStateColor(state) {
         return { running: '#52c41a', idle: '#1890ff', stopped: '#faad14', not_installed: '#8c8c8c', error: '#f5222d' }[state] || '#8c8c8c';

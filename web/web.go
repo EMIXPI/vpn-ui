@@ -114,6 +114,7 @@ type Server struct {
 	ikev2Service       service.Ikev2Service
 	wgcService         service.WgcService
 	awgService         service.AwgService
+	greService         service.GreService
 	mtprotoService     service.MtprotoService
 	sshService         service.SshService
 	sshOutboundService service.SshOutboundService
@@ -337,6 +338,7 @@ func (s *Server) startTask() {
 	s.ikev2Service.InitIkev2()
 	s.wgcService.InitWgc()
 	s.awgService.InitAwg()
+	s.greService.InitGre()
 	s.mtprotoService.InitMtproto()
 	s.sshService.InitSsh()
 	s.sshOutboundService.InitSshOutbound()

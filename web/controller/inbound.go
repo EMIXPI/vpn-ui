@@ -30,6 +30,7 @@ type InboundController struct {
 	ikev2Service   service.Ikev2Service
 	wgcService     service.WgcService
 	awgService     service.AwgService
+	greService     service.GreService
 	mtprotoService service.MtprotoService
 	sshService     service.SshService
 }
@@ -111,6 +112,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.GET("/:id/wgc-configs", read, owns, a.getWgcConfigs)
 	// AmneziaWG: render a client's per-device .conf(s) with obfuscation (server-minted keys).
 	g.GET("/:id/awg-configs", read, owns, a.getAwgConfigs)
+	g.GET("/:id/gre-configs", read, owns, a.getGreConfigs)
 	g.GET("/:id/ssh-configs", read, owns, a.getSshConfigs)
 }
 
@@ -361,6 +363,26 @@ func (a *InboundController) awgChanged(clientOnly bool) {
 	a.xrayService.SetToNeedRestart()
 }
 
+// onGreChanged / onGreClientChanged reconcile GRE the same way (see awgChanged): grow the
+// 10.9 pool, size each account's peer slots to the User Limit, rebuild the kernel netdev /
+// route / neighbour state, re-apply routing. No daemon; an account peer is a kernel GRE
+// netdev, or an address bound on the shared catch-all.
+func (a *InboundController) onGreChanged()       { a.greChanged(false) }
+func (a *InboundController) onGreClientChanged() { a.greChanged(true) }
+func (a *InboundController) greChanged(clientOnly bool) {
+	expanded := service.AutoExpandVpnRanges("gre")
+	a.greService.ReconcileAllPeers()
+	if err := a.greService.GenerateAllConfigs(); err != nil {
+		logger.Warning("GRE: config generation failed:", err)
+	}
+	if err := a.greService.SetupRouting(); err != nil {
+		logger.Warning("GRE: routing setup failed:", err)
+	}
+	_ = expanded
+	_ = clientOnly
+	a.xrayService.SetToNeedRestart()
+}
+
 type CopyInboundClientsRequest struct {
 	SourceInboundID int      `form:"sourceInboundId" json:"sourceInboundId"`
 	ClientEmails    []string `form:"clientEmails" json:"clientEmails"`
@@ -606,6 +628,8 @@ func (a *InboundController) addInbound(c *gin.Context) {
 		a.onWgcChanged()
 	} else if inbound.Protocol == model.AWG {
 		a.onAwgChanged()
+	} else if inbound.Protocol == model.GRE {
+		a.onGreChanged()
 	} else if inbound.Protocol == model.MTPROTO {
 		a.onMtprotoChanged()
 	} else if inbound.Protocol == model.SSH {
@@ -674,6 +698,8 @@ func (a *InboundController) delInbound(c *gin.Context) {
 		a.onWgcChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.AWG {
 		a.onAwgChanged()
+	} else if oldInbound != nil && oldInbound.Protocol == model.GRE {
+		a.onGreChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.MTPROTO {
 		a.onMtprotoChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.SSH {
@@ -730,6 +756,8 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 		a.onWgcChanged()
 	} else if inbound.Protocol == model.AWG {
 		a.onAwgChanged()
+	} else if inbound.Protocol == model.GRE {
+		a.onGreChanged()
 	} else if inbound.Protocol == model.MTPROTO {
 		a.onMtprotoChanged()
 	} else if inbound.Protocol == model.SSH {
@@ -862,6 +890,8 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 		a.onWgcClientChanged()
 	} else if data.Protocol == model.AWG {
 		a.onAwgClientChanged()
+	} else if data.Protocol == model.GRE {
+		a.onGreClientChanged()
 	} else if data.Protocol == model.MTPROTO {
 		a.onMtprotoClientChanged()
 	} else if data.Protocol == model.SSH {
@@ -978,6 +1008,8 @@ func (a *InboundController) delInboundClient(c *gin.Context) {
 		a.onWgcChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.AWG {
 		a.onAwgChanged()
+	} else if oldInbound != nil && oldInbound.Protocol == model.GRE {
+		a.onGreChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.MTPROTO {
 		a.onMtprotoChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.SSH {
@@ -1057,6 +1089,8 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 		a.onWgcClientChanged()
 	} else if inbound.Protocol == model.AWG {
 		a.onAwgClientChanged()
+	} else if inbound.Protocol == model.GRE {
+		a.onGreClientChanged()
 	} else if inbound.Protocol == model.MTPROTO {
 		a.onMtprotoClientChanged()
 	} else if inbound.Protocol == model.SSH {
@@ -1192,6 +1226,8 @@ func (a *InboundController) bulkUpdateClients(c *gin.Context) {
 			a.onWgcClientChanged()
 		case string(model.AWG):
 			a.onAwgClientChanged()
+		case string(model.GRE):
+			a.onGreClientChanged()
 		case string(model.MTPROTO):
 			a.onMtprotoClientChanged()
 		case string(model.SSH):
@@ -1805,6 +1841,36 @@ func (a *InboundController) getAwgConfigs(c *gin.Context) {
 		return
 	}
 	configs, err := a.awgService.RenderClientConfigs(inbound, c.Query("email"), browserHost(c))
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, configs, nil)
+}
+
+// getGreConfigs renders the router-side setup for one account (?email=) of a GRE inbound.
+//
+// Unlike the WireGuard family this returns no config file and no QR: GRE's client is a
+// router, so the deliverable is the handful of values its web UI asks for, plus a
+// copy-pasteable RouterOS recipe.
+func (a *InboundController) getGreConfigs(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "Invalid inbound ID", err)
+		return
+	}
+	// See getWgcConfigs: the account is a query param, so ownership is checked on it too.
+	if !a.callerMayTouchClient(c, c.Query("email")) {
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.notFound"), errNotOwned)
+		return
+	}
+	a.greService.ReconcileAllPeers()
+	inbound, err := a.inboundService.GetInbound(id)
+	if err != nil {
+		jsonMsg(c, "Inbound not found", err)
+		return
+	}
+	configs, err := a.greService.RenderPeerConfigs(inbound, c.Query("email"), browserHost(c))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return

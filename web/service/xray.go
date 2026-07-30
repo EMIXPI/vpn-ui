@@ -50,6 +50,7 @@ type XrayService struct {
 	ikev2Service   Ikev2Service
 	wgcService     WgcService
 	awgService     AwgService
+	greService     GreService
 	mtprotoService MtprotoService
 	sshService     SshService
 	xrayAPI        xray.XrayAPI
@@ -213,7 +214,7 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		// Omitting a protocol here is not a no-op: its raw settings would be handed to
 		// Xray as a native inbound, Xray would reject the unknown protocol, and the
 		// WHOLE core would fail to start, taking every other inbound down with it.
-		if inbound.Protocol == "l2tp" || inbound.Protocol == "pptp" || inbound.Protocol == "openvpn" || inbound.Protocol == "openconnect" || inbound.Protocol == "sstp" || inbound.Protocol == "ikev2" || inbound.Protocol == "wg-c" || inbound.Protocol == "awg" || inbound.Protocol == "mtproto" || inbound.Protocol == "ssh" {
+		if inbound.Protocol == "l2tp" || inbound.Protocol == "pptp" || inbound.Protocol == "openvpn" || inbound.Protocol == "openconnect" || inbound.Protocol == "sstp" || inbound.Protocol == "ikev2" || inbound.Protocol == "wg-c" || inbound.Protocol == "awg" || inbound.Protocol == "gre" || inbound.Protocol == "mtproto" || inbound.Protocol == "ssh" {
 			continue
 		}
 		// get settings clients
@@ -379,6 +380,17 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 			continue
 		}
 		dokodemoConfig := s.awgService.GetDokodemoConfig(awgInbound)
+		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *dokodemoConfig)
+	}
+
+	// Inject paired dokodemo-door inbounds for GRE (one per inbound; the kernel strips the
+	// GRE header, each inbound's 10.9 block is TPROXY'd to its own dokodemo).
+	greInbounds, _ := s.greService.GetGreInbounds()
+	for _, greInbound := range greInbounds {
+		if !greInbound.Enable {
+			continue
+		}
+		dokodemoConfig := s.greService.GetDokodemoConfig(greInbound)
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *dokodemoConfig)
 	}
 

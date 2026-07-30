@@ -37,6 +37,7 @@ type SubService struct {
 	sshService     service.SshService
 	wgcService     service.WgcService
 	awgService     service.AwgService
+	greService     service.GreService
 	openvpnService service.OpenVpnService
 }
 
@@ -137,7 +138,7 @@ func (s *SubService) getInboundsBySubId(subId string) ([]*model.Inbound, error) 
 		FROM inbounds,
 			JSON_EACH(JSON_EXTRACT(inbounds.settings, '$.clients')) AS client
 		WHERE
-			protocol in ('vmess','vless','trojan','shadowsocks','hysteria','hysteria2','mtproto','ssh','wg-c','awg','openvpn','l2tp','pptp','openconnect','sstp','ikev2')
+			protocol in ('vmess','vless','trojan','shadowsocks','hysteria','hysteria2','mtproto','ssh','wg-c','awg','gre','openvpn','l2tp','pptp','openconnect','sstp','ikev2')
 			AND JSON_EXTRACT(client.value, '$.subId') = ? AND enable = ?
 	)`, subId, true).Find(&inbounds).Error
 	if err != nil {
@@ -204,10 +205,12 @@ func (s *SubService) getLink(inbound *model.Inbound, email string) string {
 		// WireGuard, so these accounts get a working entry. The full-fidelity .conf
 		// still comes from the Clash sub and the per-client modal.
 		return s.genWireguardLink(inbound, email)
-	case "openvpn", "l2tp", "pptp", "openconnect", "sstp", "ikev2":
+	case "openvpn", "l2tp", "pptp", "openconnect", "sstp", "ikev2", "gre":
 		// Username/password VPNs have no importable proxy URI at all, so the entry is
 		// a connection card: parseable enough for a client to accept the account and
-		// show its quota, with the credentials in the name.
+		// show its quota, with the credentials in the name. GRE belongs here rather than
+		// with the WireGuard family: its client is a ROUTER, so there is no app to import
+		// a link, but the card still makes the account and its usage visible.
 		return s.genConnectionCard(inbound, email)
 	}
 	return ""

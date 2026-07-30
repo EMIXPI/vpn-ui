@@ -27,6 +27,10 @@
       <a-icon :style="{ fontSize: '22px', marginInlineStart: '14px' }" class="normal-icon" type="qrcode" v-if="record.protocol === Protocols.AWG" @click="showAwgConfig(record.id,client);"></a-icon>
     </a-tooltip>
     <a-tooltip>
+      <template slot="title">GRE Setup</template>
+      <a-icon :style="{ fontSize: '22px', marginInlineStart: '14px' }" class="normal-icon" type="cluster" v-if="record.protocol === Protocols.GRE" @click="showGreConfig(record.id,client);"></a-icon>
+    </a-tooltip>
+    <a-tooltip>
       <template slot="title">SSH Config</template>
       <a-icon :style="{ fontSize: '22px', marginInlineStart: '14px' }" class="normal-icon" type="qrcode" v-if="record.protocol === Protocols.SSH" @click="showSshConfig(record.id,client);"></a-icon>
     </a-tooltip>
@@ -213,6 +217,10 @@
       <a-menu-item v-if="record.protocol === Protocols.AWG" @click="showAwgConfig(record.id,client);">
         <a-icon :style="{ fontSize: '14px' }" type="qrcode"></a-icon>
         AmneziaWG Config
+      </a-menu-item>
+      <a-menu-item v-if="record.protocol === Protocols.GRE" @click="showGreConfig(record.id,client);">
+        <a-icon :style="{ fontSize: '14px' }" type="cluster"></a-icon>
+        GRE Setup
       </a-menu-item>
       <a-menu-item v-if="record.protocol === Protocols.SSH" @click="showSshConfig(record.id,client);">
         <a-icon :style="{ fontSize: '14px' }" type="qrcode"></a-icon>

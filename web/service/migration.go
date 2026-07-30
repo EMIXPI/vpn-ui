@@ -47,7 +47,7 @@ var preservedSettingKeys = []string{
 // After importing a vpn-ui backup that carries them, the ranges are re-normalized
 // so ownership is non-overlapping on this host. A no-op for a stock 3x-ui backup,
 // which has none of these inbounds.
-var vpnRangeProtocols = []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg"}
+var vpnRangeProtocols = []string{"l2tp", "pptp", "openvpn", "openconnect", "sstp", "ikev2", "wg-c", "awg", "gre"}
 
 // dbFile is what both callers of ImportForeignDB provide: an uploaded multipart
 // file (panel) or an *os.File (CLI). Both can be read, seeked, and read-at, which

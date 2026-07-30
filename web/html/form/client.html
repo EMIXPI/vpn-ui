@@ -328,6 +328,45 @@
         <a-input-number v-model.number="client.reset" :min="0"></a-input-number>
     </a-form-item>
 
+    <!-- GRE: the account's peer routers. Per CLIENT because each customer site has its
+         own public address, and that address IS how the server tells peers apart (GRE
+         carries no credentials and has no handshake to identify anyone by). -->
+    <template v-if="inbound.protocol === Protocols.GRE">
+        <a-divider>GRE peer routers</a-divider>
+        <a-alert type="info" show-icon :style="{ marginBottom: '12px' }">
+            <template slot="description">
+                Enter each router's own public IP. Leave one BLANK if the customer's
+                address is dynamic or unknown: that peer is then served by the shared
+                tunnel and its return path is learned from its first packets. A fixed
+                address is slightly more efficient and needs no learning, so prefer it
+                when the customer has one.
+            </template>
+        </a-alert>
+        <a-form-item v-for="pi in grePeerCount(inbound)" :key="'grepeer-' + pi">
+            <template slot="label">
+                <a-tooltip>
+                    <template slot="title">
+                        The public IP of this customer's router (its WAN address). Blank =
+                        dynamic, served by the shared tunnel.
+                    </template>
+                    Peer [[ pi ]] IP
+                    <a-icon type="question-circle"></a-icon>
+                </a-tooltip>
+            </template>
+            <a-input
+                :value="grePeerField(client, pi - 1, 'peerIp')"
+                @change="e => greSetPeerField(client, pi - 1, 'peerIp', e.target.value)"
+                placeholder="blank = dynamic address"
+            ></a-input>
+            <a-input
+                :value="grePeerField(client, pi - 1, 'remark')"
+                @change="e => greSetPeerField(client, pi - 1, 'remark', e.target.value)"
+                placeholder="label (optional), e.g. branch office"
+                :style="{ marginTop: '4px' }"
+            ></a-input>
+        </a-form-item>
+    </template>
+
     <!-- MTProto Proxy: per-account settings. These are per CLIENT, not per inbound,
          because the proxy keys them off the authenticated secret rather than the
          socket, so one inbound can serve accounts with different modes and links. -->
