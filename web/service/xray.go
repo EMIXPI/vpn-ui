@@ -196,6 +196,14 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	// second writer, and with it the whole class.
 	s.applySshOutbounds(xrayConfig)
 
+	// The client-side VPN tunnels get the same treatment, for the same reason: the
+	// interface a dialled tunnel lands on is decided by the client each time it comes
+	// up, so a name copied into the template goes stale the first time a peer hands
+	// back a different device. See vpnoutbound.go.
+	if err := applyVpnOutboundsWith(xrayConfig, (&VpnOutboundService{}).List()); err != nil {
+		logger.Warning("could not synthesize the VPN client outbounds:", err)
+	}
+
 	s.inboundService.AddTraffic(nil, nil)
 
 	inbounds, err := s.inboundService.GetAllInbounds()

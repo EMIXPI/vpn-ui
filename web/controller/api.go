@@ -3,7 +3,6 @@ package controller
 import (
 	"net/http"
 
-	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
 	"github.com/mhsanaei/3x-ui/v2/web/session"
 
@@ -49,15 +48,19 @@ func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.Custom
 	server := api.Group("/server")
 	a.serverController = NewServerController(server)
 
-	// Custom geo sources feed Xray routing, so they follow the Xray permission.
+	// Custom geo sources feed Xray routing, so they follow the Xray permission. They
+	// are ALSO read by the overview's geofiles dialog, which is why the group takes
+	// either claim: the Xray bit alone left the dialog unreachable for anyone whose
+	// only claim on it is the overview, which is every reseller. The writes inside
+	// still ask for the overview bit specifically.
 	customGeoGroup := api.Group("/custom-geo")
-	customGeoGroup.Use(requirePerm(model.PermXraySettings))
+	customGeoGroup.Use(requireXrayOrOverviewManage())
 	NewCustomGeoController(customGeoGroup, customGeo)
 
 	// Extra routes
 	// Mails the entire SQLite DB (every admin's inbounds, client credentials, and
 	// the users table with its bcrypt hashes) to a Telegram chat: escalation-class.
-	api.GET("/backuptotgbot", requireSuperAdmin(), a.BackuptoTgbot)
+	api.GET("/backuptotgbot", requireOverviewManage(), a.BackuptoTgbot)
 }
 
 // BackuptoTgbot sends a backup of the panel data to Telegram bot admins.

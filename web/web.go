@@ -118,6 +118,7 @@ type Server struct {
 	mtprotoService     service.MtprotoService
 	sshService         service.SshService
 	sshOutboundService service.SshOutboundService
+	vpnOutboundService service.VpnOutboundService
 	tgbotService       service.Tgbot
 	customGeoService   *service.CustomGeoService
 
@@ -342,6 +343,10 @@ func (s *Server) startTask() {
 	s.mtprotoService.InitMtproto()
 	s.sshService.InitSsh()
 	s.sshOutboundService.InitSshOutbound()
+	// Before RestartXray below, like every Init above it: the synthesized freedom
+	// outbound binds to the netdev the client tunnel brings up, so the tunnel has to
+	// exist by the time the core reads the config.
+	s.vpnOutboundService.InitVpnOutbound()
 
 	s.customGeoService.EnsureOnStartup()
 	// Same crash-safety idea as the orphan reap below: a panel that died between an
@@ -565,6 +570,9 @@ func (s *Server) Stop() error {
 	// SSH is an in-binary listener, not a supervised child, so StopAll does not cover it.
 	s.sshService.StopServices()
 	s.sshOutboundService.StopAll()
+	// Client tunnels are kernel netdevs (and, for some protocols, their own client
+	// daemons), so they outlive the panel unless they are taken down explicitly.
+	s.vpnOutboundService.StopAll()
 	s.radiusService.Stop()
 	s.xrayService.StopXray()
 	if s.cron != nil {

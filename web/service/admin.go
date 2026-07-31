@@ -7,6 +7,7 @@ import (
 
 	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
+	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/util/crypto"
 	"github.com/mhsanaei/3x-ui/v2/xray"
 
@@ -506,4 +507,47 @@ func (s *AdminService) AllInboundsBrief() ([]InboundBrief, error) {
 		out = []InboundBrief{}
 	}
 	return out, err
+}
+
+// MigrationOverviewAccess grants PermAccessOverview to the admins who predate that
+// bit, exactly once per install.
+//
+// Before the bit existed the overview was ungated, so every admin could open it. A
+// new bit defaults to 0, which means a plain upgrade-and-restart would silently take
+// the panel's home page away from every non-super admin on the box, and the only
+// clue would be admins reporting that logging in lands them somewhere else.
+//
+// Guarded by a SETTING and not by "does anybody hold the bit yet": an operator who
+// deliberately revokes it must not have it handed back on the next restart, and
+// without a marker every restart looks exactly like the first one.
+//
+// Super admins are skipped because they bypass the mask, and resellers because Can()
+// ignores their stored mask in favour of their profile booleans, so bits written
+// onto their row grant nothing and leave a misleading column behind.
+//
+// Called from main.go on every boot and NOT from MigrateDB: that function is reached
+// only by `vpn-ui migrate`, a DB import and a restore, so a backfill placed there
+// never runs on the upgrade path this exists for.
+func (s *AdminService) MigrationOverviewAccess() {
+	var settingService SettingService
+	if settingService.GetOverviewAccessBackfilled() {
+		return
+	}
+	// Bitwise OR in SQL rather than read-modify-write, so an admin's other
+	// permissions cannot be clobbered by a stale in-memory copy of the mask. COALESCE
+	// because NULL | anything is NULL in SQLite: one hand-edited or imported row with
+	// a null mask would otherwise be written back as null rather than repaired.
+	err := database.GetDB().Model(model.User{}).
+		Where("is_super_admin = ? AND is_reseller = ?", false, false).
+		Update("permissions", gorm.Expr("COALESCE(permissions, 0) | ?", model.PermAccessOverview)).Error
+	if err != nil {
+		logger.Warning("MigrationOverviewAccess - granting the overview permission failed: ", err)
+		return
+	}
+	if err := settingService.SetOverviewAccessBackfilled(true); err != nil {
+		// The grant landed but the marker did not, so this runs again on the next
+		// start. Worth saying out loud: until the marker sticks, a revoked overview
+		// permission comes back on every restart.
+		logger.Warning("MigrationOverviewAccess - recording the backfill failed, it will run again: ", err)
+	}
 }

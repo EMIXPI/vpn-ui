@@ -279,7 +279,6 @@ func (x *XrayAPI) GetTraffic(reset bool) ([]*Traffic, []*ClientTraffic, error) {
 		return nil, nil, common.NewError("xray api is not initialized")
 	}
 
-	trafficRegex := regexp.MustCompile(`(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
 	clientTrafficRegex := regexp.MustCompile(`user>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
@@ -299,7 +298,7 @@ func (x *XrayAPI) GetTraffic(reset bool) ([]*Traffic, []*ClientTraffic, error) {
 	emailTrafficMap := make(map[string]*ClientTraffic)
 
 	for _, stat := range resp.GetStat() {
-		if matches := trafficRegex.FindStringSubmatch(stat.Name); len(matches) == 4 {
+		if matches := trafficStatRegex.FindStringSubmatch(stat.Name); len(matches) == 4 {
 			processTraffic(matches, stat.Value, tagTrafficMap)
 		} else if matches := clientTrafficRegex.FindStringSubmatch(stat.Name); len(matches) == 3 {
 			processClientTraffic(matches, stat.Value, emailTrafficMap)
@@ -307,6 +306,10 @@ func (x *XrayAPI) GetTraffic(reset bool) ([]*Traffic, []*ClientTraffic, error) {
 	}
 	return mapToSlice(tagTrafficMap), mapToSlice(emailTrafficMap), nil
 }
+
+// trafficStatRegex splits an Xray traffic stat name into direction, tag and link.
+// Package level so the parser and its tests cannot drift apart.
+var trafficStatRegex = regexp.MustCompile(`(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
 
 // processTraffic aggregates a traffic stat into trafficMap using regex matches and value.
 func processTraffic(matches []string, value int64, trafficMap map[string]*Traffic) {
@@ -318,14 +321,22 @@ func processTraffic(matches []string, value int64, trafficMap map[string]*Traffi
 		return
 	}
 
-	traffic, ok := trafficMap[tag]
+	// Keyed by DIRECTION and tag, not by tag alone. Nothing stops an inbound and an
+	// outbound sharing a name (the panel's uniqueness check spans outbounds and
+	// tunnels, not inbounds), and one key for both meant the first stat the map
+	// iteration happened to reach decided the direction for the pair while their bytes
+	// were summed into a single record: an inbound's traffic then appeared in the
+	// outbounds table, or a tunnel's egress was billed to an inbound.
+	key := matches[1] + ">>>" + tag
+
+	traffic, ok := trafficMap[key]
 	if !ok {
 		traffic = &Traffic{
 			IsInbound:  isInbound,
 			IsOutbound: !isInbound,
 			Tag:        tag,
 		}
-		trafficMap[tag] = traffic
+		trafficMap[key] = traffic
 	}
 
 	if isDown {

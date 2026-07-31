@@ -114,8 +114,17 @@ var defaultValueMap = map[string]string{
 	// restart and cleared by the first super admin to be told about it. See
 	// SettingService.TakePanelUpdatedFrom.
 	"panelUpdatedFrom": "",
+	// Marks that the one-time grant of PermAccessOverview to the admins who
+	// predate that bit has run. See AdminService.MigrationOverviewAccess.
+	"overviewAccessBackfilled": "false",
 	// Operator-configured SSH egress tunnels (JSON array); see web/service/sshoutbound.go.
 	"sshOutbounds": "",
+	// Operator-configured VPN client tunnels used as egress (JSON array); see
+	// web/service/vpnoutbound.go. Declared here because getString treats a key absent
+	// from this map as an ERROR rather than as "unset": until the first save writes a
+	// row, every read of an undeclared key comes back as a failure, and the reader can
+	// no longer tell "no tunnels configured" from "the settings table is unreadable".
+	"vpnOutbounds": "",
 }
 
 // SettingService provides business logic for application settings management.
@@ -394,6 +403,23 @@ func (s *SettingService) GetVpnProvisioned() bool {
 // SetVpnProvisioned persists whether the VPN backend has been provisioned.
 func (s *SettingService) SetVpnProvisioned(value bool) error {
 	return s.setBool("vpnProvisioned", value)
+}
+
+// GetOverviewAccessBackfilled reports whether the one-time PermAccessOverview grant
+// has already run on this install. A read error is treated as "already done" so a
+// broken settings table can never re-grant a permission an operator revoked; the
+// backfill exists to preserve the old behaviour once, not to keep restoring it.
+func (s *SettingService) GetOverviewAccessBackfilled() bool {
+	v, err := s.getBool("overviewAccessBackfilled")
+	if err != nil {
+		return true
+	}
+	return v
+}
+
+// SetOverviewAccessBackfilled records that the one-time grant has run.
+func (s *SettingService) SetOverviewAccessBackfilled(value bool) error {
+	return s.setBool("overviewAccessBackfilled", value)
 }
 
 // SetPanelUpdatedFrom records the version an in-panel self-update is replacing.

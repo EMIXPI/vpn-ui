@@ -1711,7 +1711,7 @@ func (a *InboundController) generateOpenVpnCerts(c *gin.Context) {
 // mode) and applied; otherwise it is returned for the frontend to store in the
 // form until the inbound is saved.
 func (a *InboundController) generateOcservCert(c *gin.Context) {
-	serverCert, serverKey, err := a.ocservService.GenerateSelfSignedCert()
+	serverCert, serverKey, err := a.ocservService.GenerateSelfSignedCert("")
 	if err != nil {
 		jsonMsg(c, "Failed to generate certificate", err)
 		return
@@ -1755,7 +1755,7 @@ func (a *InboundController) generateOcservCert(c *gin.Context) {
 // inbound is saved. The Windows SSTP client's stricter trust requirements are
 // surfaced by a warning in the UI, not changed here.
 func (a *InboundController) generateSstpCert(c *gin.Context) {
-	serverCert, serverKey, err := a.sstpService.GenerateSelfSignedCert()
+	serverCert, serverKey, err := a.sstpService.GenerateSelfSignedCert("")
 	if err != nil {
 		jsonMsg(c, "Failed to generate certificate", err)
 		return

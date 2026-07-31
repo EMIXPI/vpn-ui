@@ -15,8 +15,79 @@ const Protocols = {
     // reaches the config is a `socks` outbound pointing at that proxy (see
     // Outbound.SshSettings and web/service/sshoutbound.go). Listed here so the
     // tunnel can be created from Add Outbound, where operators look for it.
-    SSH: "ssh"
+    SSH: "ssh",
+    // The nine client tunnels, one picker entry each. Also not Xray protocols:
+    // every one of them serialises to the SAME freedom outbound pinned to a
+    // netdev (see VPN_OUT_KINDS and web/service/vpnoutbound.go), so the kind is
+    // the only thing that differs between them. They are listed LAST because the
+    // picker renders this object in order and they belong after the protocols the
+    // core itself speaks.
+    //
+    // This was ONE "vpn" entry with the kind picked inside the form, on the
+    // argument that nine rows nearly double the picker and that the protocol
+    // axis carries no information here. The operator overruled it: to whoever is
+    // adding a tunnel, L2TP IS the protocol, and looking for it behind a generic
+    // "vpn" row is the part nobody found. The picker is where protocols are
+    // looked for, so that is where they go.
+    //
+    // Namespaced under "vpn:" because the bare names collide: "wireguard" above
+    // is Xray's own native wireguard outbound and cannot mean two things. The
+    // prefix is also what every check tests (isVpnProtocol below), so a tenth
+    // tunnel is one entry here plus one in VPN_OUT_KINDS and no new branch.
+    VpnWireguard: "vpn:wireguard",
+    VpnAmneziaWG: "vpn:awg",
+    VpnOpenVPN: "vpn:openvpn",
+    VpnL2TP: "vpn:l2tp",
+    VpnIKEv2: "vpn:ikev2",
+    VpnSSTP: "vpn:sstp",
+    VpnOpenConnect: "vpn:openconnect",
+    VpnPPTP: "vpn:pptp",
+    VpnGre: "vpn:gre"
 };
+
+// Helpers for the tunnel protocols above. Separate consts and functions rather
+// than properties of Protocols on purpose: the Add Outbound picker walks that
+// object to build its option list, so a function stored in it would be offered
+// as a protocol.
+const VPN_PROTOCOL_PREFIX = "vpn:";
+
+function isVpnProtocol(protocol) {
+    return typeof protocol === 'string' && protocol.startsWith(VPN_PROTOCOL_PREFIX);
+}
+
+// The VPN_OUT_KINDS key inside a tunnel protocol value, or '' for everything
+// else. This is the discriminator: the kind decides which fields the form draws
+// and which driver raises the tunnel.
+function vpnKindOf(protocol) {
+    return isVpnProtocol(protocol) ? protocol.slice(VPN_PROTOCOL_PREFIX.length) : '';
+}
+
+function vpnProtocolFor(kind) {
+    return VPN_PROTOCOL_PREFIX + kind;
+}
+
+// Picker labels the Protocols KEY does not get right. One entry, and it is there
+// to break a TIE rather than to decorate: Xray ships its own userspace wireguard
+// outbound, the panel raises a kernel WireGuard tunnel, and unqualified they are
+// two rows reading "Wireguard" and "WireGuard" one above the other. An operator
+// who picks the wrong one gets a config that looks right and carries nothing.
+//
+// Both sides are qualified (see VPN_OUT_KINDS.wireguard) because a heading over
+// the tunnels cannot fix this: it is gone the moment the dropdown closes, and
+// what is left is one label standing alone with no neighbour to compare it to.
+const PROTOCOL_LABELS = {
+    [Protocols.Wireguard]: 'WireGuard (Xray)',
+};
+
+// What the Add Outbound picker shows for one protocol. The KEY of the Protocols
+// entry reads well for VMess and not at all for a tunnel ("VpnOpenConnect"), so
+// a tunnel takes the name its kind already carries in VPN_OUT_KINDS. Read at
+// render time, which is why it can name a table defined further down this file.
+function protocolLabel(value, key) {
+    const kind = vpnKindOf(value);
+    if (!kind) return PROTOCOL_LABELS[value] || key;
+    return (VPN_OUT_KINDS[kind] || {}).label || key;
+}
 
 // Normalises the `servers` array of a server-shaped outbound (socks/http/ssh) to
 // something always safe to index. A missing or empty `servers` is as common as a
@@ -640,6 +711,11 @@ class SockoptStreamSettings extends CommonClass {
         tcpMptcp = false,
         penetrate = false,
         addressPortStrategy = Address_Port_Strategy.NONE,
+        // Xray's JSON key is "interface", which is a reserved word and so cannot
+        // name a binding inside a class body (always strict mode). Held under
+        // interfaceName and translated back in toJson, as inbound.js does.
+        interfaceName = "",
+        mark = 0,
         trustedXForwardedFor = [],
     ) {
         super();
@@ -649,6 +725,8 @@ class SockoptStreamSettings extends CommonClass {
         this.tcpMptcp = tcpMptcp;
         this.penetrate = penetrate;
         this.addressPortStrategy = addressPortStrategy;
+        this.interfaceName = interfaceName;
+        this.mark = mark;
         this.trustedXForwardedFor = trustedXForwardedFor;
     }
 
@@ -661,6 +739,8 @@ class SockoptStreamSettings extends CommonClass {
             json.tcpMptcp,
             json.penetrate,
             json.addressPortStrategy,
+            json.interface,
+            json.mark,
             json.trustedXForwardedFor || []
         );
     }
@@ -674,6 +754,14 @@ class SockoptStreamSettings extends CommonClass {
             penetrate: this.penetrate,
             addressPortStrategy: this.addressPortStrategy
         };
+        // Only emitted when set, so an outbound that never used them does not
+        // gain SO_BINDTODEVICE/SO_MARK keys just by being opened and saved.
+        if (this.interfaceName) {
+            result.interface = this.interfaceName;
+        }
+        if (this.mark) {
+            result.mark = this.mark;
+        }
         if (this.trustedXForwardedFor && this.trustedXForwardedFor.length > 0) {
             result.trustedXForwardedFor = this.trustedXForwardedFor;
         }
@@ -1177,6 +1265,28 @@ class Outbound extends CommonClass {
         )
     }
 
+    // What Xray is told this outbound is. ssh and vpn are panel-side tunnels, not
+    // Xray protocols, so what the core gets is the outbound that fronts them: the
+    // local socks proxy the panel serves for an SSH tunnel, and a freedom outbound
+    // pinned to the netdev for a VPN one. Rewritten in the model rather than in
+    // the caller so every path that serialises an outbound (Add Outbound, the JSON
+    // tab, the config write) agrees.
+    xrayProtocol() {
+        if (this.protocol === Protocols.SSH) return Protocols.Socks;
+        if (isVpnProtocol(this.protocol)) return Protocols.Freedom;
+        return this.protocol;
+    }
+
+    // Moves a tunnel outbound to another kind. Not the protocol setter, which
+    // would build a fresh settings object and with it a fresh storedKind: an
+    // edit has to keep knowing which kind is STORED, because that is what warns
+    // the operator their tunnel is being replaced rather than adjusted. The
+    // stream settings survive too, so the sockopts stay put across the switch.
+    setVpnKind(kind) {
+        this._protocol = vpnProtocolFor(kind);
+        this.settings.setKind(kind);
+    }
+
     toJson() {
         var stream;
         if (this.canEnableStream()) {
@@ -1186,18 +1296,45 @@ class Outbound extends CommonClass {
                 stream = { sockopt: this.stream.sockopt.toJson() };
         }
         let settingsOut = this.settings instanceof CommonClass ? this.settings.toJson() : this.settings;
+        if (isVpnProtocol(this.protocol)) {
+            // Emit what applyVpnOutboundsWith synthesises server-side, so the
+            // JSON tab shows the outbound Xray will really get: a freedom one
+            // carrying the operator's own sockopts plus the SO_BINDTODEVICE pin.
+            //
+            // The interface is the one sockopt the operator does not get to set.
+            // The driver decides it when it raises the tunnel and
+            // /vpnoutbound/save hands it back, which is why it is read off the
+            // settings and overwrites whatever the sockopt form holds.
+            //
+            // Without an interface there is deliberately NO interface key at
+            // all. A freedom outbound bound to "" is not an error to Xray, it is
+            // an unbound socket: every byte would leave through the host's own
+            // default route while the row still looked like a working tunnel.
+            const sockopt = this.stream?.sockopt ? this.stream.sockopt.toJson() : {};
+            delete sockopt.interface;
+            if (this.settings?.iface) sockopt.interface = this.settings.iface;
+            stream = Object.keys(sockopt).length ? { sockopt: sockopt } : undefined;
+        }
         return {
-            // ssh is a panel-side tunnel, not an Xray protocol. What Xray gets is
-            // the socks outbound fronting it, so the protocol is rewritten here
-            // rather than in the caller: every path that serialises an outbound
-            // (Add Outbound, the JSON tab, the config write) then agrees.
-            protocol: this.protocol === Protocols.SSH ? Protocols.Socks : this.protocol,
+            protocol: this.xrayProtocol(),
             settings: settingsOut,
             // Only include tag, streamSettings, sendThrough, mux if present and not empty
             ...(this.tag ? { tag: this.tag } : {}),
             ...(stream ? { streamSettings: stream } : {}),
             ...(this.sendThrough ? { sendThrough: this.sendThrough } : {}),
-            ...(this.mux?.enabled ? { mux: this.mux } : {}),
+            // canEnableMux(), not just the flag: the flag can be true on an
+            // outbound whose protocol has no Mux form to turn it off with. The
+            // JSON tab accepts a pasted {"mux":{"enabled":true}} on any protocol,
+            // and switching the picker to another protocol keeps whatever mux the
+            // previous one had.
+            //
+            // On a tunnel that is not a cosmetic problem. Mux takes the outbound
+            // over before freedom is ever reached and dials its marker host
+            // v1.mux.cool:9527, which nothing resolves; the dial error is logged
+            // at Info while the panel runs at warning, so the config is valid,
+            // Xray boots, and 100% of that outbound's traffic dead-ends with no
+            // log line anywhere. The SSH outbound was bitten by exactly this.
+            ...(this.mux?.enabled && this.canEnableMux() ? { mux: this.mux } : {}),
         };
     }
 
@@ -1482,6 +1619,11 @@ Outbound.Settings = class extends CommonClass {
     }
 
     static getSettings(protocol) {
+        // A tunnel carries its kind in the protocol value, so picking "L2TP" in
+        // the outbound form is what builds the L2TP field set. Answered before
+        // the switch because there are nine of these and the kind is the only
+        // thing that differs between them.
+        if (isVpnProtocol(protocol)) return new Outbound.VpnSettings(vpnKindOf(protocol));
         switch (protocol) {
             case Protocols.Freedom: return new Outbound.FreedomSettings();
             case Protocols.Blackhole: return new Outbound.BlackholeSettings();
@@ -1500,6 +1642,7 @@ Outbound.Settings = class extends CommonClass {
     }
 
     static fromJson(protocol, json) {
+        if (isVpnProtocol(protocol)) return Outbound.VpnSettings.fromJson(json, vpnKindOf(protocol));
         switch (protocol) {
             case Protocols.Freedom: return Outbound.FreedomSettings.fromJson(json);
             case Protocols.Blackhole: return Outbound.BlackholeSettings.fromJson(json);
@@ -1966,6 +2109,652 @@ Outbound.SshSettings = class extends CommonClass {
                 port: this.socksPort,
             }],
         };
+    }
+};
+
+// The nine client tunnels behind the "vpn:" protocols, and the fields each one
+// needs.
+//
+// ONE table instead of nine settings classes and nine blocks of form markup.
+// Every kind serialises to the same freedom+sockopt outbound, so the only thing
+// that actually differs between them is this list of fields: nine hand-written
+// blocks would be ~350 lines of near-identical markup that nobody can keep
+// aligned with nine driver files. More importantly, `secret` is declared here
+// ONCE. Nine blocks would each have to remember which fields are secrets, and
+// the one that forgot would write a private key into the Xray config, where the
+// JSON tab shows it to anyone who can open the page.
+//
+// Field keys:
+//   name        key in the settings object POSTed to /panel/xray/vpnoutbound/save
+//   type        text | password | textarea | number | switch | select
+//   def         initial value. Arrays are copied per instance, never shared, and
+//               null means "leave it blank": a blank number is dropped from the
+//               POST, which is how the operator asks the DRIVER for its default
+//               (every numeric setting on the Go side treats 0/absent that way).
+//   label       i18n key under pages.xray.outbound, resolved in the outbound modal.
+//               This file is a static asset the template engine never sees, so the
+//               i18n helper cannot run here.
+//   plain       literal label for protocol jargon that is the same word in every
+//               language (MTU, TTL, Jc, H1). Used when there is no label key.
+//   help        i18n key for a tooltip on the label. Where the explanation goes,
+//               because antd-vue 1.7.8 gives .ant-form-item-label overflow:hidden
+//               and white-space:nowrap: a label longer than its 8-of-24 column
+//               does not wrap, it is silently cut off mid-word.
+//   secret      posted out-of-band only, never pre-filled on edit, and omitted
+//               from the POST when blank so the server keeps the stored one.
+//   options     select values, [{value,text}]
+//   showIf      predicate over the kind's own parameters; hides a field that the
+//               current mode does not use (an IKEv2 PSK under EAP, say). Hidden
+//               fields are still POSTed: they are a mode the operator may switch
+//               back to, and silently dropping them would empty that mode.
+//   clears      the name of a SECRET this field is validated as a pair with.
+//               Emptying this one also posts that one empty, because a secret
+//               left out of the POST is restored from what is stored, and half a
+//               restored pair fails validation (see openvpn cert/key).
+//
+// Adding a protocol is one entry here, one "vpn:<kind>" entry in Protocols so it
+// appears in the Add Outbound picker, and one driver file, which is the same
+// shape the server side has (RegisterVpnOutDriver from the driver's own init()).
+// A kind that is in this table and not in Protocols has fields and no way to be
+// chosen; one that is in Protocols and not here is an empty form.
+//
+// Every `name` below is a json tag on that kind's Go settings struct in
+// web/service/vpnout_<kind>.go. They have to match exactly: the driver
+// unmarshals this object and silently ignores a key it does not know, so a typo
+// here does not fail, it produces a tunnel missing the field the operator filled
+// in. wireguard/awg/gre/openvpn/l2tp/ikev2 are mirrored from the landed drivers;
+// pptp, openconnect and sstp have no driver yet and are marked below.
+const VPN_OUT_WG_FIELDS = [
+    { name: 'endpoint', type: 'text', def: '', label: 'vpnOutEndpoint', placeholder: '203.0.113.10:51820' },
+    // Takes the [Interface] Address line of a wg .conf verbatim, comma-separated
+    // forms included, so the operator can paste rather than transcribe.
+    { name: 'address', type: 'text', def: '', label: 'vpnOutTunAddress', placeholder: '10.7.0.2/32, fd00::2/128' },
+    { name: 'privateKey', type: 'password', def: '', label: 'vpnOutPrivateKey', secret: true },
+    { name: 'peerPublicKey', type: 'text', def: '', label: 'vpnOutPeerKey' },
+    { name: 'presharedKey', type: 'password', def: '', label: 'vpnOutPresharedKey', secret: true },
+    // Seconds. 25 is the driver's own default; 0 turns keepalive off, which is
+    // why this one is not left blank: blank would read as "off" to an operator
+    // and as "use 25" to the driver.
+    { name: 'keepalive', type: 'number', def: 25, min: 0, max: 65535, label: 'vpnOutKeepAlive' },
+    { name: 'mtu', type: 'number', def: null, min: 576, max: 9000, plain: 'MTU', placeholder: '1420' },
+];
+
+// AmneziaWG is WireGuard plus obfuscation parameters. They are NOT free choices:
+// every one has to match the server's config exactly, which is why they start
+// BLANK rather than at the AWG inbound's defaults. A guessed junk-packet count
+// that disagrees with the far side does not fail loudly, it produces a tunnel
+// that handshakes and carries nothing.
+//
+// H1-H4 are text and not numbers because they are uint32 magic headers, and
+// values above 2^31 are exactly where an <a-input-number> starts rounding.
+const VPN_OUT_AWG_FIELDS = VPN_OUT_WG_FIELDS.concat([
+    { name: 'jc', type: 'number', def: null, min: 0, max: 128, plain: 'Jc' },
+    { name: 'jmin', type: 'number', def: null, min: 0, max: 1280, plain: 'Jmin' },
+    { name: 'jmax', type: 'number', def: null, min: 0, max: 1280, plain: 'Jmax' },
+    { name: 's1', type: 'number', def: null, min: 0, max: 1280, plain: 'S1' },
+    { name: 's2', type: 'number', def: null, min: 0, max: 1280, plain: 'S2' },
+    // All four or none: they replace the four packet types together, so a partial
+    // set breaks half the packets. The driver rejects it, but the rule is not
+    // guessable from the form.
+    { name: 'h1', type: 'text', def: '', plain: 'H1', help: 'vpnOutAwgHeadersHelp' },
+    { name: 'h2', type: 'text', def: '', plain: 'H2' },
+    { name: 'h3', type: 'text', def: '', plain: 'H3' },
+    { name: 'h4', type: 'text', def: '', plain: 'H4' },
+]);
+
+const VPN_OUT_KINDS = {
+    // "(kernel)" is not decoration: it is what separates this row from Xray's own
+    // wireguard outbound in the picker, and it is the same word Core Settings
+    // already uses for the server-side twin. See PROTOCOL_LABELS.
+    wireguard: { label: 'WireGuard (kernel)', fields: VPN_OUT_WG_FIELDS },
+    awg: { label: 'AmneziaWG', fields: VPN_OUT_AWG_FIELDS },
+    openvpn: {
+        label: 'OpenVPN',
+        fields: [
+            // The whole .ovpn, pasted. It carries the remote, port, cipher and the
+            // inline certificates, so filling it in is what makes every discrete
+            // field below unnecessary; the driver uses those only when it is empty.
+            // Secret because a provider profile usually embeds a key or a
+            // tls-crypt block.
+            { name: 'profile', type: 'textarea', def: '', rows: 6, label: 'vpnOutProfile', secret: true, placeholder: 'client\nremote 203.0.113.10 1194 udp\n...' },
+            // Credentials belong to the account, not the profile, so they stay
+            // visible in both modes.
+            { name: 'username', type: 'text', def: '', label: 'vpnOutUsername' },
+            { name: 'password', type: 'password', def: '', label: 'vpnOutPassword', secret: true },
+            // The discrete alternative. Hidden while a profile is pasted, because
+            // the driver ignores them then and a filled-in field that does nothing
+            // is worse than no field.
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: '203.0.113.10', showIf: p => !p.profile },
+            { name: 'port', type: 'number', def: null, min: 1, max: 65535, label: 'vpnOutPort', placeholder: '1194', showIf: p => !p.profile },
+            {
+                name: 'proto', type: 'select', def: 'udp', label: 'vpnOutProto', showIf: p => !p.profile,
+                options: [{ value: 'udp', text: 'UDP' }, { value: 'tcp', text: 'TCP' }],
+            },
+            { name: 'ca', type: 'textarea', def: '', rows: 4, label: 'vpnOutCaCert', showIf: p => !p.profile },
+            // The driver takes cert and key together or not at all. `key` is a
+            // secret, so leaving it untouched restores the stored one: without
+            // `clears`, emptying just the certificate would save a tunnel with a
+            // key and no certificate, which Validate refuses.
+            { name: 'cert', type: 'textarea', def: '', rows: 4, label: 'vpnOutCert', showIf: p => !p.profile, clears: 'key' },
+            { name: 'key', type: 'textarea', def: '', rows: 4, label: 'vpnOutKey', secret: true, showIf: p => !p.profile },
+            { name: 'tlsAuth', type: 'textarea', def: '', rows: 3, label: 'vpnOutTlsAuth', secret: true, showIf: p => !p.profile },
+            { name: 'tlsCrypt', type: 'textarea', def: '', rows: 3, label: 'vpnOutTlsCrypt', secret: true, showIf: p => !p.profile },
+            { name: 'remoteCertTls', type: 'switch', def: false, label: 'vpnOutRemoteCertTls', showIf: p => !p.profile },
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 9000, plain: 'MTU' },
+            // Appended verbatim and NOT filtered, so it is also how an operator
+            // puts back a directive the driver stripped. It is also NOT masked in
+            // the tunnel list, which is why the driver refuses an inline key block
+            // here and the tooltip says where those go instead.
+            { name: 'extra', type: 'textarea', def: '', rows: 3, label: 'vpnOutExtra', help: 'vpnOutExtraHelp' },
+        ],
+    },
+    l2tp: {
+        label: 'L2TP/IPsec',
+        fields: [
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: '203.0.113.10' },
+            { name: 'username', type: 'text', def: '', label: 'vpnOutUsername' },
+            { name: 'password', type: 'password', def: '', label: 'vpnOutPassword', secret: true },
+            {
+                name: 'authProto', type: 'select', def: 'auto', label: 'vpnOutAuthProto',
+                options: [
+                    { value: 'auto', text: 'Automatic (anything but EAP)' },
+                    { value: 'mschapv2', text: 'MS-CHAPv2' },
+                    { value: 'chap', text: 'CHAP' },
+                    { value: 'pap', text: 'PAP' },
+                ],
+            },
+            // There is no IPsec switch: the key IS the switch. An empty one means
+            // plain L2TP to the driver, so a separate toggle could only disagree
+            // with it.
+            { name: 'ipsecPsk', type: 'password', def: '', label: 'vpnOutIpsecPsk', help: 'vpnOutIpsecPskHelp', secret: true },
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 1500, plain: 'MTU', placeholder: '1400' },
+        ],
+    },
+    ikev2: {
+        label: 'IKEv2',
+        fields: [
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: 'vpn.example.com' },
+            // The driver's three modes. Note "cert" and not the inbound's
+            // "eap-tls": this side is the initiator, so it presents its own
+            // certificate rather than terminating somebody else's EAP.
+            {
+                name: 'authMode', type: 'select', def: 'eap-mschapv2', label: 'vpnOutAuthMode',
+                options: [
+                    { value: 'eap-mschapv2', text: 'EAP-MSCHAPv2 (username/password)' },
+                    { value: 'psk', text: 'PSK (shared secret)' },
+                    { value: 'cert', text: 'Client certificate' },
+                ],
+            },
+            { name: 'username', type: 'text', def: '', label: 'vpnOutUsername', showIf: p => p.authMode === 'eap-mschapv2' },
+            { name: 'password', type: 'password', def: '', label: 'vpnOutPassword', secret: true, showIf: p => p.authMode === 'eap-mschapv2' },
+            { name: 'psk', type: 'password', def: '', label: 'vpnOutPsk', secret: true, showIf: p => p.authMode === 'psk' },
+            { name: 'localId', type: 'text', def: '', label: 'vpnOutLocalId' },
+            // The identity the gateway must prove (IKEv2 IDr). Blank defaults to
+            // the dialled address, which is what a correctly issued gateway
+            // certificate carries; "%any" turns the check off entirely.
+            { name: 'serverId', type: 'text', def: '', label: 'vpnOutServerId' },
+            // Inline PEM or paths on the server, mirroring the same choice the
+            // IKEv2 and SSTP inbounds offer.
+            { name: 'tlsUseFile', type: 'switch', def: false, label: 'vpnOutTlsUseFile' },
+            { name: 'certificate', type: 'textarea', def: '', rows: 4, label: 'vpnOutCert', showIf: p => p.authMode === 'cert' && !p.tlsUseFile },
+            { name: 'key', type: 'textarea', def: '', rows: 4, label: 'vpnOutKey', secret: true, showIf: p => p.authMode === 'cert' && !p.tlsUseFile },
+            // Verifying the gateway is not a cert-mode concern: EAP and PSK
+            // tunnels are dialled against the same CA.
+            { name: 'caCert', type: 'textarea', def: '', rows: 4, label: 'vpnOutCaCert', showIf: p => !p.tlsUseFile },
+            { name: 'certificateFile', type: 'text', def: '', label: 'vpnOutCertFile', showIf: p => p.authMode === 'cert' && p.tlsUseFile },
+            { name: 'keyFile', type: 'text', def: '', label: 'vpnOutKeyFile', showIf: p => p.authMode === 'cert' && p.tlsUseFile },
+            { name: 'caCertFile', type: 'text', def: '', label: 'vpnOutCaCertFile', showIf: p => p.tlsUseFile },
+            // Blank asks the gateway for a virtual IP through the configuration
+            // payload, which is what a remote-access gateway expects.
+            { name: 'localAddr', type: 'text', def: '', label: 'vpnOutLocalAddress' },
+            { name: 'remoteTs', type: 'text', def: '', label: 'vpnOutRemoteTs', placeholder: '0.0.0.0/0' },
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 9000, plain: 'MTU' },
+        ],
+    },
+    sstp: {
+        label: 'SSTP',
+        fields: [
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: 'vpn.example.com' },
+            { name: 'username', type: 'text', def: '', label: 'vpnOutUsername' },
+            { name: 'password', type: 'password', def: '', label: 'vpnOutPassword', secret: true },
+            {
+                name: 'authProto', type: 'select', def: 'mschapv2', label: 'vpnOutAuthProto',
+                options: [
+                    { value: 'mschapv2', text: 'MS-CHAPv2' },
+                    { value: 'mschap', text: 'MS-CHAP' },
+                    { value: 'chap', text: 'CHAP' },
+                    { value: 'pap', text: 'PAP' },
+                    { value: 'auto', text: 'Automatic' },
+                ],
+            },
+            // For the very common self-signed SSTP gateway, this panel's own SSTP
+            // core included.
+            { name: 'caCert', type: 'textarea', def: '', rows: 4, label: 'vpnOutCaCert', showIf: p => !p.allowInsecureCert },
+            // Off by default on purpose: SSTP is PPP inside TLS, so turning the
+            // certificate failure into a warning gives up the only thing
+            // authenticating the server.
+            { name: 'allowInsecureCert', type: 'switch', def: false, label: 'vpnOutInsecure' },
+            { name: 'proxy', type: 'text', def: '', label: 'vpnOutProxy', placeholder: 'http://10.0.0.1:3128' },
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 1500, plain: 'MTU' },
+        ],
+    },
+    openconnect: {
+        label: 'OpenConnect',
+        fields: [
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: 'https://vpn.example.com' },
+            {
+                name: 'protocol', type: 'select', def: 'anyconnect', label: 'vpnOutOcProtocol',
+                options: [
+                    { value: 'anyconnect', text: 'AnyConnect (also ocserv)' },
+                    { value: 'nc', text: 'Juniper Network Connect' },
+                    { value: 'pulse', text: 'Pulse Connect Secure' },
+                    { value: 'gp', text: 'GlobalProtect' },
+                    { value: 'f5', text: 'F5 BIG-IP' },
+                    { value: 'fortinet', text: 'Fortinet' },
+                    { value: 'array', text: 'Array Networks' },
+                ],
+            },
+            { name: 'username', type: 'text', def: '', label: 'vpnOutUsername' },
+            { name: 'password', type: 'password', def: '', label: 'vpnOutPassword', secret: true },
+            // The gateway's realm/domain/tunnel-group. Wrong or missing, most
+            // gateways answer with a form no unattended client can fill in.
+            { name: 'authgroup', type: 'text', def: '', label: 'vpnOutAuthGroup' },
+            { name: 'totpSecret', type: 'password', def: '', label: 'vpnOutTotpSecret', secret: true },
+            // Certificate auth, alone or alongside a password: several gateways
+            // require both.
+            { name: 'cert', type: 'textarea', def: '', rows: 4, label: 'vpnOutCert' },
+            { name: 'key', type: 'textarea', def: '', rows: 4, label: 'vpnOutKey', secret: true },
+            { name: 'keyPassword', type: 'password', def: '', label: 'vpnOutKeyPassword', secret: true },
+            { name: 'caCert', type: 'textarea', def: '', rows: 4, label: 'vpnOutCaCert' },
+            // Pins one certificate rather than trusting a CA that signs for
+            // everyone, which is the right answer for a self-signed gateway.
+            { name: 'serverCert', type: 'text', def: '', label: 'vpnOutServerCert', placeholder: 'pin-sha256:...' },
+            // Drops the UDP data channel. Slower, and the only thing that works
+            // where UDP is blocked.
+            { name: 'noDtls', type: 'switch', def: false, label: 'vpnOutNoDtls' },
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 1500, plain: 'MTU' },
+        ],
+    },
+    pptp: {
+        label: 'PPTP',
+        fields: [
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: '203.0.113.10' },
+            { name: 'username', type: 'text', def: '', label: 'vpnOutUsername' },
+            { name: 'password', type: 'password', def: '', label: 'vpnOutPassword', secret: true },
+            {
+                name: 'authProto', type: 'select', def: 'mschapv2', label: 'vpnOutAuthProto',
+                options: [
+                    { value: 'mschapv2', text: 'MS-CHAPv2' },
+                    { value: 'mschap', text: 'MS-CHAP' },
+                    { value: 'chap', text: 'CHAP' },
+                    { value: 'pap', text: 'PAP' },
+                    { value: 'auto', text: 'Automatic' },
+                ],
+            },
+            // Not a switch, because "off" is not a preference: PPTP without MPPE
+            // is a cleartext tunnel, and it is also the only setting in which PAP
+            // or CHAP work at all, since the MPPE keys come from the MS-CHAP
+            // exchange and nothing else produces them.
+            {
+                name: 'mppe', type: 'select', def: 'required', label: 'vpnOutMppe', help: 'vpnOutMppeHelp',
+                options: [
+                    { value: 'required', text: 'Required (128-bit)' },
+                    { value: 'off', text: 'Off (cleartext tunnel)' },
+                ],
+            },
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 1500, plain: 'MTU', placeholder: '1400' },
+        ],
+    },
+    gre: {
+        label: 'GRE',
+        fields: [
+            { name: 'server', type: 'text', def: '', label: 'vpnOutServer', placeholder: '203.0.113.10' },
+            // Blank lets the kernel source the tunnel from whatever address the
+            // route to the server picks, which is right on a single-homed host and
+            // wrong to guess on exactly the multi-homed one whose operator knows it.
+            { name: 'local', type: 'text', def: '', label: 'vpnOutLocalAddress' },
+            { name: 'address', type: 'text', def: '', label: 'vpnOutTunAddress', placeholder: '10.11.0.2/30' },
+            // The far side's inner address. Nothing routes by it (a point-to-point
+            // GRE device sends everything to its outer remote), but it is half of
+            // the pair of numbers the far side hands out and it is what an operator
+            // pings to prove the tunnel carries traffic.
+            { name: 'peer', type: 'text', def: '', label: 'vpnOutPeerAddress', placeholder: '10.11.0.1' },
+            { name: 'ttl', type: 'number', def: null, min: 0, max: 255, plain: 'TTL', placeholder: '64' },
+            // Blank = let the kernel choose, as the GRE inbound documents: the
+            // right MTU differs between raw GRE and GRE-in-FOU and the kernel
+            // knows which is in play, so a number pinned here would be wrong for
+            // the other mode.
+            { name: 'mtu', type: 'number', def: null, min: 576, max: 9000, plain: 'MTU' },
+            { name: 'fouEnable', type: 'switch', def: false, label: 'vpnOutFou' },
+            { name: 'fouPort', type: 'number', def: 15547, min: 1, max: 65535, label: 'vpnOutFouPort', showIf: p => p.fouEnable },
+            { name: 'ipsecEnable', type: 'switch', def: false, label: 'vpnOutIpsec' },
+            { name: 'ipsecPsk', type: 'password', def: '', label: 'vpnOutIpsecPsk', secret: true, showIf: p => p.ipsecEnable },
+            // The far side's IKE identity. Exposed because a vpn-ui GRE inbound
+            // presents "gre-<id>.vpn-ui" and its recipe tells the peer to pin it:
+            // a shared charon holding several PSKs cannot otherwise tell which key
+            // this tunnel is meant to use.
+            { name: 'ipsecRemoteId', type: 'text', def: '', label: 'vpnOutIpsecRemoteId', showIf: p => p.ipsecEnable },
+            { name: 'ipsecLocalId', type: 'text', def: '', label: 'vpnOutIpsecLocalId', showIf: p => p.ipsecEnable },
+            // Blank accepts either version and initiates IKEv2, which is right
+            // almost always. It is offered because IKEv1 is the only thing that
+            // brings a tunnel up against an older router that answers nothing at
+            // all to an IKEv2 proposal, and nothing on this side can discover that.
+            {
+                name: 'ipsecIkeVersion', type: 'select', def: 0, label: 'vpnOutIkeVersion', showIf: p => p.ipsecEnable,
+                options: [
+                    { value: 0, text: 'Automatic' },
+                    { value: 2, text: 'IKEv2' },
+                    { value: 1, text: 'IKEv1' },
+                ],
+            },
+        ],
+    },
+};
+
+const VPN_OUT_DEFAULT_KIND = 'wireguard';
+
+// wg-quick .conf key -> field name in VPN_OUT_KINDS, per section. Lower-cased
+// keys because the format is case-insensitive and every generator picks its own
+// spelling (PublicKey, publickey, PUBLICKEY are the same key to wg).
+//
+// The AmneziaWG obfuscation keys sit in [Interface] alongside the WireGuard
+// ones, which is why they are listed here rather than in a table of their own:
+// the same file parses for both kinds, and the ones the plain wireguard kind has
+// no field for are reported as ignored instead of silently dropped.
+const WG_CONF_INTERFACE_KEYS = {
+    privatekey: 'privateKey',
+    address: 'address',
+    mtu: 'mtu',
+    jc: 'jc',
+    jmin: 'jmin',
+    jmax: 'jmax',
+    s1: 's1',
+    s2: 's2',
+    h1: 'h1',
+    h2: 'h2',
+    h3: 'h3',
+    h4: 'h4',
+};
+const WG_CONF_PEER_KEYS = {
+    publickey: 'peerPublicKey',
+    presharedkey: 'presharedKey',
+    endpoint: 'endpoint',
+    persistentkeepalive: 'keepalive',
+};
+
+// Parses a wg-quick / AmneziaWG .conf into values for `kind`'s fields.
+//
+// Returns { values, ignored, error, errorLine }. Nothing is written into the
+// form here: the caller applies `values` only after this reports no error,
+// because a half-applied import is the worst outcome available. It leaves a form
+// that looks filled in and saves a tunnel dialling the previous peer with the
+// new file's keys, and nothing on screen says so.
+//
+// `ignored` names every key in the file that this did not use, spelled as the
+// file spelled it. wg-quick carries a lot that has no equivalent here (DNS,
+// Table, PostUp, AllowedIPs, a second [Peer], AmneziaWG 1.5's I1-I5), and a key
+// dropped in silence is exactly the failure that shows up later as a tunnel
+// which handshakes and carries nothing.
+function parseWgConf(text, kind = VPN_OUT_DEFAULT_KIND) {
+    const out = { values: {}, ignored: [], error: '', errorLine: 0 };
+    if (!text || !text.trim()) {
+        out.error = 'empty';
+        return out;
+    }
+    const known = {};
+    Outbound.VpnSettings.fieldsOf(kind).forEach(f => { known[f.name] = f; });
+    const lines = String(text).split(/\r?\n/);
+    let section = '';
+    let peers = 0;
+    for (let i = 0; i < lines.length; i++) {
+        // Trailing comments only where a comment can start: a bare strip of
+        // everything after a '#' would cut a value that legitimately contains one.
+        const line = lines[i].replace(/(^|\s)[#;].*$/, '').trim();
+        if (!line) continue;
+        const header = line.match(/^\[(.+)\]$/);
+        if (header) {
+            section = header[1].trim().toLowerCase();
+            if (section === 'peer') peers++;
+            continue;
+        }
+        const eq = line.indexOf('=');
+        if (eq < 1) {
+            // Neither a section nor key = value. Refusing the whole file is the
+            // point: this is not a wg config, and guessing at the rest of it
+            // fills the form with something the operator never wrote.
+            out.error = 'malformed';
+            out.errorLine = i + 1;
+            return out;
+        }
+        // First '=' only: a base64 key ends in '=' padding and must survive.
+        const key = line.slice(0, eq).trim();
+        const value = line.slice(eq + 1).trim();
+        const name = section === 'interface'
+            ? WG_CONF_INTERFACE_KEYS[key.toLowerCase()]
+            : (section === 'peer' && peers === 1 ? WG_CONF_PEER_KEYS[key.toLowerCase()] : undefined);
+        // Only the first [Peer] is applied: a tunnel here dials one peer, and
+        // merging a second one's keys over the first would produce a config that
+        // matches neither.
+        if (!name || !known[name] || value === '') {
+            out.ignored.push(peers > 1 && section === 'peer' ? key + ' ([Peer] ' + peers + ')' : key);
+            continue;
+        }
+        if (known[name].type === 'number') {
+            const n = Number(value);
+            if (!Number.isFinite(n)) {
+                out.ignored.push(key);
+                continue;
+            }
+            out.values[name] = n;
+            continue;
+        }
+        out.values[name] = value;
+    }
+    // A file that parsed cleanly and carries neither end of the keypair is some
+    // other kind of ini file. Accepting it would blank nothing and fill nothing,
+    // which reads as an import that worked.
+    if (out.values.privateKey === undefined && out.values.peerPublicKey === undefined) {
+        out.error = 'notWireguard';
+        return out;
+    }
+    return out;
+}
+
+// The kinds whose upstream config file the panel can read, and what to do with
+// one. Everything happens in the browser: the file is read with FileReader and
+// there is no upload endpoint, so a profile full of private keys is never posted
+// anywhere except to /vpnoutbound/save with the rest of the tunnel.
+//
+//   accept  the file picker's filter, which is a hint and not a guarantee
+//   into    a single field that takes the file verbatim (OpenVPN's .ovpn, which
+//           the driver prefers over every discrete field anyway)
+//   parse   a parser producing values for the discrete fields
+const VPN_OUT_IMPORT = {
+    wireguard: { accept: '.conf,.txt,text/plain', parse: parseWgConf },
+    awg: { accept: '.conf,.txt,text/plain', parse: parseWgConf },
+    openvpn: { accept: '.ovpn,.conf,.txt,text/plain', into: 'profile' },
+};
+
+// One client VPN tunnel, dialled by the panel and egressed through by Xray.
+//
+// Nothing in here except `iface` reaches the Xray config: the tunnel itself is
+// POSTed to /panel/xray/vpnoutbound/save, which raises it and reports back the
+// netdev the driver landed on, and the outbound is a freedom one pinned to that
+// device with SO_BINDTODEVICE. Same division as Outbound.SshSettings, where only
+// the loopback port crosses over.
+Outbound.VpnSettings = class extends CommonClass {
+    constructor(kind = VPN_OUT_DEFAULT_KIND, params = {}, iface = '', remark = '') {
+        super();
+        this.kind = kind;
+        this.params = Outbound.VpnSettings.paramsFor(kind, params);
+        // Decided by the driver at Up() time, never typed: an interface name typed
+        // into the panel is a promise about the kernel that nothing checks, and a
+        // wrong one binds egress to some other device that happens to exist.
+        this.iface = iface;
+        this.remark = remark;
+        // The kind this tunnel is STORED as, fixed at construction. Changing the
+        // picker moves `kind` and leaves this behind, which is how the form knows
+        // to warn: the server skips its keep-the-stored-secret merge when the kind
+        // changes, because the stored settings belong to another protocol's shape.
+        this.storedKind = kind;
+        // Secret fields the operator has actually typed into during this edit.
+        //
+        // The server distinguishes an ABSENT key ("keep what is stored") from a
+        // key present and empty ("clear it"). The form cannot tell those apart from
+        // the value alone, because a stored secret is never rendered, so both look
+        // like an empty input. This records the difference: untouched and blank is
+        // absent, touched and blank is an explicit clear.
+        //
+        // Every secret gets a key up front, false, for the same Vue 2 reason
+        // `params` does. Built empty first, this silently half-worked: touch()
+        // set a property Vue was not watching, so the POST was right while the
+        // form never redrew, and the field that was about to be deleted looked
+        // exactly like one that was being kept.
+        this.touched = Outbound.VpnSettings.touchedFor(kind);
+    }
+
+    // The touch-tracking object for a kind: one false per secret field.
+    static touchedFor(kind) {
+        const out = {};
+        Outbound.VpnSettings.fieldsOf(kind).forEach(f => {
+            if (f.secret) out[f.name] = false;
+        });
+        return out;
+    }
+
+    // Called from the form when a secret input changes. See `touched`.
+    touch(name) {
+        this.touched[name] = true;
+    }
+
+    // Builds the parameter object for a kind, seeded from `params` where present.
+    // Every field of the kind gets a key even when it is empty, because Vue 2
+    // cannot observe a property added to an object after that object was made
+    // reactive: a field created lazily by v-model would swallow what the operator
+    // typed, never re-render, and never reach the POST.
+    static paramsFor(kind, params = {}) {
+        const out = {};
+        const fields = (VPN_OUT_KINDS[kind] || {}).fields || [];
+        const src = params || {};
+        fields.forEach(f => {
+            // A secret is never seeded from stored settings. /vpnoutbound/list now
+            // strips the keys a driver declares secret, so normally there is
+            // nothing to seed anyway; this is the belt to that braces, for a driver
+            // that has not declared one yet. A private key that reaches the browser
+            // is a private key in a page anyone looking over a shoulder can reveal.
+            // Enforced here rather than at each call site, so no future caller can
+            // forget it.
+            const v = f.secret ? undefined : src[f.name];
+            if (v === undefined || v === null) {
+                out[f.name] = Array.isArray(f.def) ? f.def.slice() : f.def;
+                return;
+            }
+            out[f.name] = Array.isArray(f.def) && !Array.isArray(v) ? [v] : v;
+        });
+        return out;
+    }
+
+    static fieldsOf(kind) {
+        return (VPN_OUT_KINDS[kind] || {}).fields || [];
+    }
+
+    // The fields to draw for the parameters as they stand. On the model rather
+    // than in the template so the form and anything else reasoning about a tunnel
+    // agree on what a mode actually uses.
+    visibleFields() {
+        return Outbound.VpnSettings.fieldsOf(this.kind).filter(f => !f.showIf || f.showIf(this.params));
+    }
+
+    // Switches protocol, discarding the previous kind's parameters. Deliberate:
+    // the fields only look alike (an L2TP `password` is not an OpenVPN one), and
+    // carrying them over would post the old protocol's leftovers to a driver that
+    // never asked for them.
+    //
+    // Clearing is also what the server's merge expects. It skips keep-the-stored-
+    // value when the kind changes, since those settings describe another protocol,
+    // so every field including the secrets has to be typed again. A form that kept
+    // the old values would look filled in and save as half a tunnel.
+    setKind(kind) {
+        this.kind = kind;
+        this.params = Outbound.VpnSettings.paramsFor(kind);
+        this.touched = Outbound.VpnSettings.touchedFor(kind);
+    }
+
+    // True when the picker has moved off the stored protocol, so the operator is
+    // re-creating the tunnel rather than editing it.
+    kindChanged() {
+        return !!this.storedKind && this.kind !== this.storedKind;
+    }
+
+    // What goes to /panel/xray/vpnoutbound/save as the `settings` field.
+    //
+    // The server merges this over the stored settings key by key: ABSENT keeps the
+    // stored value, PRESENT wins even when empty. Both blanks below rely on that,
+    // and they mean different things.
+    //
+    // A secret the operator never typed into is dropped, because the form never
+    // rendered the stored one (the API strips the keys a driver declares secret)
+    // and sending "" would clear a working key. A secret the operator DID type
+    // into and then emptied is sent as "", which is how the panel spells "remove
+    // this preshared key". `touched` is the only thing that tells those apart.
+    //
+    // A blank NUMBER is dropped for a different reason: it has to reach the driver
+    // as an absent key, because that is how every numeric setting on the Go side
+    // spells "use your own default" (mtu <= 0, ttl <= 0, a nil *int for the AWG
+    // junk parameters). Sending it as "" would not merely be wrong, it would fail
+    // the unmarshal of the whole settings blob into the driver's struct.
+    settingsPayload() {
+        const out = {};
+        const fields = Outbound.VpnSettings.fieldsOf(this.kind);
+        fields.forEach(f => {
+            const v = this.params[f.name];
+            const blank = v === undefined || v === null || v === '';
+            if (blank && f.secret && !this.touched[f.name]) return;
+            if (blank && f.type === 'number') return;
+            out[f.name] = v;
+        });
+        // Second pass, after every field has had its say: emptying one half of a
+        // validated pair has to empty the other half explicitly, or the absent
+        // secret is restored from storage and the tunnel saves with a key and no
+        // certificate.
+        fields.forEach(f => {
+            if (!f.clears) return;
+            const v = this.params[f.name];
+            if (v === undefined || v === null || v === '') out[f.clears] = '';
+        });
+        return out;
+    }
+
+    // Marks a secret for removal: the field is emptied AND recorded as touched, so
+    // it is POSTed as "" (delete the stored value) rather than left out (keep it).
+    // Without this the only way to clear one would be to type something into an
+    // empty-looking box and delete it again, which nobody would guess.
+    clearSecret(name) {
+        this.params[name] = '';
+        this.touch(name);
+    }
+
+    // True once a secret is staged for removal, so the form can say so: an emptied
+    // field and an untouched one look identical, and they do opposite things.
+    isCleared(name) {
+        const v = this.params[name];
+        return !!this.touched[name] && (v === undefined || v === null || v === '');
+    }
+
+    // A stored vpn outbound is a freedom one in the config, so this is only ever
+    // reached from the JSON tab, which is read-only for this protocol. The tunnel
+    // itself is rebuilt from /vpnoutbound/list when a row is edited. The kind
+    // comes from the protocol value rather than from `json`, which holds the
+    // freedom settings and knows nothing about tunnels.
+    static fromJson(json = {}, kind = VPN_OUT_DEFAULT_KIND) {
+        return new Outbound.VpnSettings(kind);
+    }
+
+    // The freedom settings. UseIP because the tunnel is being asked to carry the
+    // traffic: a name resolved on the host's own resolver before the socket is
+    // pinned would answer for the host's network and not the tunnel's.
+    toJson() {
+        return { domainStrategy: 'UseIP' };
     }
 };
 Outbound.HttpSettings = class extends CommonClass {

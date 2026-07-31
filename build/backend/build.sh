@@ -3,6 +3,10 @@
 # build/backend/build.sh — Build portable, statically-linked VPN daemon binaries
 # that get embedded into the vpn-ui binary (go:embed) and extracted at runtime.
 #
+# "Daemon" is the historical name; the bundle also carries the CLIENT helpers
+# (pptp, openconnect, sstpc) the panel dials OUT with, built by the same recipes
+# as the servers they pair with.
+#
 # The daemons are built against musl (Alpine) and statically linked, so the
 # resulting binaries run on any Linux distro/glibc version without depending on
 # the host's package manager. This is what lets the panel "bake in" the backend
@@ -85,8 +89,26 @@ build_arch() {
         cp pptpd pptpctrl /out/
         strip /out/pptpd /out/pptpctrl || true
 
+        # --- pptp, the CLIENT half (static) ---
+        # pptpd serves PPTP; this is the other direction, the pty helper pppd
+        # drives to DIAL a remote PPTP server. Different upstream project
+        # (pptpclient), no shared code, no library deps beyond libc, so it rides
+        # along in this run instead of earning a container of its own.
+        # PPPD_BINARY is compiled in as /usr/sbin/pppd, which is exactly where
+        # backend.LinkSystemPppd points the bundled pppd, so the default is
+        # already right; the panel drives the --nolaunchpppd form anyway, where
+        # pppd is the parent and that path is never consulted.
+        cd /tmp
+        PPTP_VER=1.10.0
+        wget -q "https://downloads.sourceforge.net/project/pptpclient/pptp/pptp-${PPTP_VER}/pptp-${PPTP_VER}.tar.gz" -O pptp.tar.gz
+        tar xf pptp.tar.gz
+        cd "pptp-${PPTP_VER}"
+        make -j"$(nproc)" pptp LDFLAGS="-static"
+        cp pptp /out/pptp
+        strip /out/pptp || true
+
         # Confirm all outputs are static
-        for b in /out/xl2tpd /out/xl2tpd-control /out/openvpn /out/pptpd /out/pptpctrl; do
+        for b in /out/xl2tpd /out/xl2tpd-control /out/openvpn /out/pptpd /out/pptpctrl /out/pptp; do
             if ! file "$b" | grep -q "statically linked"; then
                 echo "WARNING: $b is not statically linked" >&2
             fi
@@ -130,7 +152,10 @@ build_arch() {
     # source-built static inside the recipe (the only dep Alpine ships no *-static
     # for). Emits /out/ocserv + /out/occtl. Separate Alpine 3.22 run so the recipe
     # stays self-contained, like pppd/libreswan above.
-    step "Building ocserv (OpenConnect) static binary for $goarch"
+    # The same run also emits the CLIENT (/out/openconnect + /out/vpnc-script): it
+    # needs that identical static GnuTLS, and rebuilding GnuTLS in a container of
+    # its own would add ~6 minutes to every bundle build for no gain.
+    step "Building ocserv (OpenConnect) server + client static binaries for $goarch"
     docker run --rm ${DOCKER_NET:-} --platform "$platform" \
         -e ARCH="$muslarch" \
         -v "$outdir:/out" \
@@ -151,6 +176,21 @@ build_arch() {
         -v "$outdir:/out" \
         -v "$REPO_ROOT/build/backend/accel-ppp-bundle.sh:/accel-ppp-bundle.sh:ro" \
         alpine:3.22 sh -e /accel-ppp-bundle.sh
+
+    # sstpc (SSTP client): the other direction from accel-ppp above, which serves
+    # SSTP and has no client mode at all, so this is a different upstream project
+    # (sstp-client). Built from source on Alpine 3.22 because the pppd PLUGIN it
+    # emits alongside the binary is an ABI contract with one exact ppp version,
+    # and 3.22's ppp 2.5.2 is what pppd-bundle.sh harvests. Emits /out/sstpc-bundle.tgz
+    # (a relocatable musl tree: sstpc needs MD4 from OpenSSL 3's dlopen'd legacy
+    # provider, which a fully static binary cannot load) plus the flat
+    # /out/sstp-pppd-plugin.so, which pppd loads by absolute path.
+    step "Building sstpc (SSTP client) bundle for $goarch"
+    docker run --rm ${DOCKER_NET:-} --platform "$platform" \
+        -e ARCH="$muslarch" \
+        -v "$outdir:/out" \
+        -v "$REPO_ROOT/build/backend/sstpc-bundle.sh:/sstpc-bundle.sh:ro" \
+        alpine:3.22 sh -e /sstpc-bundle.sh
 
     # strongswan (IKEv2 server) — HARVESTED from Alpine's musl strongswan package into
     # a relocatable tree. charon dlopens its features as plugins (libstrongswan-eap-radius.so,

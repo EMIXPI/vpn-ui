@@ -650,7 +650,7 @@ show_menu() {
     printf '    %s5)%s  Change Port            %s14)%s Restart Xray\n'          "$GREEN" "$R" "$GREEN" "$R"
     printf '    %s6)%s  Change Web-Path        %s15)%s Xray Logs\n'             "$GREEN" "$R" "$GREEN" "$R"
     printf '    %s7)%s  Reset Login (random)   %s16)%s Restart All Cores\n'     "$GREEN" "$R" "$GREEN" "$R"
-    printf '    %s8)%s  View login info        %s17)%s Get SSL (Lets Encrypt)\n' "$GREEN" "$R" "$GREEN" "$R"
+    printf '    %s8)%s  View login info        %s17)%s Get SSL (LE / Cloudflare)\n' "$GREEN" "$R" "$GREEN" "$R"
     printf '    %s9)%s  Start     (systemd)    %s0)%s  Exit\n'                  "$GREEN" "$R" "$GREEN" "$R"
     hr
 }
@@ -703,6 +703,9 @@ usage: ${0##*/}            open the management menu
 
 environment:
   VPNUI_BIN         path to the panel binary (default: /opt/vpn-ui/vpn-ui-amd64)
+  SSL_METHOD        how to answer the ACME challenge, skipping the question:
+                    'cloudflare' (DNS-01, needs a token, allows a wildcard) or
+                    'manual' (standalone HTTP-01, needs :80 and a live A record)
   DEPLOY_DOMAIN     domain to issue the certificate for (skips the prompt)
   DEPLOY_EMAIL      Let's Encrypt account email (optional)
   DEPLOY_CF_TOKEN   Cloudflare API token: validates over DNS-01 instead of HTTP-01.

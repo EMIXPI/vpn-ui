@@ -922,11 +922,12 @@ type ResellerView struct {
 	AvailableBytes int64 `json:"availableBytes"`
 	Unlimited      bool  `json:"unlimited"`
 
-	DaysPerGB          int  `json:"daysPerGb"`
-	MinCreateGB        int  `json:"minCreateGb"`
-	MinAddGB           int  `json:"minAddGb"`
-	AllowExternalProxy bool `json:"allowExternalProxy"`
-	AllowOverview      bool `json:"allowOverview"`
+	DaysPerGB           int  `json:"daysPerGb"`
+	MinCreateGB         int  `json:"minCreateGb"`
+	MinAddGB            int  `json:"minAddGb"`
+	AllowExternalProxy  bool `json:"allowExternalProxy"`
+	AllowOverview       bool `json:"allowOverview"`
+	AllowOverviewManage bool `json:"allowOverviewManage"`
 
 	InboundIds  []int `json:"inboundIds"`
 	ClientCount int64 `json:"clientCount"`
@@ -948,11 +949,12 @@ type ResellerSpec struct {
 	AllowanceGB int
 	Unlimited   bool
 
-	DaysPerGB          int
-	MinCreateGB        int
-	MinAddGB           int
-	AllowExternalProxy bool
-	AllowOverview      bool
+	DaysPerGB           int
+	MinCreateGB         int
+	MinAddGB            int
+	AllowExternalProxy  bool
+	AllowOverview       bool
+	AllowOverviewManage bool
 
 	// InboundIds is the exact set this reseller may sell on. Replaces whatever
 	// they had; empty means none, which is a legitimate state.
@@ -1028,23 +1030,24 @@ func (s *ResellerService) GetResellers(caller *model.User) ([]ResellerView, erro
 			available = 0
 		}
 		out = append(out, ResellerView{
-			Id:                 u.Id,
-			Username:           u.Username,
-			Nickname:           u.Nickname,
-			Enable:             u.Enable,
-			TwoFactorEnable:    u.TwoFactorEnable,
-			AllowanceBytes:     p.AllowanceBytes,
-			SpentBytes:         p.SpentBytes,
-			AvailableBytes:     available,
-			Unlimited:          p.Unlimited,
-			DaysPerGB:          p.DaysPerGB,
-			MinCreateGB:        p.MinCreateGB,
-			MinAddGB:           p.MinAddGB,
-			AllowExternalProxy: p.AllowExternalProxy,
-			AllowOverview:      p.AllowOverview,
-			InboundIds:         gs,
-			ClientCount:        countBy[u.Id],
-			CreatedBy:          p.CreatedBy,
+			Id:                  u.Id,
+			Username:            u.Username,
+			Nickname:            u.Nickname,
+			Enable:              u.Enable,
+			TwoFactorEnable:     u.TwoFactorEnable,
+			AllowanceBytes:      p.AllowanceBytes,
+			SpentBytes:          p.SpentBytes,
+			AvailableBytes:      available,
+			Unlimited:           p.Unlimited,
+			DaysPerGB:           p.DaysPerGB,
+			MinCreateGB:         p.MinCreateGB,
+			MinAddGB:            p.MinAddGB,
+			AllowExternalProxy:  p.AllowExternalProxy,
+			AllowOverview:       p.AllowOverview,
+			AllowOverviewManage: p.AllowOverviewManage,
+			InboundIds:          gs,
+			ClientCount:         countBy[u.Id],
+			CreatedBy:           p.CreatedBy,
 		})
 	}
 	return out, nil
@@ -1159,15 +1162,16 @@ func (s *ResellerService) AddReseller(caller *model.User, spec ResellerSpec) (*m
 			}
 		}
 		return tx.Create(&model.ResellerProfile{
-			UserId:             user.Id,
-			AllowanceBytes:     gbToBytes(spec.AllowanceGB),
-			Unlimited:          spec.Unlimited,
-			DaysPerGB:          spec.DaysPerGB,
-			MinCreateGB:        spec.MinCreateGB,
-			MinAddGB:           spec.MinAddGB,
-			AllowExternalProxy: spec.AllowExternalProxy,
-			AllowOverview:      spec.AllowOverview,
-			CreatedBy:          caller.Id,
+			UserId:              user.Id,
+			AllowanceBytes:      gbToBytes(spec.AllowanceGB),
+			Unlimited:           spec.Unlimited,
+			DaysPerGB:           spec.DaysPerGB,
+			MinCreateGB:         spec.MinCreateGB,
+			MinAddGB:            spec.MinAddGB,
+			AllowExternalProxy:  spec.AllowExternalProxy,
+			AllowOverview:       spec.AllowOverview,
+			AllowOverviewManage: spec.AllowOverviewManage,
+			CreatedBy:           caller.Id,
 		}).Error
 	})
 	if err != nil {
@@ -1252,12 +1256,13 @@ func (s *ResellerService) UpdateReseller(caller *model.User, id int, spec Resell
 		}
 		return tx.Model(&model.ResellerProfile{}).Where("user_id = ?", user.Id).
 			Updates(map[string]any{
-				"unlimited":            spec.Unlimited,
-				"days_per_gb":          spec.DaysPerGB,
-				"min_create_gb":        spec.MinCreateGB,
-				"min_add_gb":           spec.MinAddGB,
-				"allow_external_proxy": spec.AllowExternalProxy,
-				"allow_overview":       spec.AllowOverview,
+				"unlimited":             spec.Unlimited,
+				"days_per_gb":           spec.DaysPerGB,
+				"min_create_gb":         spec.MinCreateGB,
+				"min_add_gb":            spec.MinAddGB,
+				"allow_external_proxy":  spec.AllowExternalProxy,
+				"allow_overview":        spec.AllowOverview,
+				"allow_overview_manage": spec.AllowOverviewManage,
 			}).Error
 	})
 	if err != nil {

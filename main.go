@@ -200,6 +200,12 @@ func runWebServer() {
 	// every later one, moving live sessions onto other accounts' addresses and breaking
 	// installed WireGuard configs outright.
 	inboundMigrations.MigrationAccountSlots()
+	// Same reason again: hand the admins who predate the overview permission the bit
+	// that now gates the page they could always open, so an upgrade does not quietly
+	// take the panel's home page away from every non-super admin. One shot, guarded by
+	// a setting so a later revoke stays revoked (see MigrationOverviewAccess).
+	adminMigrations := &service.AdminService{}
+	adminMigrations.MigrationOverviewAccess()
 
 	// Extract the pinned Xray core + base geo files baked into the panel. The
 	// core is overwritten on every start so the bundled (patched) fork is always

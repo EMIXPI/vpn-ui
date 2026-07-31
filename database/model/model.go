@@ -150,11 +150,24 @@ type ResellerProfile struct {
 	// the inbound's external-proxy endpoints. Off strips them.
 	AllowExternalProxy bool `json:"allowExternalProxy" gorm:"default:0"`
 
-	// AllowOverview lets this reseller open the panel overview. Off (the default)
-	// hides the nav entry entirely rather than greying it, and the page itself
-	// redirects: the overview is a HOST dashboard (kernel, CPU, disk, public IP)
-	// and none of it is a reseller's to see unless an operator says otherwise.
+	// AllowOverview lets this reseller open the panel overview: the reseller's
+	// counterpart to PermAccessOverview, which their derived mask can never carry.
+	// Off (the default) hides the nav entry entirely rather than greying it, and the
+	// route itself refuses them: the overview is a HOST dashboard (kernel, CPU, disk,
+	// public IP) and none of it is a reseller's to see unless an operator says so.
 	AllowOverview bool `json:"allowOverview" gorm:"default:0"`
+
+	// AllowOverviewManage is the reseller's counterpart to PermOverviewManage: off,
+	// the overview they were let into is a read-only showcase. It has no effect
+	// unless AllowOverview is on, since there is no page to scope otherwise.
+	//
+	// What it can actually reveal is narrow, and narrower than the admin bit. Every
+	// control on that page requires a permission the reseller role does not carry
+	// (resellerPerms holds no Xray, core or panel-settings bit) and the escalation
+	// class is super-admin-only, so today this un-hides nothing a reseller could
+	// then use. It exists so the two roles are configured the same way, and so the
+	// day an action becomes reseller-reachable it is already gated.
+	AllowOverviewManage bool `json:"allowOverviewManage" gorm:"default:0"`
 
 	// CreatedBy is the admin who owns this reseller. A non-super admin holding
 	// PermManageResellers sees and edits only their own: without this, one such
