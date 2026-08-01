@@ -71,15 +71,22 @@ against a running panel:
 | Request, while not logged in | Result |
 |---|---|
 | `/panel/api/...` (any headers) | `404`, empty body |
-| `/panel/core/...` **with** `X-Requested-With: XMLHttpRequest` | `401` + the usual JSON envelope |
-| `/panel/core/...` **without** that header, following redirects | **`200` and an HTML login page** |
+| `/panel/*` **with** `X-Requested-With: XMLHttpRequest` | `401` + the usual JSON envelope |
+| `GET /panel/core/status` **without** that header, following redirects | **`200` and an HTML login page** |
+| `POST /panel/xray/vpnoutbound/list` **without** that header, following redirects | **`404`**, from a path you never called |
 
-The third row is the trap. `checkLogin` (`web/controller/base.go`) answers a
-non-AJAX caller with a `307` to the login page, and every HTTP client that follows
-redirects by default (curl `-L`, Python `requests`, Go's `http.Client`, most of
-them) turns that into a `200` carrying `text/html`. A script that checks the
-status code sees success and then fails to find its JSON, or silently reads
-nothing.
+The last two rows are the trap, and they are the same bug wearing two faces.
+`checkLogin` (`web/controller/base.go`) answers a non-AJAX caller with a `307` to
+the login page, and every HTTP client that follows redirects by default (curl
+`-L`, Python `requests`, Go's `http.Client`, most of them) follows it.
+
+A `307` **preserves the method**, so where you land depends on what you sent. A GET
+lands on the login page and returns `200` with `text/html`: a script checking the
+status code sees success, then fails to find its JSON or silently reads nothing. A
+POST is re-POSTed to the base path, which has no POST route, so it returns `404`
+from a URL that is not the one you asked for. That second shape is nastier than it
+looks, because this document also tells you a `404` means "`/panel/api` and not
+logged in" and here you have one from a `/panel` route instead.
 
 **So always send `X-Requested-With: XMLHttpRequest`.** On `/panel/api` it changes
 nothing; on `/panel` it converts a redirect-to-HTML into an honest `401`. Checking
@@ -1168,8 +1175,11 @@ differently and neither answer is a 401 by default:
 
 `checkLogin` branches on that header alone (`isAjax`), not on whether the caller looks like
 a browser. So a plain `curl -X POST` at `/panel/xray/vpnoutbound/list` with no session gets
-a **307 with an empty body**, which is easy to misread as a routing problem. Send the
-header on `/panel/*` calls if you want the readable JSON error:
+a **307 with an empty body**, or, if your client follows redirects, a **404 from the base
+path** because a 307 re-POSTs and nothing there accepts a POST. Both read as a routing
+problem rather than as "log in". See section 1 for the full table, including the GET shape,
+which is worse again because it returns `200`. Send the header on `/panel/*` calls and you
+get the readable JSON error instead:
 
 ```sh
 curl -sS -b "$JAR" -H 'X-Requested-With: XMLHttpRequest' \
