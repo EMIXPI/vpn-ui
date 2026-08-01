@@ -62,6 +62,29 @@ An account with 2FA that sent no code gets HTTP 200, `success:false`, and
 (`web/controller/api.go`) aborts with 404 to hide which endpoints exist. A 404 from
 `/panel/api/...` therefore means "not logged in" at least as often as it means "wrong URL".
 
+**But `/panel/...` and `/panel/api/...` fail differently, and one of the three
+shapes looks like success.** They are sibling Gin groups with different auth
+middleware, and the routes this document sends you to for core status and VPN
+outbounds (`/panel/core/*`, `/panel/xray/*`) are on the `/panel` side. Measured
+against a running panel:
+
+| Request, while not logged in | Result |
+|---|---|
+| `/panel/api/...` (any headers) | `404`, empty body |
+| `/panel/core/...` **with** `X-Requested-With: XMLHttpRequest` | `401` + the usual JSON envelope |
+| `/panel/core/...` **without** that header, following redirects | **`200` and an HTML login page** |
+
+The third row is the trap. `checkLogin` (`web/controller/base.go`) answers a
+non-AJAX caller with a `307` to the login page, and every HTTP client that follows
+redirects by default (curl `-L`, Python `requests`, Go's `http.Client`, most of
+them) turns that into a `200` carrying `text/html`. A script that checks the
+status code sees success and then fails to find its JSON, or silently reads
+nothing.
+
+**So always send `X-Requested-With: XMLHttpRequest`.** On `/panel/api` it changes
+nothing; on `/panel` it converts a redirect-to-HTML into an honest `401`. Checking
+`Content-Type` for JSON is the belt-and-braces version.
+
 ### Gotcha 1: bodies are form-urlencoded, not JSON
 
 The panel's own frontend posts through axios with `Qs.stringify`, so **every POST body is
@@ -1116,7 +1139,12 @@ space.
 ### Core install status and VPN outbounds, which are NOT under /panel/api
 
 Two things an API caller commonly wants are served by sibling route groups rather than by
-the inbounds API, and looking for them under `/panel/api` is why they read as missing:
+the inbounds API, and looking for them under `/panel/api` is why they read as missing.
+
+**These are on the `/panel` group, so they fail authentication differently from
+everything else in this document.** Send `X-Requested-With: XMLHttpRequest` on
+them or an expired session comes back as a `200` HTML login page rather than an
+error. See section 1.
 
 | Method | Path | Permission | Purpose |
 |---|---|---|---|
