@@ -172,14 +172,27 @@ class Panel:
     def update_inbound(self, inbound_id: int, remark: str, port: int,
                        protocol: str, settings: dict, listen: str = "",
                        extra: dict | None = None) -> dict:
-        """Update an inbound.
+        """Update an inbound. Partial: an omitted field keeps its stored value.
 
-        The panel binds this POST into a FRESH struct and copies an allowlist onto
-        the stored row unconditionally, so ANY column this body omits is written
-        back as its zero value. The traffic-multiplier columns are therefore read
-        from the current row and echoed back, or every update here would silently
-        wipe them (the same reason the web UI's five payload builders all carry
-        them). `extra` overrides that pass-through.
+        The panel binds this POST onto the STORED row, so a body only has to carry
+        what it means to change. An explicitly sent falsy value still wins, which
+        is how a flag gets turned off.
+
+        That was not always true. The panel used to bind into a fresh struct and
+        copy an allowlist onto the stored row unconditionally, so any column this
+        body omitted was written back as its zero value: the traffic multiplier and
+        its threshold, all four speed-limit columns, the IP limit and strategy, the
+        inbound's own total and expiry, and the reset schedule. Twelve fields, with
+        nothing reported. Fixed in a59b0585.
+
+        The three traffic-multiplier columns below are still read from the current
+        row and echoed back. They are redundant against a current panel and are
+        kept deliberately, because this harness is also pointed at older builds
+        during upgrade testing, where the echo is the only thing protecting them.
+        Note it never covered the other nine, so an update through this helper
+        against a pre-a59b0585 panel did silently wipe those.
+
+        `extra` overrides the pass-through.
         """
         cur = self.get_inbound(inbound_id) or {}
         body = {
@@ -190,8 +203,24 @@ class Panel:
             "port": str(port),
             "protocol": protocol,
             "settings": json.dumps(settings),
-            "streamSettings": "{}",
-            "sniffing": "{}",
+            # Echoed from the current row, NOT hardcoded to "{}".
+            #
+            # It used to be hardcoded, and that was the sharpest edge in this file:
+            # the panel copied it onto the stored row unconditionally, so every
+            # update through this helper stripped the inbound's whole transport,
+            # TLS included. It went unnoticed because every VPN and relay protocol
+            # leaves streamSettings empty; on an Xray-native inbound (vless, vmess,
+            # trojan, shadowsocks, hysteria, anytls, tuic, naive) the next client
+            # got "connection reset by peer", which reads as a broken protocol
+            # rather than a wiped transport. Callers had to remember to pass it in
+            # `extra`, and a caller who forgot got no warning.
+            #
+            # Echoing rather than omitting on purpose: omitting is correct against
+            # a current panel (a59b0585 makes an absent field mean "leave alone")
+            # but would still wipe against an older build, and this harness is
+            # pointed at older builds during upgrade testing.
+            "streamSettings": cur.get("streamSettings", "{}") or "{}",
+            "sniffing": cur.get("sniffing", "{}") or "{}",
             "trafficMultiplierEnable": "true" if cur.get("trafficMultiplierEnable") else "false",
             "trafficMultiplierAfter": str(int(cur.get("trafficMultiplierAfter") or 0)),
             "trafficMultiplier": str(cur.get("trafficMultiplier") or 1),
@@ -208,13 +237,10 @@ class Panel:
         Re-saving an inbound restarts its daemon, so callers must (re)connect after
         this, not before.
 
-        streamSettings MUST be echoed back. update_inbound hardcodes it to "{}", and
-        the panel copies an allowlist onto the stored row unconditionally, so without
-        this the inbound loses its whole transport -- TLS included. Every VPN/tunnel
-        protocol leaves streamSettings empty, which is why that went unnoticed; on an
-        Xray-NATIVE inbound (vless/vmess/trojan/shadowsocks/hysteria/anytls/tuic/naive)
-        it silently strips TLS, and the next client gets "connection reset by peer"
-        that looks exactly like a broken protocol rather than a wiped transport."""
+        streamSettings no longer has to be echoed here: update_inbound carries it
+        from the current row itself. It used to hardcode "{}", which silently
+        stripped the transport (TLS included) off every Xray-native inbound this
+        touched."""
         ib = self.get_inbound(inbound_id)
         return self.update_inbound(
             inbound_id,
@@ -224,7 +250,6 @@ class Panel:
             json.loads(ib.get("settings") or "{}"),
             ib.get("listen", "") or "",
             extra={
-                "streamSettings": ib.get("streamSettings", "{}") or "{}",
                 "trafficMultiplierEnable": "true" if enable else "false",
                 "trafficMultiplierAfter": str(int(after_bytes)),
                 "trafficMultiplier": str(multiplier),
@@ -247,11 +272,6 @@ class Panel:
             ib.get("protocol", ""),
             settings,
             ib.get("listen", "") or "",
-            # Echo streamSettings back for the same reason set_traffic_multiplier
-            # does: update_inbound hardcodes "{}" and the panel copies it over
-            # unconditionally. Latent here (User Limit Strategy is a VPN-protocol
-            # concept and those carry no transport) but wrong to leave armed.
-            extra={"streamSettings": ib.get("streamSettings", "{}") or "{}"},
         )
 
     def add_client(self, inbound_id: int, client: dict):

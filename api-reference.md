@@ -7,7 +7,7 @@ Xray-native ones inherited from upstream 3x-ui, the 3 native ones this fork adds
 The source of truth for each protocol's settings shape is `web/service/protocoldefaults.go`
 (the Go table, which is what the SERVER enforces) and `web/assets/js/model/inbound.js` (the
 browser model it was ported from). If this document and those disagree, they are right.
-Where the two disagree with each other, section 13 lists it.
+Where the two disagree with each other, section 14 lists it.
 
 Every `curl` example below is copy-pasteable against a panel with these two shell
 variables set, and reflects the defaults the current code actually applies:
@@ -126,7 +126,7 @@ and a reseller's mask is derived from their role rather than stored.
 | GET | `/getClientTrafficsById/:id` | accessInbounds | Same, keyed by client identity |
 | GET | `/resellerBalance` | accessInbounds | Caller's reseller balance (answers "not a reseller" for others) |
 | POST | `/add` | createInbound | Create an inbound |
-| POST | `/update/:id` | editInbound | Replace an inbound |
+| POST | `/update/:id` | editInbound | Update an inbound. Partial: omitted fields keep their stored value |
 | POST | `/del/:id` | deleteInbound | Delete an inbound |
 | POST | `/import` | createInbound | Create from an exported inbound object |
 | POST | `/reorder` | editInbound | Display order only |
@@ -146,7 +146,7 @@ and a reseller's mask is derived from their role rather than stored.
 | POST | `/clearClientIps/:email` | editClient | Forget them |
 | POST | `/onlines`, `/lastOnline` | accessInbounds | Liveness |
 
-Protocol-specific, documented in section 8:
+Protocol-specific, documented in section 9:
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -197,10 +197,20 @@ Top-level form fields on `/add` and `/update/:id` (`model.Inbound`, `form:` tags
 `tag` is derived server-side from listen and port; do not send it.
 `sortOrder` has no form tag on purpose, so an update cannot reset it.
 
-**`/update/:id` binds into a fresh struct and copies an allowlist onto the stored row
-unconditionally.** Any column the body omits is written back as its zero value. Read the
-inbound first and echo back what you are not changing, or the traffic-multiplier and
-speed-limit settings are silently wiped. `/add` has no such trap.
+**Partial updates are safe: an omitted field means "leave it alone".** `/update/:id` binds
+the request onto the STORED row, so sending just `remark` and `settings` to rename an
+inbound changes only those two. An explicitly sent value still wins, including a falsy one,
+so `speedLimitEnable=false` does turn the limiter off.
+
+This was not always true, and the difference matters if you are reading an older client.
+Until `a59b0585` the handler bound onto an empty struct, and Gin leaves any field the
+request did not mention at its zero value while `UpdateInbound` copies about twenty columns
+onto the row regardless. A rename therefore also zeroed **twelve** fields: the traffic
+multiplier and its threshold, all four speed-limit fields, the IP limit and its strategy,
+the inbound's own `total` and `expiryTime`, and `trafficReset`. Nothing was reported,
+because from the server's side those were simply the values it was sent, and the panel's
+own UI never hit it because its form posts the whole object. Echoing every field back is
+now belt and braces rather than a requirement.
 
 `GET /list` and `GET /get/:id` return the same object plus `clientStats`, an array of
 `{id, inboundId, enable, email, uuid, subId, up, down, allTime, total, expiryTime, reset,
@@ -246,7 +256,7 @@ Rules:
 - **openvpn, sstp and ikev2 cannot be created from a minimal body.** `validateInboundConfig`
   requires a server certificate, and there is no server-side generator on the create path.
   Call the matching `/generate-*-cert` endpoint first and put the returned PEM into
-  `settings` (see section 8).
+  `settings` (see section 9).
 
 ---
 
@@ -727,7 +737,7 @@ curl -sS -b "$JAR" -X POST "$BASE/panel/api/inbounds/add" \
 
 `flow` is also settable **per membership** rather than per account, via
 `AccountInbound.flow`, so one account on two vless inbounds can run vision on one and
-not the other. See section 9.
+not the other. See section 10.
 
 ### 7.6 trojan
 
@@ -767,8 +777,10 @@ Client entry: the shared base plus
 | `method` | string | `""` (inherit the inbound's) |
 | `password` | string | a random password |
 
-Identity: **`email`**. Shadowsocks is the only protocol whose identity is the email
-itself.
+Identity: **`email`**. Shadowsocks is the only protocol whose identity field is literally
+`email`. wg-c, awg, gre and mtproto also address an account by its email, but they do it
+through an `id` field that is required to hold a copy of it, so for those the field name
+in `clientIdentityKey` is `id`.
 
 The inbound-level `password` is a real key for the 2022 methods and must be a base64
 value of the length the chosen method requires. The browser mints it client-side; **the
@@ -784,7 +796,7 @@ curl -sS -b "$JAR" -X POST "$BASE/panel/api/inbounds/add" \
   --data-urlencode 'settings={"method":"2022-blake3-aes-256-gcm","password":"REPLACE_32_BYTE_BASE64","network":"tcp,udp","ivCheck":false,"clients":[{"method":"","password":"REPLACE_32_BYTE_BASE64","email":"dave","enable":true,"limitIp":0,"totalGB":0,"expiryTime":0,"tgId":0,"subId":"davesub","comment":"","reset":0}]}'
 ```
 
-A per-client `method` sent to **`/add`** is silently dropped; see section 13.3. Set it
+A per-client `method` sent to **`/add`** is silently dropped; see section 14.3. Set it
 through `/addClient` or `/updateClient/:clientId` instead, or leave it empty and let the
 account inherit the inbound's.
 
@@ -818,7 +830,7 @@ produces an inbound no real client will complete a handshake with.
 
 ---
 
-## 7A. One working create per protocol
+## 8. One working create per protocol
 
 Every command below is complete as written (the three that need a certificate call the
 generator first). Ports are placeholders: `/add` refuses a port another inbound already
@@ -961,7 +973,7 @@ question entirely.
 
 ---
 
-## 8. Protocol-specific endpoints
+## 9. Protocol-specific endpoints
 
 ### Certificate generation
 
@@ -1019,13 +1031,19 @@ what the subscription hands out as a `.txt`.
 
 ---
 
-## 9. Accounts and membership
+## 10. Accounts and membership
 
 An **account** is one sellable identity that can be served on several inbounds of different
 protocols under one quota, one expiry and one subscription. It sits above the settings JSON
 rather than replacing it: `settings.clients` is maintained as a projection of the account
 onto each member inbound, which is what leaves RADIUS, the slot allocator, every daemon
 config writer and `GetXrayConfig` working unchanged.
+
+> **What this section is not.** It is the wire contract only. What the upgrade does to a
+> live panel, which cases the backfill handles, what it fixes on the way, why the
+> projection cannot lose your WireGuard keys, the three rollback levels and the known
+> limits are all in **[accounts-upgrade-guide.md](accounts-upgrade-guide.md)**. Read that
+> before you turn this on; none of it is repeated here.
 
 ### Account fields (`accounts` table)
 
@@ -1085,6 +1103,37 @@ curl -b jar.txt -X POST 'https://HOST:PORT/<basePath>/panel/api/inbounds/addClie
 The `settings.clients` array on these two endpoints must hold exactly **one** client for the
 membership machinery to resolve the email.
 
+### Refused: two same-protocol memberships on l2tp, pptp or ikev2
+
+`AccountService.ValidateMembershipSet` runs on both `/addClient` and
+`/updateClient/:clientId` and rejects a set naming two inbounds of the same protocol when
+that protocol is one of `l2tp`, `pptp` or `ikev2`:
+
+> an account cannot be on two l2tp inbounds at once ("A" and "B"). l2tp authenticates
+> through a shared daemon that does not name the inbound, so the account would always be
+> served by whichever has the lower id, silently taking that inbound's address range and
+> user limit.
+
+The cause is the **bare NAS-Identifier**. Those three protocols run through one shared
+daemon per protocol, and it sends `l2tp` / `pptp` / `ikev2` rather than `l2tp-3`, so the
+in-binary RADIUS server has nothing to resolve the inbound by and matches first-wins on
+the lowest id.
+
+It is refused rather than allowed because the failure mode is invisible: the account is
+created, shows up on both inbounds, and logs in fine. It simply always lands on one of
+them, on that inbound's addresses and under that inbound's User Limit, forever.
+
+`openvpn`, `openconnect` and `sstp` send `<proto>-<inboundId>` and resolve exactly, so two
+memberships on those are allowed. The Xray-native protocols and the two relays carry no
+NAS-Identifier question at all and are unaffected. Lifting the restriction needs
+per-inbound NAS-Identifiers in those three shared daemon configs.
+
+After the write the server reconciles every protocol in the **union** of the new and the
+previous membership sets, not just the target's. An account spanning l2tp, wg-c and vless
+therefore regenerates all three subsystems from one request, and an inbound the account
+was just removed from has its daemon config rewritten too (otherwise the account keeps
+working there until something unrelated triggers a regeneration).
+
 ### Client identity per protocol
 
 `:clientId` on `/updateClient/:clientId` and `/:id/delClient/:clientId` is the account's
@@ -1103,7 +1152,7 @@ error. `/:id/delClientByEmail/:email` sidesteps the whole question.
 
 ---
 
-## 10. Bulk operations
+## 11. Bulk operations
 
 `/bulkPreview` and `/bulkUpdateClients` both bind a **single form field named `data`** whose
 value is the JSON request. Not the usual per-field form binding:
@@ -1129,7 +1178,7 @@ a partial apply would be worse than a refusal.
 
 ---
 
-## 11. Validation errors
+## 12. Validation errors
 
 `AddInbound` fills defaults and then validates, so a create either stores a complete,
 parseable settings blob or fails with a message naming the field. All arrive as HTTP 200 with
@@ -1159,13 +1208,29 @@ A validation failure on `/add` writes nothing.
 
 ---
 
-## 12. Known traps
+## 13. Known traps
 
 - **Whole-inbound update does not sync `client_traffics`.** An expiry or quota set by
   `/update/:id` never auto-disables the account. Use the client endpoints for per-account
   changes.
+- **`inbounds/list` is a GET, not a POST.** So are `/get/:id`,
+  `/getClientTraffics/:email`, `/getClientTrafficsById/:id`, `/resellerBalance`,
+  `/:id/ovpn/:proto` and all four `*-configs` routes. Meanwhile `/onlines` and
+  `/lastOnline`, which read nothing and change nothing, are POSTs. There is no rule to
+  infer; use the table in section 2. A POST to a GET-only route is a Gin 404, which under
+  this API's convention is indistinguishable from an expired session.
 - **A client posted without `"enable": true` is filtered out of the generated Xray config.**
-  The port listens, nobody can authenticate, and nothing is logged.
+  The port listens, nobody can authenticate, and nothing is logged. `model.Client.Enable`
+  is a plain bool with no `omitempty` and no default, so an absent key unmarshals to
+  `false`.
+- **The inbound's own `enable` has the same trap, one level up.** `model.Inbound.Enable`
+  carries no gorm default, so a create that omits `enable` stores a **disabled** inbound.
+  Always send `enable=true` explicitly.
+- **`totalGB` is bytes, despite the name.** The browser divides by 1 GB purely for
+  display. A reseller's `allowanceBytes` and `spentBytes` are bytes too, and a unit
+  mismatch on that pair is free traffic.
+- **A negative `expiryTime` is a delayed start, not a past date.** Its magnitude is a
+  duration in milliseconds, converted to a real deadline on the account's first use.
 - **`security=tls` with a blank `certificateFile` makes Xray refuse the entire config**, not
   just that inbound. `up=0, down=0` on an inbound that should have traffic usually means it
   never worked at all.
@@ -1175,7 +1240,7 @@ A validation failure on `/add` writes nothing.
 
 ---
 
-## 13. Where the browser model and the server disagree
+## 14. Where the browser model and the server disagree
 
 The Go table in `web/service/protocoldefaults.go` was ported from the JS classes in
 `web/assets/js/model/inbound.js`, key for key. It matches them, with the exceptions below.
@@ -1187,7 +1252,7 @@ wg-c, awg, gre, mtproto, ssh, anytls, tuic and naive all agree on every key and 
 default, except as listed here. The openvpn `ciphers` list and the anytls
 `paddingScheme` list are byte-identical in both.
 
-### 13.1 openvpn `separatePorts`: constructor `false`, `fromJson` `true`
+### 14.1 openvpn `separatePorts`: constructor `false`, `fromJson` `true`
 
 `Inbound.OpenvpnSettings`'s constructor defaults it to `false` (TCP and UDP share
 `inbound.port`), but its own `static fromJson()` resolves an absent key to `true`. Go uses
@@ -1198,13 +1263,13 @@ Consequence: an openvpn inbound stored **without** the key was created by the se
 "shared port" but reads back in the browser as "separate ports". Send the key explicitly
 and neither side has to guess.
 
-### 13.2 ssh `userLimit`: constructor `0`, `fromJson` `1`
+### 14.2 ssh `userLimit`: constructor `0`, `fromJson` `1`
 
 Same split. Go uses **`0`** (no limit), matching the constructor. The `fromJson` value of
 1 exists so inbounds stored before the field existed resolve the way `effectiveSshK(nil)`
 resolves them. For a new inbound created over the API, 0 is what you get.
 
-### 13.3 A per-client `method` is dropped on the `/add` path (shadowsocks only)
+### 14.3 A per-client `method` is dropped on the `/add` path (shadowsocks only)
 
 `AddInbound` re-marshals `settings.clients` through `[]model.Client`, and `model.Client`
 has no `method` field. So a shadowsocks inbound created in one `/add` call with per-client
@@ -1216,7 +1281,7 @@ This is the same class of bug that `Username`, `Slot`, `Secret`, the MTProto mod
 `Peers` and `Devices` were each added to `model.Client` to close. `method` is the one
 still outstanding.
 
-### 13.4 The three identity validators are not wired into the write path
+### 14.4 The three identity validators are not wired into the write path
 
 `ValidateClientEmail`, `ValidateClientSubID` and `ValidateVpnUsername` exist in
 `web/service/account.go` and have tests, but at the current HEAD **nothing calls them**:
@@ -1239,7 +1304,7 @@ parses the settings, and they are checked for panel-wide uniqueness on create an
 rename. Treat the three rules above as your own responsibility until the write path
 enforces them.
 
-### 13.5 The JS constructors seed one account, the Go defaults seed none
+### 14.5 The JS constructors seed one account, the Go defaults seed none
 
 `Inbound.L2tpSettings` and every sibling start with one client in the array, so the
 panel's Add form always shows an account. `DefaultSettingsFor` deliberately returns
@@ -1247,7 +1312,7 @@ panel's Add form always shows an account. `DefaultSettingsFor` deliberately retu
 server-side would be one the caller never asked for and never sees the password of. Post
 no `clients` and you get an inbound with none.
 
-### 13.6 The IPsec pre-shared keys are minted by only one of the two JS entry points
+### 14.6 The IPsec pre-shared keys are minted by only one of the two JS entry points
 
 For l2tp (`randomSeq(16)`) and gre (`randomSeq(24)`) the JS **constructor** mints a PSK
 while `fromJson` does not: l2tp passes an absent `ipsecPsk` through as `undefined`, gre
@@ -1255,7 +1320,7 @@ defaults it to `""`. Go mints one, matching the constructor, so a new inbound cr
 the API always has a usable secret. GRE mints it even with `ipsecEnable` off, exactly as
 the form does, so turning IPsec on later does not also require inventing a secret.
 
-### 13.7 anytls `paddingScheme` seeds only on a new inbound
+### 14.7 anytls `paddingScheme` seeds only on a new inbound
 
 Constructor seeds the 9-line default; `fromJson` reads an absent key as `[]` so an
 operator who deliberately cleared the field sees it stay cleared. Go seeds the default,
