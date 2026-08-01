@@ -457,3 +457,105 @@ type ClientGrePeer struct {
 	PeerIp string `json:"peerIp,omitempty"`
 	Remark string `json:"remark,omitempty"`
 }
+
+// Account is one sellable identity, usable across SEVERAL inbounds of different
+// protocols with ONE quota, ONE expiry and ONE subscription. Membership of an
+// inbound is a separate row (AccountInbound).
+//
+// This table sits ABOVE the existing settings JSON rather than replacing it.
+// Inbound.Settings keeps its clients[] array and is maintained as a PROJECTION of
+// the account onto each member inbound (see web/service/accountproject.go). That is
+// what leaves RADIUS, the slot allocator, every daemon config writer and
+// GetXrayConfig working unchanged: all of them parse settings.clients, and none of
+// them need to learn a new source of truth.
+//
+// Email stays the global account identity, exactly as before: it is the unique key
+// of client_traffics, the name RADIUS authenticates, and the selector the
+// per-account routing rules are built from. One email, one traffic row, one quota,
+// now spread over N inbounds instead of forcing N separate accounts.
+type Account struct {
+	Id int `json:"id" gorm:"primaryKey;autoIncrement"`
+
+	// Email is the identity, and is matched case-insensitively after trimming (see
+	// AccountKey). uniqueIndex here mirrors xray.ClientTraffic.Email's own unique
+	// constraint; relaxing either was rejected twice before (see
+	// multi-inbound-client-plan.md section 8b).
+	Email string `json:"email" gorm:"uniqueIndex;not null"`
+
+	// SubID is the subscription key, and is now INDEXED. It was previously free
+	// text with no index, so a typo silently merged an account into someone else's
+	// subscription. ValidateClientSubID rejects that at the write path.
+	SubID string `json:"subId" gorm:"index;column:sub_id"`
+
+	// Credentials are per FIELD, not per inbound: one uuid serves every vmess/vless
+	// membership, one password every trojan membership. The projection picks the
+	// field its member inbound's protocol keys on (see ClientIdentityKey).
+	//
+	// This split is REQUIRED here and is not cosmetic: Client.ID is overloaded in
+	// the legacy shape, holding a UUID for vmess/vless, a login name for the
+	// credential VPNs and ssh, and the email itself for wg-c/awg/mtproto. Storing
+	// one "id" column would make it impossible to say which of those an account
+	// holds without knowing the protocol it is being rendered for.
+	UUID        string `json:"uuid" gorm:"column:uuid"`                 // vmess / vless / tuic
+	VpnUsername string `json:"vpnUsername" gorm:"column:vpn_username"`  // l2tp/pptp/openvpn/openconnect/sstp/ikev2/ssh login
+	Password    string `json:"password" gorm:"column:password"`         // trojan/shadowsocks/anytls + every credential VPN
+	Auth        string `json:"auth" gorm:"column:auth"`                 // hysteria
+	Security    string `json:"security" gorm:"column:security"`         // vmess
+	Secret      string `json:"secret" gorm:"column:secret"`             // mtproto
+	NaiveUser   string `json:"naiveUser" gorm:"column:naive_username"`  // naive HTTP Basic username; empty means "use Email"
+
+	// Quota and lifecycle: the entire point of the table. One set of these per
+	// account, however many inbounds it is on.
+	TotalGB    int64 `json:"totalGB" gorm:"column:total_gb"`
+	ExpiryTime int64 `json:"expiryTime" gorm:"column:expiry_time"`
+	Enable     bool  `json:"enable" gorm:"default:1"`
+	Reset      int   `json:"reset" gorm:"default:0"`
+	LimitIP    int   `json:"limitIp" gorm:"column:limit_ip"`
+	TgID       int64 `json:"tgId" gorm:"column:tg_id"`
+	Comment    string `json:"comment"`
+
+	CreatedAt int64 `json:"createdAt" gorm:"autoCreateTime:milli"`
+	UpdatedAt int64 `json:"updatedAt" gorm:"autoUpdateTime:milli"`
+}
+
+// TableName pins the table name so it does not collide with anything GORM would
+// infer, and so a future rename of the Go type cannot silently orphan live data.
+func (Account) TableName() string { return "accounts" }
+
+// AccountInbound is ONE membership: this account is served on this inbound.
+// Composite primary key, so the same pair cannot be inserted twice.
+type AccountInbound struct {
+	AccountId int `json:"accountId" gorm:"primaryKey;column:account_id;index"`
+	InboundId int `json:"inboundId" gorm:"primaryKey;column:inbound_id;index"`
+
+	// Slot is per MEMBERSHIP and never per account. It is defined as "the account's
+	// index into THIS inbound's address pool", and one email on N pool inbounds
+	// legitimately consumes N slots at N different addresses. A pointer for the same
+	// reason as Client.Slot: absent must stay distinguishable from slot 0, because
+	// rows predating slots fall back to their list index.
+	Slot *int `json:"slot" gorm:"column:slot"`
+
+	// Flow is a per-membership override (vless only). v3 calls it FlowOverride.
+	// Empty means "whatever the account/protocol default is".
+	Flow string `json:"flow" gorm:"column:flow"`
+
+	// Extra is the VERBATIM client entry this membership was migrated from, minus
+	// nothing: the whole original JSON object. The projection starts from it and
+	// overlays only the keys the account layer owns, so any field neither Account
+	// nor this struct models survives untouched.
+	//
+	// This is load-bearing, not an optimization. wg-c and awg mint a keypair PER
+	// DEVICE and store them as clients[].devices[]; GRE stores pinned peer slots as
+	// clients[].peers[]. model.Client does not model devices at all. A projection
+	// that rebuilt the entry from modelled fields alone would therefore silently
+	// destroy every WireGuard keypair on the first write, invalidating every
+	// already-installed client config on the box. Keeping the original object and
+	// overlaying onto it makes that class of loss impossible, including for
+	// protocol fields added after this code was written.
+	Extra string `json:"-" gorm:"column:extra"`
+
+	CreatedAt int64 `json:"createdAt" gorm:"autoCreateTime:milli"`
+}
+
+// TableName pins the table name. See Account.TableName.
+func (AccountInbound) TableName() string { return "account_inbounds" }

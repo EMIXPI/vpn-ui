@@ -200,6 +200,16 @@ func runWebServer() {
 	// every later one, moving live sessions onto other accounts' addresses and breaking
 	// installed WireGuard configs outright.
 	inboundMigrations.MigrationAccountSlots()
+	// Backfill the accounts layer from settings.clients. Ordered AFTER the two
+	// above on purpose: every account must already carry its subId and its slot
+	// before anything reads them onto a membership row.
+	//
+	// ADDITIVE ONLY (see MigrationAccounts): it inserts into accounts and
+	// account_inbounds and writes nothing else, so a failure at any point leaves
+	// the database exactly as it was and the panel keeps serving on the legacy
+	// client model. Never blocks startup.
+	accountMigrations := &service.AccountService{}
+	accountMigrations.MigrationAccounts()
 	// Same reason again: hand the admins who predate the overview permission the bit
 	// that now gates the page they could always open, so an upgrade does not quietly
 	// take the panel's home page away from every non-super admin. One shot, guarded by
