@@ -552,22 +552,22 @@ type Account struct {
 	// credential VPNs and ssh, and the email itself for wg-c/awg/mtproto. Storing
 	// one "id" column would make it impossible to say which of those an account
 	// holds without knowing the protocol it is being rendered for.
-	UUID        string `json:"uuid" gorm:"column:uuid"`                 // vmess / vless / tuic
-	VpnUsername string `json:"vpnUsername" gorm:"column:vpn_username"`  // l2tp/pptp/openvpn/openconnect/sstp/ikev2/ssh login
-	Password    string `json:"password" gorm:"column:password"`         // trojan/shadowsocks/anytls + every credential VPN
-	Auth        string `json:"auth" gorm:"column:auth"`                 // hysteria
-	Security    string `json:"security" gorm:"column:security"`         // vmess
-	Secret      string `json:"secret" gorm:"column:secret"`             // mtproto
-	NaiveUser   string `json:"naiveUser" gorm:"column:naive_username"`  // naive HTTP Basic username; empty means "use Email"
+	UUID        string `json:"uuid" gorm:"column:uuid"`                // vmess / vless / tuic
+	VpnUsername string `json:"vpnUsername" gorm:"column:vpn_username"` // l2tp/pptp/openvpn/openconnect/sstp/ikev2/ssh login
+	Password    string `json:"password" gorm:"column:password"`        // trojan/shadowsocks/anytls + every credential VPN
+	Auth        string `json:"auth" gorm:"column:auth"`                // hysteria
+	Security    string `json:"security" gorm:"column:security"`        // vmess
+	Secret      string `json:"secret" gorm:"column:secret"`            // mtproto
+	NaiveUser   string `json:"naiveUser" gorm:"column:naive_username"` // naive HTTP Basic username; empty means "use Email"
 
 	// Quota and lifecycle: the entire point of the table. One set of these per
 	// account, however many inbounds it is on.
-	TotalGB    int64 `json:"totalGB" gorm:"column:total_gb"`
-	ExpiryTime int64 `json:"expiryTime" gorm:"column:expiry_time"`
-	Enable     bool  `json:"enable" gorm:"default:1"`
-	Reset      int   `json:"reset" gorm:"default:0"`
-	LimitIP    int   `json:"limitIp" gorm:"column:limit_ip"`
-	TgID       int64 `json:"tgId" gorm:"column:tg_id"`
+	TotalGB    int64  `json:"totalGB" gorm:"column:total_gb"`
+	ExpiryTime int64  `json:"expiryTime" gorm:"column:expiry_time"`
+	Enable     bool   `json:"enable" gorm:"default:1"`
+	Reset      int    `json:"reset" gorm:"default:0"`
+	LimitIP    int    `json:"limitIp" gorm:"column:limit_ip"`
+	TgID       int64  `json:"tgId" gorm:"column:tg_id"`
 	Comment    string `json:"comment"`
 
 	CreatedAt int64 `json:"createdAt" gorm:"autoCreateTime:milli"`

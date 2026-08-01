@@ -155,6 +155,8 @@ Protocol-specific, documented in section 9:
 | GET | `/:id/awg-configs?email=` | Same for AmneziaWG |
 | GET | `/:id/gre-configs?email=` | Render a GRE account's per-peer parameters |
 | GET | `/:id/ssh-configs?email=` | Render an SSH account's endpoints and links |
+| GET | `/:id/addressing` | Read one inbound's address pool, User Limit resolution and per-account tunnel addresses |
+| GET | `/pools` | Read which `/24` of the VPN address space each inbound holds |
 | POST | `/generate-openvpn-certs`, `/:id/generate-openvpn-certs` | Mint a CA + server cert + tls-crypt key |
 | POST | `/generate-ocserv-cert`, `/:id/generate-ocserv-cert` | Mint an OpenConnect server cert |
 | POST | `/generate-sstp-cert`, `/:id/generate-sstp-cert` | Mint an SSTP server cert |
@@ -1035,6 +1037,129 @@ what the subscription hands out as a `.txt`.
 `GET /:id/ovpn/udp` returns the `.ovpn` file itself with
 `Content-Type: application/x-openvpn-profile`, **not** the JSON envelope.
 
+### Address-plane introspection
+
+The pool, the slot and the resulting tunnel address are all decided by the panel. These
+two routes make them readable, so a caller does not have to reimplement the allocator to
+find out what it was given.
+
+`GET /:id/addressing` (permission: accessInbounds + owns) reports one inbound's address
+plane. It answers `success:false` for a protocol that hands out no client address at all
+(mtproto, ssh and every Xray-native one), which is a plain statement rather than an
+error condition:
+
+```json
+{ "success": true, "obj": {
+  "inboundId": 3,
+  "protocol": "l2tp",
+  "ranges":  ["10.1.0.2-10.1.0.254"],
+  "subnets": ["10.1.0"],
+  "userLimit": { "posted": 1, "effective": 1, "rule": "explicit" },
+  "capacity": 253, "maxAccounts": 253, "used": 2,
+  "accounts": [ { "email": "alice", "slot": 0, "addresses": ["10.1.0.2"] } ]
+} }
+```
+
+`userLimit.posted` is a pointer, so `null` means the key was absent (a legacy
+single-device inbound) as distinct from an explicit `0` (no limit); `effective` is what
+the allocator actually uses and `rule` is one of `absent-legacy`, `no-limit` or
+`explicit`, saying how it got there.
+
+Read that block rather than assuming, because the resolution is not the identity and
+three different rules apply:
+
+| Posted | Protocol | `effective` | `rule` |
+|---|---|---|---|
+| absent (`null`) | any pool protocol | `1` | `absent-legacy` |
+| `0` | every pool protocol except `wg-c` / `awg` | **`16`** (`noLimitDevices`) | `no-limit` |
+| `0` | `wg-c`, `awg` | **`64`** (`maxUserLimit`) | `no-limit` |
+| `1`-`64` | any pool protocol | as posted | `explicit` |
+
+So "no limit" is **not** 64 on most protocols: an account has to own a real run of
+consecutive addresses for per-account routing to work at all, so the block is generous but
+bounded at 16. On `wg-c` and `awg` the number only sizes the account's gateway block and
+gates nothing, so `0` there really is the full 64. A caller who sets `0` expecting 64 and
+gets 16 is reading the browser model's comment rather than the server's rule.
+
+`capacity` and `maxAccounts` both count **accounts, not addresses** (an account occupies
+`effective` addresses): `capacity` is what the pool holds as it stands now, `maxAccounts`
+an upper bound after the pool has auto-expanded as far as it is allowed to. `used` is
+scoped to the accounts the caller may see, so for a reseller it is their own count and
+not the inbound's.
+
+A reseller granted the inbound may call it, and the report is narrowed to their own
+accounts **before** it is built. That ordering is the only reason it is safe to expose:
+the addresses come from a panel-wide map, so an unfiltered report would hand one reseller
+the tunnel address of every other seller's customer on a shared inbound.
+
+`GET /pools` (permission: **createInbound**) returns the `/24` map, for checking what is
+free before hand-picking a range:
+
+```json
+{ "success": true, "obj": [
+  { "subnet": "10.1.0", "protocol": "l2tp", "inboundId": 3, "remark": "l2tp-main" }
+] }
+```
+
+It is gated on `createInbound` rather than on the read bit deliberately. The map names
+every inbound on the box, including ones the caller was never granted, with its remark. A
+reseller's mask is derived from their role and carries no `*Inbound` bit beyond access, so
+gating it this way excludes them by construction rather than by a check that could later
+be forgotten.
+
+An OpenVPN inbound appears **twice**, once for its UDP `/24` and once for the `10.3.x`
+TCP mirror, both attributed to the same `inboundId`. The mirror is held by that inbound
+just as firmly as the UDP block, and an operator who cannot see it will eventually try to
+allocate over it. Relay and Xray-native protocols never appear: they own no address
+space.
+
+### Core install status and VPN outbounds, which are NOT under /panel/api
+
+Two things an API caller commonly wants are served by sibling route groups rather than by
+the inbounds API, and looking for them under `/panel/api` is why they read as missing:
+
+| Method | Path | Permission | Purpose |
+|---|---|---|---|
+| GET | `/panel/core/status` | coreSettings | Per-core install and run state, plus host and kernel status |
+| GET | `/panel/core/catalog` | coreSettings | What each protocol's core needs and whether it is present |
+| POST | `/panel/core/provision` | coreSettings | Install a core; `/panel/core/provision-status` polls it |
+| POST | `/panel/xray/vpnoutbound/list` | xraySettings | The configured VPN outbound tunnels (also the fallback for an unknown action) |
+| POST | `/panel/xray/vpnoutbound/kinds` | xraySettings | Which outbound kinds this build supports |
+| POST | `/panel/xray/vpnoutbound/save` | xraySettings | Create or update one; returns `{iface}` |
+| POST | `/panel/xray/vpnoutbound/delete` | xraySettings | Remove one, by `tag` |
+| POST | `/panel/xray/vpnoutbound/status` | xraySettings | Is one up: `{running, detail}`, by `tag` |
+
+They take the same session cookie and the same form-urlencoded bodies. The difference
+worth knowing is what an **unauthenticated** call gets back, because the two groups answer
+differently and neither answer is a 401 by default:
+
+| Group | Gate | Unauthenticated response |
+|---|---|---|
+| `/panel/api/*` | `checkAPIAuth` | `404`, always, with an empty body |
+| `/panel/*` | `checkLogin` | `401` + `success:false` **only if** the request carries `X-Requested-With: XMLHttpRequest`; otherwise a `307` redirect to the base path |
+
+`checkLogin` branches on that header alone (`isAjax`), not on whether the caller looks like
+a browser. So a plain `curl -X POST` at `/panel/xray/vpnoutbound/list` with no session gets
+a **307 with an empty body**, which is easy to misread as a routing problem. Send the
+header on `/panel/*` calls if you want the readable JSON error:
+
+```sh
+curl -sS -b "$JAR" -H 'X-Requested-With: XMLHttpRequest' \
+  -X POST "$BASE/panel/xray/vpnoutbound/list"
+```
+
+Note this is a different rule from the one the permission middleware uses. `deny()` and
+`denyNotFound()` treat any non-GET or any request whose `Accept` does not ask for HTML as
+"wants JSON", so a **permission** failure on `/panel/*` returns readable JSON without the
+header. It is only the **logged-out** check that insists on it.
+
+`save` returning `{iface}` is the one non-obvious reply: it is the network interface the
+synthesized outbound binds to, which only the server knows, and it is what a caller needs
+to correlate the tunnel with anything it inspects on the host.
+
+Creating an inbound for a protocol whose core is not installed is refused, so
+`/panel/core/status` is the check to make before `/add` rather than after it.
+
 ---
 
 ## 10. Accounts and membership
@@ -1241,17 +1366,29 @@ protocols that need them.
 **Not** checked on the delete paths and **not** applied by the accounts migration, so an
 account created before these rules keeps working and stays deletable.
 
-**Unchanged entries are exempt.** `/update/:id` posts every client on the inbound, not
-just the edited one, so validating all of them would let one account created years ago
-block every later edit to that inbound (its DNS, its remark, an unrelated new account)
-until someone fixed that row. Instead each posted entry is compared against the stored
-list and skipped when its identity triple (`email`, `subId`, `id`) is byte-identical to
-one already there.
+**Unchanged entries are exempt, on both edit paths.** Each posted entry is compared
+against what is stored and skipped when its identity triple (`email`, `subId`, `id`) is
+byte-identical to one already there:
 
-The exemption is on the whole triple rather than per field, which is what keeps it from
-becoming a loophole: touch any part of an account's identity and the tuple is new and
-held to the current rules. A pre-existing bad value can be carried forward, but never
-edited into a different bad value, and never created.
+| Path | Exemption |
+|---|---|
+| `/update/:id` | yes, against every client stored on that inbound |
+| `/updateClient/:clientId` | yes, against the clients stored on the target inbound |
+| `/add` | no, and nothing to exempt against: the inbound does not exist yet |
+| `/addClient` | no: the account is new, so its identity is new by definition |
+
+It matters most on `/update/:id`, which posts **every** client on the inbound rather than
+just the edited one. Without the exemption a single account created years ago with a space
+in its username would fail validation on every later save, so the operator could not change
+the inbound's DNS, rename it, or add an unrelated account until they had gone and fixed
+that row. On a panel with hundreds of sold accounts that is an upgrade that bricks an
+inbound, which is worse than the hole the rules close.
+
+The exemption is on the whole triple rather than per field, which is what stops it being a
+loophole: touch any part of an account's identity and the tuple is new and held to the
+current rules. A pre-existing bad value can be carried forward and can still take a quota
+or expiry edit, but it can never be edited into a *different* bad value, and a bad value
+can never be created.
 
 A validation failure on `/add` writes nothing.
 
@@ -1262,13 +1399,14 @@ A validation failure on `/add` writes nothing.
 - **Whole-inbound update does not sync `client_traffics`.** An expiry or quota set by
   `/update/:id` never auto-disables the account. Use the client endpoints for per-account
   changes.
-- **An account that predates the identity rules can be kept but not edited.** The rules in
-  section 12.1 exempt any client entry that is byte-identical to one already stored, so a
-  legacy account with (say) a space in its VPN username keeps working, stays deletable,
-  and does not block edits to anything else on its inbound. The moment you change any part
-  of its identity triple (`email`, `subId`, `id`) the entry is new and is held to the
-  current rules, so a bad value can be carried forward but never edited into a different
-  bad value, and never created.
+- **An account that predates the identity rules keeps working and stays editable, as long
+  as you leave its identity alone.** The rules in section 12.1 exempt any client entry
+  whose identity triple (`email`, `subId`, `id`) is byte-identical to one already stored,
+  so a legacy account with (say) a space in its VPN username still authenticates, still
+  deletes, still takes a quota or expiry edit, and does not block edits to anything else
+  on its inbound. Change any part of the triple and the entry is new and held to the
+  current rules. So a bad value can be carried forward, but never edited into a different
+  bad value and never created.
 - **`inbounds/list` is a GET, not a POST.** So are `/get/:id`,
   `/getClientTraffics/:email`, `/getClientTrafficsById/:id`, `/resellerBalance`,
   `/:id/ovpn/:proto` and all four `*-configs` routes. Meanwhile `/onlines` and

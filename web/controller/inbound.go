@@ -114,6 +114,16 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.GET("/:id/awg-configs", read, owns, a.getAwgConfigs)
 	g.GET("/:id/gre-configs", read, owns, a.getGreConfigs)
 	g.GET("/:id/ssh-configs", read, owns, a.getSshConfigs)
+
+	// Address-plane introspection (web/controller/addressing.go). The pool, the slot
+	// and the tunnel address an account lands on are all decided by the panel and were
+	// readable nowhere, so a caller had to reimplement the allocator to learn what it
+	// had been given. `/pools` is gated on createInbound, not the read bit: it names
+	// every inbound on the box, which is more than a reseller may see, and a derived
+	// reseller mask carries no *Inbound bit beyond access so that gate excludes them
+	// structurally rather than by a check that could be forgotten.
+	g.GET("/:id/addressing", read, owns, a.getInboundAddressing)
+	g.GET("/pools", requirePerm(model.PermCreateInbound), a.getVpnPools)
 }
 
 // onL2tpChanged regenerates L2TP configs and restarts services when an L2TP inbound is modified.

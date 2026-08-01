@@ -51,7 +51,7 @@ func (a *InboundController) getInboundAddressing(c *gin.Context) {
 		// address at all. Saying so plainly beats an empty pool a caller would read as
 		// "misconfigured".
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"),
-			addressingUnsupported(string(inbound.Protocol)))
+			common.NewErrorf("protocol %q hands out no client address, so it has no address pool", inbound.Protocol))
 		return
 	}
 	jsonObj(c, report, nil)

@@ -18,13 +18,17 @@ func TestAddInboundRejectsUnusableIdentities(t *testing.T) {
 		protocol model.Protocol
 		port     int
 		settings string
-		wantIn   string
+		// control is the same client list with the offending value sanitized. It
+		// must be ACCEPTED, or the case below proves nothing.
+		control string
+		wantIn  string
 	}{
 		{
 			// chap-secrets and ocpasswd are line-oriented, so a newline appends a
 			// record the operator never created.
 			"newline in vpn username", model.L2TP, 26101,
 			`{"clients":[{"id":"bob\ninjected ANY pw *","password":"pw","email":"a1","enable":false}]}`,
+			`{"clients":[{"id":"bobinjected","password":"pw","email":"a1","enable":false}]}`,
 			"control character",
 		},
 		{
@@ -33,35 +37,62 @@ func TestAddInboundRejectsUnusableIdentities(t *testing.T) {
 			// (openvpn's cert guard runs first and would mask this).
 			"path separator in vpn username", model.SSH, 26102,
 			`{"clients":[{"id":"../../etc/passwd","password":"pw","email":"a2","enable":false}]}`,
+			`{"clients":[{"id":"etcpasswd","password":"pw","email":"a2","enable":false}]}`,
 			"path separator",
 		},
 		{
 			// chap-secrets is whitespace-delimited.
 			"space in vpn username", model.PPTP, 26103,
 			`{"clients":[{"id":"bob smith","password":"pw","email":"a3","enable":false}]}`,
+			`{"clients":[{"id":"bobsmith","password":"pw","email":"a3","enable":false}]}`,
 			"spaces or tabs",
 		},
 		{
 			// Xray's counter is named user>>><email>>>>traffic.
 			"angle bracket in email", model.VLESS, 26104,
 			`{"clients":[{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","email":"a>>>b","enable":false}]}`,
+			`{"clients":[{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","email":"ab","enable":false}]}`,
 			"control character or '>'",
 		},
 		{
 			// subId is used directly as the /sub/<subId> path component.
 			"path metachar in subId", model.VLESS, 26105,
 			`{"clients":[{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","email":"a5","subId":"../admin","enable":false}]}`,
+			`{"clients":[{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","email":"a5","subId":"admin","enable":false}]}`,
 			"cannot contain",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := newInboundDB(t)
+			// CONTROL FIRST, IN ITS OWN DATABASE.
+			//
+			// AddInbound runs several gates before the identity rules (a
+			// certificate check, a port check, the shared-daemon check), and any of
+			// them firing would reject the inbound for an unrelated reason while
+			// this test still saw "rejected" and passed for the wrong cause. That
+			// is not hypothetical: the openvpn case was masked by the cert gate,
+			// and putting the control in the SAME database masked the l2tp case
+			// behind the shared-IPsec-PSK check, because the control inbound had
+			// already claimed the PSK.
+			//
+			// So the control creates the SAME inbound with a sanitized identity in
+			// a fresh database. If that succeeds, nothing structural is in the way,
+			// and the ONLY thing separating it from the case below is the offending
+			// value.
+			control := &model.Inbound{
+				UserId: 1, Remark: "control", Port: tc.port, Protocol: tc.protocol,
+				Enable: true, Settings: tc.control, Tag: "tag-" + tc.name,
+			}
+			if _, _, err := newInboundDB(t).AddInbound(control); err != nil {
+				t.Fatalf("the control inbound was refused, so this case proves nothing "+
+					"about the identity rules: %v", err)
+			}
+
 			in := &model.Inbound{
 				UserId: 1, Remark: "t", Port: tc.port, Protocol: tc.protocol,
 				Enable: true, Settings: tc.settings, Tag: "tag-" + tc.name,
 			}
-			_, _, err := svc.AddInbound(in)
+			_, _, err := newInboundDB(t).AddInbound(in)
 			if err == nil {
 				t.Fatal("accepted: the value reaches a credential file, a filename or a traffic counter")
 			}
