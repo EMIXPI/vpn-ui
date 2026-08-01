@@ -2774,9 +2774,34 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 		return err
 	}
 
-	// Owning inbounds for the traffic-multiplier policy. A failure here must not cost
-	// us the tick's traffic: fall back to billing everything 1:1.
-	multiplierInbounds, err := loadMultiplierInbounds(tx, dbClientTraffics)
+	// Inbounds for the traffic-multiplier policy. Three id sources, because the
+	// inbound that BILLS a byte is no longer necessarily the one on the client's
+	// row: a collected record may name the inbound it actually came from, and an
+	// account can be a member of several. A failure here must not cost us the
+	// tick's traffic, so it falls back to billing everything 1:1.
+	homeIds := make([]int, 0, len(dbClientTraffics))
+	memberIdsByEmail := make(map[string][]int, len(dbClientTraffics))
+	billedEmails := make([]string, 0, len(dbClientTraffics))
+	for _, ct := range dbClientTraffics {
+		homeIds = append(homeIds, ct.InboundId)
+		billedEmails = append(billedEmails, ct.Email)
+	}
+	sourceIds := make([]int, 0, len(traffics))
+	for _, t := range traffics {
+		sourceIds = append(sourceIds, t.InboundId)
+	}
+	memberRows, merr := s.inboundsServingEmails(tx, billedEmails)
+	if merr != nil {
+		logger.Warning("traffic multiplier: cannot resolve memberships, using the home inbound: ", merr)
+	}
+	memberIds := make([]int, 0, len(memberRows))
+	for _, row := range memberRows {
+		memberIds = append(memberIds, row.Id)
+		key := accountKey(row.Email)
+		memberIdsByEmail[key] = append(memberIdsByEmail[key], row.Id)
+	}
+
+	multiplierInbounds, err := loadMultiplierInbounds(tx, homeIds, sourceIds, memberIds)
 	if err != nil {
 		logger.Warning("traffic multiplier: cannot load inbounds, counting raw: ", err)
 		multiplierInbounds = nil
@@ -2794,11 +2819,28 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 			if dbClientTraffics[dbTraffic_index].Email == traffics[traffic_index].Email {
 				rawUp := traffics[traffic_index].Up
 				rawDown := traffics[traffic_index].Down
+				// Bill at the multiplier of the inbound the bytes CAME FROM, which
+				// the collector stamps on the record when it can be known (the nine
+				// pool VPN protocols count per tunnel address, the two relays count
+				// per account inside one daemon). When it cannot be known, the max
+				// across the account's memberships is used, so the ambiguity can only
+				// over-bill and never hand out free traffic.
+				//
+				// It genuinely cannot be known for the Xray-native protocols, and
+				// that is a property of the core rather than something this code can
+				// plumb: Xray's counter is named "user>>><email>>>>traffic" with NO
+				// inbound component, so an account on vless AND trojan gets one number
+				// covering both, with nothing to attribute it by.
+				source := billingInbound(
+					multiplierInbounds,
+					traffics[traffic_index].InboundId,
+					memberIdsByEmail[accountKey(dbClientTraffics[dbTraffic_index].Email)],
+				)
 				// Weight the delta against the client's quota. Computed rather than
 				// mutated in place: the same slice is broadcast over the websocket and
 				// posted to the external traffic API, which must report measured bytes.
 				billedUp, billedDown := multiplyDelta(
-					multiplierInbounds[dbClientTraffics[dbTraffic_index].InboundId],
+					source,
 					dbClientTraffics[dbTraffic_index].Up+dbClientTraffics[dbTraffic_index].Down,
 					rawUp, rawDown,
 				)
@@ -3248,6 +3290,52 @@ func (s *InboundService) inboundsServingEmails(tx *gorm.DB, emails []string) ([]
 		}
 	}
 	return out, nil
+}
+
+// SingleInboundIdByEmail maps each account served by a protocol to the inbound
+// serving it, keyed by normalized email, for the traffic collectors to stamp the
+// SOURCE of the bytes they report.
+//
+// An email served by TWO inbounds of the same protocol is deliberately mapped to
+// 0 rather than to either of them. Zero means "source unknown", which makes the
+// billing take the max across the account's memberships: over-billing a rare,
+// genuinely ambiguous case is the safe direction, where guessing one of the two
+// would silently bill half a customer's traffic at the wrong rate.
+//
+// This is only reachable for openvpn, openconnect and sstp; l2tp, pptp and ikev2
+// refuse a second same-protocol membership outright (see ValidateMembershipSet).
+func (s *InboundService) SingleInboundIdByEmail(protocol string) map[string]int {
+	var inbounds []*model.Inbound
+	if err := database.GetDB().Model(&model.Inbound{}).
+		Select("id", "protocol", "settings").
+		Where("protocol = ? AND enable = ?", protocol, true).
+		Find(&inbounds).Error; err != nil {
+		logger.Warning("resolving the traffic source inbound for ", protocol, ": ", err)
+		return nil
+	}
+
+	out := map[string]int{}
+	seen := map[string]bool{}
+	for _, inbound := range inbounds {
+		clients, ok := parseSettingsClients(inbound.Settings)
+		if !ok {
+			continue
+		}
+		for _, entry := range clients {
+			email, _ := entry["email"].(string)
+			key := accountKey(email)
+			if key == "" {
+				continue
+			}
+			if seen[key] {
+				out[key] = 0 // ambiguous: two inbounds of this protocol serve it
+				continue
+			}
+			seen[key] = true
+			out[key] = inbound.Id
+		}
+	}
+	return out
 }
 
 // EnableStateByEmail returns every account's enable state, keyed by normalized

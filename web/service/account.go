@@ -1,15 +1,22 @@
 package service
 
 import (
+	"errors"
+	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/util/common"
+	"github.com/mhsanaei/3x-ui/v2/xray"
 
 	"gorm.io/gorm"
 )
+
+// AccountKeyOf exposes the identity normalization (lower, trimmed) to callers
+// outside this package, so a map keyed by it here is looked up the same way there.
+func AccountKeyOf(email string) string { return accountKey(email) }
 
 // AccountService owns the accounts layer: one sellable identity, N inbound
 // memberships, one quota. It never writes settings.clients directly; that is the
@@ -253,6 +260,133 @@ func (s *AccountService) InboundIdsForEmail(email string) ([]int, error) {
 		Order("account_inbounds.inbound_id ASC").
 		Pluck("account_inbounds.inbound_id", &ids).Error
 	return ids, err
+}
+
+// servingInboundIds resolves account identities to every inbound that really
+// serves them, ascending, deduplicated.
+//
+// This is the replacement for every "which inbound is this account on" that used
+// to read a single column (ResellerClient.InboundId, client_traffics.inbound_id).
+// Three sources, unioned, because no single one is right at every moment on a
+// live panel:
+//
+//   - settings.clients, scanned. The source of truth in BOTH worlds: it is what
+//     RADIUS, all eleven daemon config writers and GetXrayConfig read, and it is
+//     correct before the accounts migration has run, after it, and on an inbound
+//     an older binary added in between.
+//   - account_inbounds. Carries a membership recorded by ApplyMemberships whose
+//     entry a concurrent write has not spliced into settings yet.
+//   - client_traffics.inbound_id, the legacy single-inbound answer. Kept so this
+//     can never resolve to FEWER inbounds than the code it replaces: no access
+//     decision that held before may start failing because of this function.
+//
+// Filtered to inbounds that still EXIST, which the last two sources do not
+// guarantee: nothing prunes a membership or a traffic row at the moment its
+// inbound goes, and a dead id reads as "this account is still served somewhere",
+// which is exactly the answer that withholds a refund the reseller is owed.
+func servingInboundIds(tx *gorm.DB, emails ...string) ([]int, error) {
+	keys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		if key := accountKey(email); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	found := map[int]bool{}
+	var inboundService InboundService
+	served, err := inboundService.inboundIdsServingEmails(tx, emails)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range served {
+		found[id] = true
+	}
+
+	var memberships []int
+	if err := tx.Table("account_inbounds").
+		Joins("JOIN accounts ON accounts.id = account_inbounds.account_id").
+		Where("LOWER(TRIM(accounts.email)) IN (?)", keys).
+		Pluck("account_inbounds.inbound_id", &memberships).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range memberships {
+		found[id] = true
+	}
+
+	var legacy []int
+	if err := tx.Model(&xray.ClientTraffic{}).
+		Where("LOWER(TRIM(email)) IN (?)", keys).
+		Pluck("inbound_id", &legacy).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range legacy {
+		found[id] = true
+	}
+
+	if len(found) == 0 {
+		return nil, nil
+	}
+	candidates := make([]int, 0, len(found))
+	for id := range found {
+		candidates = append(candidates, id)
+	}
+	var live []int
+	if err := tx.Model(&model.Inbound{}).Where("id IN (?)", candidates).
+		Pluck("id", &live).Error; err != nil {
+		return nil, err
+	}
+	sort.Ints(live)
+	return live, nil
+}
+
+// inboundAccountEmails lists the account identities ONE inbound serves, in its
+// own settings order, with the memberships appended.
+//
+// The mirror of servingInboundIds, for the caller that has an inbound and needs
+// its accounts. Returns the spelling each source stores, because the callers
+// match emails against other tables by exact string.
+func inboundAccountEmails(tx *gorm.DB, inboundId int) ([]string, error) {
+	var inbound model.Inbound
+	err := tx.Model(&model.Inbound{}).Select("id", "settings").
+		Where("id = ?", inboundId).First(&inbound).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	out := make([]string, 0, 8)
+	seen := map[string]bool{}
+	add := func(email string) {
+		key := accountKey(email)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, email)
+	}
+	if err == nil {
+		clients, ok := parseSettingsClients(inbound.Settings)
+		if ok {
+			for _, entry := range clients {
+				email, _ := entry["email"].(string)
+				add(email)
+			}
+		}
+	}
+
+	var members []string
+	if err := tx.Table("account_inbounds").
+		Joins("JOIN accounts ON accounts.id = account_inbounds.account_id").
+		Where("account_inbounds.inbound_id = ?", inboundId).
+		Pluck("accounts.email", &members).Error; err != nil {
+		return nil, err
+	}
+	for _, email := range members {
+		add(email)
+	}
+	return out, nil
 }
 
 // AccountsMigrated reports whether the accounts layer has been backfilled and

@@ -86,20 +86,83 @@ func multiplyDelta(inb *model.Inbound, currentUpDown, deltaUp, deltaDown int64) 
 // explicitly keeps the 10s tick from loading every inbound's Settings JSON blob.
 var multiplierColumns = []string{"id", "traffic_multiplier_enable", "traffic_multiplier_after", "traffic_multiplier"}
 
-// loadMultiplierInbounds batch-loads the inbounds owning the given client rows,
-// keyed by inbound id. One query for the whole tick rather than one per client.
-func loadMultiplierInbounds(tx *gorm.DB, cts []*xray.ClientTraffic) (map[int]*model.Inbound, error) {
-	ids := make([]int, 0, len(cts))
-	seen := make(map[int]struct{}, len(cts))
-	for _, ct := range cts {
-		if ct.InboundId == 0 {
+// Which inbound's multiplier bills a byte, now that one account can be on several.
+//
+// The rule is: bill at the multiplier of the inbound the bytes ACTUALLY came
+// from. Where that is knowable it is used directly. Where it is not, the highest
+// multiplier across the account's memberships is used instead, so the ambiguity
+// can only ever over-bill, never hand out free traffic.
+//
+// It is knowable for the nine pool VPN protocols and the two relays: their bytes
+// are counted per tunnel address (nftables) or per account by a single relay
+// daemon, and both resolve to one inbound. The collectors stamp InboundId on the
+// record they emit.
+//
+// It is NOT knowable for the Xray-native protocols, and that is a property of the
+// core rather than something this code can plumb. Xray's per-account counter is
+// named "user>>><email>>>>traffic>>>uplink" with NO inbound component (xray/api.go),
+// so an account on vless AND trojan gets ONE number covering both. There is
+// nothing to attribute. Rather than pretend, those records arrive with InboundId
+// 0 and take the max.
+
+// maxMultiplierInbound returns the member inbound with the highest effective
+// multiplier, for records whose source cannot be attributed.
+//
+// Ordering by the multiplier is only meaningful among inbounds that HAVE one
+// enabled; an inbound with the policy off bills 1:1 whatever its stored weight,
+// so it is skipped rather than compared.
+func maxMultiplierInbound(candidates []*model.Inbound) *model.Inbound {
+	var best *model.Inbound
+	for _, inb := range candidates {
+		if inb == nil || !inb.TrafficMultiplierEnable || !validMultiplier(inb.TrafficMultiplier) {
 			continue
 		}
-		if _, dup := seen[ct.InboundId]; dup {
-			continue
+		if best == nil || inb.TrafficMultiplier > best.TrafficMultiplier {
+			best = inb
 		}
-		seen[ct.InboundId] = struct{}{}
-		ids = append(ids, ct.InboundId)
+	}
+	return best
+}
+
+// billingInbound picks the inbound whose multiplier applies to one collected
+// record: its stamped source if it has one, otherwise the max across the
+// account's memberships.
+func billingInbound(byID map[int]*model.Inbound, sourceInboundId int, memberIds []int) *model.Inbound {
+	if sourceInboundId != 0 {
+		if inb, ok := byID[sourceInboundId]; ok {
+			return inb
+		}
+	}
+	candidates := make([]*model.Inbound, 0, len(memberIds))
+	for _, id := range memberIds {
+		if inb, ok := byID[id]; ok {
+			candidates = append(candidates, inb)
+		}
+	}
+	return maxMultiplierInbound(candidates)
+}
+
+// loadMultiplierInbounds batch-loads every inbound whose multiplier could apply
+// this tick, keyed by inbound id. One query for the whole tick.
+//
+// It takes several id sources because the inbound that BILLS a byte is no longer
+// necessarily the one on the client's row: the collected record may name the
+// inbound it came from, and an unattributable record needs every inbound the
+// account is a member of so the max can be taken across them.
+func loadMultiplierInbounds(tx *gorm.DB, idSets ...[]int) (map[int]*model.Inbound, error) {
+	ids := make([]int, 0)
+	seen := make(map[int]struct{})
+	for _, set := range idSets {
+		for _, id := range set {
+			if id == 0 {
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
 	}
 	if len(ids) == 0 {
 		return nil, nil
@@ -124,7 +187,11 @@ func loadMultiplierInbounds(tx *gorm.DB, cts []*xray.ClientTraffic) (map[int]*mo
 // or that traffic bills at 1:1 forever. Deciding where the delta sits relative to
 // the threshold needs the current counter, so unlike the bare `up = up + ?` this
 // replaces, it is a read-modify-write, hence the transaction.
-func foldClientTraffic(email string, up, down int64) {
+// protocol names where the torn-down session was served, so the bytes bill at
+// THAT inbound's multiplier rather than at whichever inbound the account's single
+// client_traffics row happens to name. Empty falls back to the max across the
+// account's memberships, which over-bills rather than under-bills.
+func foldClientTraffic(email, protocol string, up, down int64) {
 	if email == "" || (up <= 0 && down <= 0) {
 		return
 	}
@@ -132,6 +199,16 @@ func foldClientTraffic(email string, up, down int64) {
 	if db == nil {
 		return
 	}
+
+	// Resolved outside the transaction: it is a read-only lookup over the handful
+	// of inbounds of one protocol, and holding the write transaction open across
+	// it would widen the window on the 10s tick for no benefit.
+	sourceInboundId := 0
+	if protocol != "" {
+		inboundService := InboundService{}
+		sourceInboundId = inboundService.SingleInboundIdByEmail(protocol)[accountKey(email)]
+	}
+
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var ct xray.ClientTraffic
 		err := tx.Model(xray.ClientTraffic{}).Where("email = ?", email).First(&ct).Error
@@ -142,10 +219,14 @@ func foldClientTraffic(email string, up, down int64) {
 			return err
 		}
 		billedUp, billedDown := up, down
-		if ct.InboundId != 0 {
+		billingId := sourceInboundId
+		if billingId == 0 {
+			billingId = ct.InboundId
+		}
+		if billingId != 0 {
 			var inb model.Inbound
 			err := tx.Model(model.Inbound{}).Select(multiplierColumns).
-				Where("id = ?", ct.InboundId).First(&inb).Error
+				Where("id = ?", billingId).First(&inb).Error
 			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
