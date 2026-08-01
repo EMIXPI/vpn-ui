@@ -344,3 +344,29 @@ func TestApplyMembershipsMintsMissingCredentials(t *testing.T) {
 		t.Errorf("vless uuid changed to %q: every installed client config would break", got)
 	}
 }
+
+// A membership created by the projection must be indistinguishable in the client
+// table from one added directly: the panel renders a creation date from these, and
+// a projected entry used to carry none.
+func TestNewMembershipGetsTimestamps(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46901, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	l2tp := seedInboundWithClients(t, model.L2TP, 46902, []map[string]any{})
+	svc.MigrationAccounts()
+
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id, l2tp.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+	clients := readClients(t, l2tp.Id)
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
+	}
+	for _, key := range []string{"created_at", "updated_at"} {
+		v, ok := clients[0][key].(float64)
+		if !ok || v <= 0 {
+			t.Errorf("%s = %v, want a real timestamp", key, clients[0][key])
+		}
+	}
+}

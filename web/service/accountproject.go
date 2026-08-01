@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -202,7 +203,24 @@ func projectAccountOntoInbound(inbound *model.Inbound, account *model.Account, m
 		break
 	}
 	if !found {
-		list = append(list, renderClientEntry(account, membership, inbound.Protocol, nil))
+		fresh := renderClientEntry(account, membership, inbound.Protocol, nil)
+		// Stamp the timestamps the legacy add path sets, so an account that joined
+		// an inbound through a membership is not distinguishable in the client table
+		// from one added directly (the panel renders a creation date from these, and
+		// a projected entry showed none).
+		//
+		// Done HERE and not in renderClientEntry deliberately: that function is also
+		// what the migration's round-trip verification renders through, and stamping
+		// a fresh "now" there would make every entry lacking the keys fail to match
+		// its stored form and roll the whole pass back. Same trap as writing a
+		// derived id over a stored one; the write path may add, the render path may
+		// not invent.
+		now := time.Now().Unix() * 1000
+		if _, has := fresh["created_at"]; !has {
+			fresh["created_at"] = now
+		}
+		fresh["updated_at"] = now
+		list = append(list, fresh)
 	}
 
 	root["clients"] = list

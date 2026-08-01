@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
@@ -706,6 +707,10 @@ func (a *InboundController) delInbound(c *gin.Context) {
 		}
 	}
 	needRestart, err := a.inboundService.DelInbound(id)
+	if err == nil {
+		// The inbound is gone, so every membership pointing at it must go too.
+		a.syncAccountsAfterDelete(id)
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
@@ -1042,6 +1047,9 @@ func (a *InboundController) delInboundClient(c *gin.Context) {
 	// charge.
 	used, usedKnown := a.usageBeforeDelete(email)
 	needRestart, err := a.inboundService.DelInboundClient(id, clientId)
+	if err == nil {
+		a.syncAccountsAfterDelete(id)
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
@@ -2049,6 +2057,9 @@ func (a *InboundController) delInboundClientByEmail(c *gin.Context) {
 
 	used, usedKnown := a.usageBeforeDelete(email)
 	needRestart, err := a.inboundService.DelInboundClientByEmail(inboundId, email)
+	if err == nil {
+		a.syncAccountsAfterDelete(inboundId)
+	}
 	if err != nil {
 		jsonMsg(c, "Failed to delete client by email", err)
 		return
@@ -2109,6 +2120,26 @@ func postedMembershipIds(c *gin.Context, targetId int) ([]int, bool) {
 		out = append(out, id)
 	}
 	return out, true
+}
+
+// syncAccountsAfterDelete brings the accounts layer back in step after a client or
+// an inbound is removed.
+//
+// The add and edit paths mirror through applyClientMemberships, but the DELETE
+// paths did not, and settings.clients is the truth they write. So a deleted
+// account kept its account row and every membership: the tables drifted from the
+// data plane, InboundIdsForEmail reported inbounds the account was no longer on,
+// and `vpn-ui revert-accounts` was blocked forever by a phantom multi-membership
+// account that no longer existed anywhere in settings. Found on a live panel.
+//
+// SyncInboundAccounts reconciles the whole inbound and prunes accounts left with
+// no membership, so it is correct for a single client delete, a delete-by-email
+// and the removal of the inbound itself (where it drops every membership pointing
+// at an id that is gone).
+func (a *InboundController) syncAccountsAfterDelete(inboundId int) {
+	if err := accountService.SyncInboundAccounts(database.GetDB(), inboundId); err != nil {
+		logger.Warning("syncing the accounts layer after a delete: ", err)
+	}
 }
 
 // applyClientMemberships puts an account on exactly the given inbounds and
