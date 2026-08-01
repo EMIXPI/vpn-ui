@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/util/common"
@@ -272,7 +274,7 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 		if accountKey(email) == "" {
 			continue
 		}
-		account, err := s.upsertAccountFromEntry(tx, entry)
+		account, err := s.upsertAccountFromEntry(tx, entry, inbound.Protocol)
 		if err != nil {
 			return err
 		}
@@ -298,16 +300,34 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 	return s.pruneOrphanAccounts(tx)
 }
 
-// upsertAccountFromEntry creates or refreshes the account a client entry belongs to.
-func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]any) (*model.Account, error) {
+// upsertAccountFromEntry creates or refreshes the account a client entry belongs
+// to, INCLUDING the credential fields its protocol keys on.
+//
+// Lifting the credential is not optional here, and forgetting it is not a
+// cosmetic omission: the projection renders the account back into settings.clients
+// by writing entry["id"] (or "password", or "auth") FROM the account. An account
+// whose credential columns were never filled therefore projects an EMPTY
+// credential over the real one, which both unaddressable-ifies the client
+// (clientIdentity returns "", so edit and delete stop matching it) and, for the
+// native protocols, leaves a client the core cannot authenticate. It silently
+// corrupts the entry the request was not even about.
+func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]any, protocol model.Protocol) (*model.Account, error) {
 	email, _ := entry["email"].(string)
 	key := accountKey(email)
+
+	// The credential extractor reports divergences through a report; on this path
+	// there is nobody to report to, and first-wins is the wrong rule anyway
+	// (the entry just written IS the newer truth), so a scratch report is
+	// discarded and the fields are taken from the entry below.
+	var scratch AccountsMigrationReport
+	scratchConflicts := map[conflictPair]bool{}
 
 	var account model.Account
 	err := tx.Where("LOWER(TRIM(email)) = ?", key).First(&account).Error
 	switch {
 	case err == gorm.ErrRecordNotFound:
 		fresh := newAccountFromEntry(entry)
+		extractAccountCredential(fresh, entry, protocol, 0, &scratch, scratchConflicts)
 		if err := tx.Create(fresh).Error; err != nil {
 			return nil, err
 		}
@@ -330,10 +350,56 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 	updated.Secret = account.Secret
 	updated.NaiveUser = account.NaiveUser
 	updated.CreatedAt = account.CreatedAt
+	// Then let THIS entry set the fields its own protocol owns. An edit that
+	// rotates a credential has to reach the account, or the projection would write
+	// the stale one straight back over it on the next membership change.
+	overwriteAccountCredential(updated, entry, protocol)
 	if err := tx.Save(updated).Error; err != nil {
 		return nil, err
 	}
 	return updated, nil
+}
+
+// overwriteAccountCredential copies the credential fields a protocol keys on from
+// a client entry onto the account, unconditionally.
+//
+// Unlike the migration's extractAccountCredential, which keeps the FIRST value
+// and records a conflict, this takes the entry's value: it runs after a write
+// that the operator just made, so the entry is the newer truth and a rotated
+// password must not be reverted by the account row.
+func overwriteAccountCredential(account *model.Account, entry map[string]any, protocol model.Protocol) {
+	str := func(k string) string { v, _ := entry[k].(string); return v }
+	set := func(dst *string, v string) {
+		if v != "" {
+			*dst = v
+		}
+	}
+	switch protocol {
+	case model.VMESS:
+		set(&account.UUID, str("id"))
+		set(&account.Security, str("security"))
+	case model.VLESS:
+		set(&account.UUID, str("id"))
+	case model.Trojan, model.Shadowsocks, model.ANYTLS:
+		set(&account.Password, str("password"))
+	case model.NAIVE:
+		set(&account.Password, str("password"))
+		set(&account.NaiveUser, str("username"))
+	case model.TUIC:
+		set(&account.UUID, str("id"))
+		set(&account.Password, str("password"))
+	case model.Hysteria, model.Hysteria2:
+		set(&account.Auth, str("auth"))
+	case model.L2TP, model.PPTP, model.OPENVPN, model.OPENCONNECT, model.SSTP, model.IKEV2, model.SSH:
+		set(&account.VpnUsername, str("id"))
+		set(&account.Password, str("password"))
+	case model.MTPROTO:
+		set(&account.Secret, str("secret"))
+	case model.WGC, model.AWG, model.GRE:
+		// Identity is the email and nothing reads "id"; no credential to lift.
+	default:
+		set(&account.UUID, str("id"))
+	}
 }
 
 // upsertMembership creates or refreshes one (account, inbound) row.
@@ -513,6 +579,15 @@ func (s *AccountService) SetMemberships(tx *gorm.DB, accountId int, inboundIds [
 		if err := tx.Where("id = ?", inboundId).First(&inbound).Error; err != nil {
 			return err
 		}
+		// A new membership renders the credential ITS protocol keys on, and the
+		// account may not hold one yet: an account that only ever existed on vless
+		// has a uuid and no VPN username, so joining an l2tp inbound would project
+		// an empty id and produce an account that is listed, looks fine, and can
+		// never authenticate. Mint what is missing before the projection runs.
+		if err := s.ensureCredentialsFor(tx, accountId, inbound.Protocol); err != nil {
+			return err
+		}
+
 		membership := model.AccountInbound{AccountId: accountId, InboundId: inboundId}
 		if slotPoolProtocol(inbound.Protocol) {
 			// A NEW membership takes the lowest free slot in THAT inbound's pool,
@@ -529,6 +604,69 @@ func (s *AccountService) SetMemberships(tx *gorm.DB, accountId int, inboundIds [
 		}
 	}
 	return nil
+}
+
+// ensureCredentialsFor mints any credential field a protocol needs and the
+// account does not have yet, then persists it.
+//
+// The minting rules mirror buildTargetClientFromSource (the copyClients path),
+// which is the tested answer to "what credential does protocol P need": a real
+// dashed UUID where a client parses one, a dashless token elsewhere, and a
+// username AND password for the six credential VPNs plus ssh, since minting only
+// the username used to create accounts that RADIUS had nothing to check against.
+//
+// Existing fields are never overwritten. That is the point of the per-FIELD
+// split: one uuid serves every vmess/vless membership and one password every
+// trojan membership, so a second membership of the same family reuses the
+// credential the customer already has installed.
+func (s *AccountService) ensureCredentialsFor(tx *gorm.DB, accountId int, protocol model.Protocol) error {
+	var account model.Account
+	if err := tx.Where("id = ?", accountId).First(&account).Error; err != nil {
+		return err
+	}
+
+	changed := false
+	need := func(dst *string, mint func() string) {
+		if *dst == "" {
+			*dst = mint()
+			changed = true
+		}
+	}
+	dashless := func() string { return strings.ReplaceAll(uuid.NewString(), "-", "") }
+	dashed := func() string { return uuid.NewString() }
+
+	switch protocol {
+	case model.VMESS:
+		need(&account.UUID, dashed)
+		need(&account.Security, func() string { return "auto" })
+	case model.VLESS:
+		need(&account.UUID, dashed)
+	case model.Trojan, model.Shadowsocks, model.ANYTLS, model.NAIVE:
+		need(&account.Password, dashless)
+	case model.TUIC:
+		// Authenticates with a uuid AND a password, and the uuid must keep its
+		// dashes: a TUIC client parses this field as a real UUID.
+		need(&account.UUID, dashed)
+		need(&account.Password, dashless)
+	case model.Hysteria, model.Hysteria2:
+		need(&account.Auth, dashless)
+	case model.L2TP, model.PPTP, model.OPENVPN, model.OPENCONNECT, model.SSTP, model.IKEV2, model.SSH:
+		need(&account.VpnUsername, dashless)
+		need(&account.Password, dashless)
+	case model.MTPROTO:
+		// 32 hex characters, which is exactly a dashless uuid.
+		need(&account.Secret, dashless)
+	case model.WGC, model.AWG, model.GRE:
+		// Identity is the email; the per-device keypairs are minted by the
+		// protocol's own reconcile, not here.
+	default:
+		need(&account.UUID, dashed)
+	}
+
+	if !changed {
+		return nil
+	}
+	return tx.Save(&account).Error
 }
 
 // nextFreeSlot returns the lowest unused slot in an inbound's address pool.

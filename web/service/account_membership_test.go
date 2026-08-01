@@ -277,3 +277,70 @@ func TestSyncInboundAccountsKeepsAccountAliveOnOtherInbounds(t *testing.T) {
 		t.Errorf("memberships = %v, want just [%d]", ids, keep.Id)
 	}
 }
+
+// The projection renders the credential FROM the account, so an account whose
+// credential columns were never filled projects an EMPTY credential over the real
+// one. That both unaddressable-ifies the client (clientIdentity returns "", so
+// edit and delete stop matching it) and, for a native protocol, leaves a client
+// the core cannot authenticate. It corrupts the entry the request was not about.
+func TestSyncInboundAccountsLiftsTheCredential(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46701, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	if err := svc.SyncInboundAccounts(database.GetDB(), vless.Id); err != nil {
+		t.Fatalf("SyncInboundAccounts: %v", err)
+	}
+
+	account, err := svc.GetAccountByEmail("bob@example.com")
+	if err != nil || account == nil {
+		t.Fatalf("GetAccountByEmail: %v", err)
+	}
+	if account.UUID != "3fa85f64-5717-4562-b3fc-2c963f66afa6" {
+		t.Fatalf("UUID = %q, want the entry's uuid: an empty one projects over the real credential", account.UUID)
+	}
+
+	// And projecting must write it straight back, not blank it.
+	if _, err := svc.ProjectAccount(database.GetDB(), account.Id); err != nil {
+		t.Fatalf("ProjectAccount: %v", err)
+	}
+	clients := readClients(t, vless.Id)
+	if got, _ := clients[0]["id"].(string); got != "3fa85f64-5717-4562-b3fc-2c963f66afa6" {
+		t.Errorf("projected id = %q, want the uuid unchanged", got)
+	}
+}
+
+// Joining a protocol whose credential the account does not hold must MINT one.
+// An account that only ever existed on vless has a uuid and no VPN username, so
+// without minting it would join an l2tp inbound with an empty id: listed, looks
+// fine, and can never authenticate because RADIUS has nothing to check.
+func TestApplyMembershipsMintsMissingCredentials(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46801, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	l2tp := seedInboundWithClients(t, model.L2TP, 46802, []map[string]any{})
+	svc.MigrationAccounts()
+
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id, l2tp.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+
+	clients := readClients(t, l2tp.Id)
+	if len(clients) != 1 {
+		t.Fatalf("l2tp has %d clients, want 1", len(clients))
+	}
+	login, _ := clients[0]["id"].(string)
+	password, _ := clients[0]["password"].(string)
+	if login == "" {
+		t.Error("l2tp id is empty: RADIUS has no username to authenticate")
+	}
+	if password == "" {
+		t.Error("l2tp password is empty: RADIUS has nothing to check against")
+	}
+	// The vless side must keep the credential the customer already installed.
+	vlessClients := readClients(t, vless.Id)
+	if got, _ := vlessClients[0]["id"].(string); got != "3fa85f64-5717-4562-b3fc-2c963f66afa6" {
+		t.Errorf("vless uuid changed to %q: every installed client config would break", got)
+	}
+}
