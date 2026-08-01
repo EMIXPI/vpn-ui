@@ -64,6 +64,13 @@
                         title: '{{ i18n "menu.inbounds"}}'
                     },
                     {{ end }}
+                    {{ if .perms.accessInbounds }}
+                    {
+                        key: '{{ .base_path }}panel/clients',
+                        icon: 'idcard',
+                        title: '{{ i18n "menu.clients"}}'
+                    },
+                    {{ end }}
                     {{ if .perms.accessPanelSettings }}
                     {
                         key: '{{ .base_path }}panel/settings',

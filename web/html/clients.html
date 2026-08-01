@@ -1,0 +1,287 @@
+{{ template "page/head_start" .}}
+{{ template "page/head_end" .}}
+
+{{ template "page/body_start" .}}
+{{template "page/shell_start" . }}
+      <a-spin :spinning="spinning" :delay="300" tip='{{ i18n "loading"}}' size="large">
+        <transition name="list" appear>
+          <a-row :gutter="[16, 16]" :style="{ margin: 0 }">
+            <a-col :span="24">
+
+              <!-- The account-centric view. The Inbounds page answers "what is
+                   serving traffic"; this one answers "who exists", which stopped
+                   being the same question once one account could be on several
+                   inbounds. Every write here goes back through the inbounds client
+                   routes with an inboundIds set, so there is one write path. -->
+              <a-card hoverable :style="{ marginBottom: '16px' }">
+                <div :style="{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }">
+                  <a-button type="primary" icon="plus" @click="openAdd()">
+                    {{ i18n "pages.clients.add" }}
+                  </a-button>
+                  <a-button icon="reload" @click="loadClients(true)"></a-button>
+                  <a-input-search
+                    v-model="search"
+                    placeholder='{{ i18n "pages.clients.searchPlaceholder" }}'
+                    :style="{ maxWidth: '280px' }"
+                    allow-clear
+                    @search="onSearch"
+                    @change="onSearchChange"></a-input-search>
+                  <span :style="{ flex: '1 1 auto' }"></span>
+                  <!-- Bulk bar appears only with a selection, so the toolbar is not
+                       a row of permanently greyed buttons. -->
+                  <template v-if="selectedEmails.length">
+                    <a-tag color="blue">[[ selectedEmails.length ]] {{ i18n "pages.clients.selected" }}</a-tag>
+                    <a-button size="small" @click="bulkEnable(true)">{{ i18n "enable" }}</a-button>
+                    <a-button size="small" @click="bulkEnable(false)">{{ i18n "disabled" }}</a-button>
+                    <a-button size="small" @click="openBulkExtend()">{{ i18n "pages.clients.extend" }}</a-button>
+                    <a-button size="small" type="danger" @click="bulkDelete()">{{ i18n "delete" }}</a-button>
+                  </template>
+                </div>
+              </a-card>
+
+              <a-card hoverable>
+                <a-table
+                  :columns="columns"
+                  :data-source="clients"
+                  :row-key="r => r.email"
+                  :row-selection="{ selectedRowKeys: selectedEmails, onChange: onSelectChange }"
+                  :pagination="pagination"
+                  :scroll="{ x: 900 }"
+                  @change="onTableChange"
+                  size="middle">
+
+                  <template slot="emailCol" slot-scope="text, row">
+                    <div :style="{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }">
+                      <a-badge :status="row.enable ? 'success' : 'default'"></a-badge>
+                      <span :style="{ fontWeight: 500 }">[[ row.email ]]</span>
+                      <a-tag v-if="row.comment" color="purple">[[ row.comment ]]</a-tag>
+                    </div>
+                  </template>
+
+                  <!-- One account, one quota, however many inbounds serve it. That
+                       is the whole point of the accounts layer, so the usage bar is
+                       the account's and not a per-inbound figure. -->
+                  <template slot="quotaCol" slot-scope="text, row">
+                    <div v-if="row.totalGB > 0">
+                      <a-progress
+                        :percent="usedPercent(row)"
+                        :status="usedPercent(row) >= 100 ? 'exception' : 'normal'"
+                        size="small"
+                        :show-info="false"></a-progress>
+                      <span class="bo-dim">[[ sizeFormat(row.up + row.down) ]] / [[ sizeFormat(row.totalGB) ]]</span>
+                    </div>
+                    <span v-else class="bo-dim">
+                      [[ sizeFormat(row.up + row.down) ]] / {{ i18n "unlimited" }}
+                    </span>
+                  </template>
+
+                  <template slot="expiryCol" slot-scope="text, row">
+                    <a-tag v-if="row.expiryTime === 0" color="green">{{ i18n "indefinite" }}</a-tag>
+                    <!-- A NEGATIVE expiry is not a date: it means "N days from first
+                         use" and the clock has not started. Rendering it as a date
+                         would show 1970. -->
+                    <a-tag v-else-if="row.expiryTime < 0" color="blue">
+                      [[ delayedDays(row) ]] {{ i18n "pages.clients.daysAfterFirstUse" }}
+                    </a-tag>
+                    <a-tag v-else :color="expired(row) ? 'red' : 'green'">[[ formatExpiry(row) ]]</a-tag>
+                  </template>
+
+                  <template slot="inboundsCol" slot-scope="text, row">
+                    <span v-if="!row.memberships || !row.memberships.length" class="bo-dim">
+                      {{ i18n "pages.clients.noInbounds" }}
+                    </span>
+                    <a-tag v-for="m in row.memberships" :key="m.inboundId"
+                           :color="m.enable ? '' : 'red'"
+                           :title="m.protocol + ' :' + m.port">
+                      [[ m.remark || (m.protocol + ':' + m.port) ]]
+                    </a-tag>
+                  </template>
+
+                  <template slot="actionCol" slot-scope="text, row">
+                    <a-space>
+                      <a-button size="small" icon="edit" @click="openEdit(row)"></a-button>
+                      <a-button size="small" :icon="row.enable ? 'pause' : 'caret-right'"
+                                @click="toggleEnable(row)"></a-button>
+                      <a-button size="small" type="danger" icon="delete" @click="confirmDelete(row)"></a-button>
+                    </a-space>
+                  </template>
+                </a-table>
+              </a-card>
+            </a-col>
+          </a-row>
+        </transition>
+      </a-spin>
+{{template "page/shell_end" . }}
+
+{{template "page/body_scripts" .}}
+{{template "component/aSidebar" .}}
+{{template "component/aThemeSwitch" .}}
+{{template "modals/clientMembershipModal" .}}
+
+<script>
+  const app = new Vue({
+    delimiters: ['[[', ']]'],
+    el: '#app',
+    data: {
+      // themeSwitcher, pageTitle and pageClass are read by the shell in
+      // page/shell_start. Omitting any of them makes the WHOLE #app render throw,
+      // which leaves the page blank behind v-cloak with a valid 200 on the wire.
+      themeSwitcher,
+      pageTitle: '{{ i18n "pages.clients.title" }}',
+      pageClass: '',
+      spinning: false,
+      clients: [],
+      assignable: [],
+      search: '',
+      searchTimer: null,
+      selectedEmails: [],
+      pagination: { current: 1, pageSize: 50, total: 0, showSizeChanger: true, pageSizeOptions: ['20', '50', '100', '200'] },
+      columns: [
+        { title: '{{ i18n "pages.clients.email" }}', scopedSlots: { customRender: 'emailCol' }, width: 220 },
+        { title: '{{ i18n "pages.clients.quota" }}', scopedSlots: { customRender: 'quotaCol' }, width: 190 },
+        { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiryCol' }, width: 150 },
+        { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'inboundsCol' } },
+        { title: '', scopedSlots: { customRender: 'actionCol' }, width: 130, align: 'right' },
+      ],
+    },
+    methods: {
+      sizeFormat(b) { return SizeFormatter.sizeFormat(b || 0); },
+      usedPercent(row) {
+        if (!row.totalGB) return 0;
+        return Math.min(100, Math.round(((row.up + row.down) / row.totalGB) * 100));
+      },
+      expired(row) { return row.expiryTime > 0 && row.expiryTime < Date.now(); },
+      // IntlUtil is what every other table in this panel formats dates with;
+      // there is no DateUtil.
+      formatExpiry(row) { return IntlUtil.formatDate(row.expiryTime); },
+      // Stored negative, in milliseconds, counting DOWN from first use.
+      delayedDays(row) { return Math.round(Math.abs(row.expiryTime) / 86400000); },
+
+      async loadClients(showSpin) {
+        if (showSpin) this.spinning = true;
+        const q = `?page=${this.pagination.current}&size=${this.pagination.pageSize}&search=${encodeURIComponent(this.search || '')}`;
+        const msg = await HttpUtil.get('/panel/api/clients/list' + q);
+        this.spinning = false;
+        if (!msg || !msg.success) return;
+        this.clients = (msg.obj && msg.obj.rows) || [];
+        this.pagination.total = (msg.obj && msg.obj.total) || 0;
+        // Drop selections that are no longer on the page, or a bulk action would
+        // silently act on rows the operator can no longer see.
+        const visible = new Set(this.clients.map(c => c.email));
+        this.selectedEmails = this.selectedEmails.filter(e => visible.has(e));
+      },
+      async loadAssignable() {
+        const msg = await HttpUtil.get('/panel/api/clients/assignable');
+        if (msg && msg.success) this.assignable = msg.obj || [];
+      },
+      onSelectChange(keys) { this.selectedEmails = keys; },
+      onTableChange(pag) {
+        this.pagination.current = pag.current;
+        this.pagination.pageSize = pag.pageSize;
+        this.loadClients();
+      },
+      onSearch() { this.pagination.current = 1; this.loadClients(); },
+      onSearchChange() {
+        // Debounced so typing does not fire a request per keystroke.
+        clearTimeout(this.searchTimer);
+        this.searchTimer = setTimeout(() => { this.pagination.current = 1; this.loadClients(); }, 300);
+      },
+
+      openAdd() { clientMembershipModal.show({ assignable: this.assignable, onDone: () => this.loadClients() }); },
+      openEdit(row) { clientMembershipModal.show({ row, assignable: this.assignable, onDone: () => this.loadClients() }); },
+
+      async toggleEnable(row) {
+        await this.applyToAccount(row, { enable: !row.enable });
+        await this.loadClients();
+      },
+      // One account can be on several inbounds, so a change has to reach all of
+      // them. updateClient carries inboundIds and re-projects, which is why this
+      // page does not need a write path of its own.
+      async applyToAccount(row, patch) {
+        const ids = (row.memberships || []).map(m => m.inboundId);
+        if (!ids.length) return null;
+        const client = Object.assign({
+          email: row.email, enable: row.enable, totalGB: row.totalGB,
+          expiryTime: row.expiryTime, limitIp: row.limitIp, subId: row.subId,
+          comment: row.comment, reset: row.reset,
+        }, patch);
+        const body = { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) };
+        return await HttpUtil.post('/panel/api/inbounds/updateClient/' + encodeURIComponent(row.email), body);
+      },
+
+      confirmDelete(row) {
+        this.$confirm({
+          title: '{{ i18n "pages.clients.deleteTitle" }}',
+          content: '{{ i18n "pages.clients.deleteContent" }} ' + row.email,
+          okText: '{{ i18n "delete" }}',
+          cancelText: '{{ i18n "cancel" }}',
+          okType: 'danger',
+          onOk: async () => { await this.deleteAccount(row); await this.loadClients(); },
+        });
+      },
+      // Removed from EVERY inbound serving it. Deleting it from one and leaving the
+      // rest is a working account nobody is billed for.
+      async deleteAccount(row) {
+        for (const m of (row.memberships || [])) {
+          await HttpUtil.post(`/panel/api/inbounds/${m.inboundId}/delClientByEmail/${encodeURIComponent(row.email)}`);
+        }
+      },
+
+      selectedRows() { return this.clients.filter(c => this.selectedEmails.includes(c.email)); },
+      async bulkEnable(enable) {
+        this.spinning = true;
+        for (const row of this.selectedRows()) await this.applyToAccount(row, { enable });
+        this.spinning = false;
+        this.selectedEmails = [];
+        await this.loadClients();
+      },
+      bulkDelete() {
+        const rows = this.selectedRows();
+        this.$confirm({
+          title: '{{ i18n "pages.clients.bulkDeleteTitle" }}',
+          content: rows.length + ' {{ i18n "pages.clients.bulkDeleteContent" }}',
+          okText: '{{ i18n "delete" }}',
+          cancelText: '{{ i18n "cancel" }}',
+          okType: 'danger',
+          onOk: async () => {
+            this.spinning = true;
+            for (const row of rows) await this.deleteAccount(row);
+            this.spinning = false;
+            this.selectedEmails = [];
+            await this.loadClients();
+          },
+        });
+      },
+      openBulkExtend() {
+        const self = this;
+        let days = 30;
+        this.$confirm({
+          title: '{{ i18n "pages.clients.extendTitle" }}',
+          content: (h) => h('a-input-number', {
+            props: { min: 1, max: 3650, value: days },
+            on: { change: v => { days = v; } },
+          }),
+          okText: '{{ i18n "confirm" }}',
+          cancelText: '{{ i18n "cancel" }}',
+          onOk: async () => {
+            self.spinning = true;
+            for (const row of self.selectedRows()) {
+              // Extend from now when already expired or unset, otherwise from the
+              // existing deadline, so extending twice does not lose the first.
+              const base = row.expiryTime > Date.now() ? row.expiryTime : Date.now();
+              await self.applyToAccount(row, { expiryTime: base + days * 86400000 });
+            }
+            self.spinning = false;
+            self.selectedEmails = [];
+            await self.loadClients();
+          },
+        });
+      },
+    },
+    async mounted() {
+      await this.loadAssignable();
+      await this.loadClients(true);
+    },
+  });
+</script>
+{{ template "page/body_end" .}}

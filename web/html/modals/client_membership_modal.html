@@ -1,0 +1,186 @@
+{{define "modals/clientMembershipModal"}}
+<a-modal id="client-membership-modal" v-model="clientMembershipModal.visible"
+  :title="clientMembershipModal.title" @ok="clientMembershipModal.ok"
+  :confirm-loading="clientMembershipModal.confirmLoading" :closable="true" :mask-closable="false"
+  :ok-text="clientMembershipModal.okText" cancel-text='{{ i18n "close" }}'
+  :class="themeSwitcher.currentTheme">
+
+  <a-form layout="horizontal" :label-col="{ span: 8 }" :wrapper-col="{ span: 14 }">
+    <a-form-item label='{{ i18n "pages.clients.email" }}'>
+      <a-input v-model.trim="clientMembershipModal.client.email"
+               :disabled="clientMembershipModal.isEdit"></a-input>
+    </a-form-item>
+    <a-form-item label='{{ i18n "pages.clients.quota" }}'>
+      <a-input-number v-model="clientMembershipModal.totalGb" :min="0" :style="{ width: '100%' }"></a-input-number>
+      <span class="bo-dim">{{ i18n "pages.clients.zeroUnlimited" }}</span>
+    </a-form-item>
+    <a-form-item label='{{ i18n "pages.clients.expiryDays" }}'>
+      <a-input-number v-model="clientMembershipModal.days" :min="0" :style="{ width: '100%' }"></a-input-number>
+      <span class="bo-dim">{{ i18n "pages.clients.zeroNoExpiry" }}</span>
+    </a-form-item>
+    <a-form-item label='{{ i18n "pages.clients.ipLimit" }}'>
+      <a-input-number v-model="clientMembershipModal.client.limitIp" :min="0" :style="{ width: '100%' }"></a-input-number>
+    </a-form-item>
+    <a-form-item label='{{ i18n "pages.clients.comment" }}'>
+      <a-input v-model="clientMembershipModal.client.comment"></a-input>
+    </a-form-item>
+  </a-form>
+
+  <!-- The inbound picker sits OUTSIDE a-form-item on purpose. This modal is antd's
+       default 520px with label-col 8, so a full-width control inside a form item is
+       squeezed into the 14-span wrapper and the list becomes unreadable. Same
+       treatment the external-proxy rows get in form/client.html. -->
+  <a-divider>{{ i18n "pages.clients.inbounds" }}</a-divider>
+  <div :style="{ marginBottom: '8px' }">
+    <a-checkbox
+      :checked="clientMembershipModal.allChecked"
+      :indeterminate="clientMembershipModal.someChecked"
+      @change="clientMembershipModal.toggleAll">
+      {{ i18n "pages.clients.selectAll" }}
+    </a-checkbox>
+  </div>
+  <div :style="{ maxHeight: '180px', overflowY: 'auto' }">
+    <a-checkbox-group v-model="clientMembershipModal.selected" :style="{ width: '100%' }">
+      <div v-for="ib in clientMembershipModal.assignable" :key="ib.inboundId">
+        <a-checkbox :value="ib.inboundId">
+          [[ ib.remark || ('#' + ib.inboundId) ]]
+          <a-tag>[[ ib.protocol ]]</a-tag>
+          <span class="bo-dim">:[[ ib.port ]]</span>
+        </a-checkbox>
+      </div>
+    </a-checkbox-group>
+  </div>
+
+  <!-- Refused by the server, so saying so here saves a round trip that comes back
+       as an opaque failure. l2tp, pptp and ikev2 authenticate through a shared
+       daemon that does not name the inbound, so an account on two of the same kind
+       is always served by whichever has the lower id. -->
+  <a-alert v-if="clientMembershipModal.protocolClash" type="error" show-icon
+    :style="{ marginTop: '12px' }"
+    message='{{ i18n "pages.clients.sameProtocolRefused" }}'></a-alert>
+</a-modal>
+
+<script>
+  const clientMembershipModal = {
+    visible: false,
+    confirmLoading: false,
+    isEdit: false,
+    title: '',
+    okText: '',
+    assignable: [],
+    selected: [],
+    totalGb: 0,
+    days: 0,
+    client: {},
+    onDone: null,
+
+    // Only these three cannot tell two of their own inbounds apart (bare
+    // NAS-Identifier), which is exactly the set the server refuses.
+    ambiguous: ['l2tp', 'pptp', 'ikev2'],
+
+    get allChecked() {
+      return this.assignable.length > 0 && this.selected.length === this.assignable.length;
+    },
+    get someChecked() {
+      return this.selected.length > 0 && this.selected.length < this.assignable.length;
+    },
+    get protocolClash() {
+      const seen = {};
+      for (const id of this.selected) {
+        const ib = this.assignable.find(x => x.inboundId === id);
+        if (!ib || this.ambiguous.indexOf(ib.protocol) === -1) continue;
+        if (seen[ib.protocol]) return true;
+        seen[ib.protocol] = true;
+      }
+      return false;
+    },
+    toggleAll(e) {
+      this.selected = e.target.checked ? this.assignable.map(i => i.inboundId) : [];
+    },
+
+    show({ row = null, assignable = [], onDone = null }) {
+      this.assignable = assignable;
+      this.onDone = onDone;
+      this.isEdit = !!row;
+      this.title = row ? '{{ i18n "pages.clients.editTitle" }}' : '{{ i18n "pages.clients.addTitle" }}';
+      this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
+      if (row) {
+        this.client = {
+          email: row.email, enable: row.enable, limitIp: row.limitIp,
+          comment: row.comment, subId: row.subId, reset: row.reset,
+        };
+        this.totalGb = row.totalGB ? Math.round(row.totalGB / 1073741824) : 0;
+        // A negative expiry means "N days from first use" and has not started, so it
+        // is shown as that many days rather than as a date in 1970.
+        this.days = row.expiryTime > 0
+          ? Math.max(0, Math.ceil((row.expiryTime - Date.now()) / 86400000))
+          : (row.expiryTime < 0 ? Math.round(Math.abs(row.expiryTime) / 86400000) : 0);
+        this.selected = (row.memberships || []).map(m => m.inboundId);
+      } else {
+        this.client = { email: '', enable: true, limitIp: 0, comment: '', subId: '', reset: 0 };
+        this.totalGb = 0;
+        this.days = 0;
+        this.selected = [];
+      }
+      this.visible = true;
+    },
+
+    // The credential the FIRST inbound's protocol keys on has to be present, because
+    // that inbound is created through the ordinary addClient path and an account with
+    // a blank identity cannot be addressed at all. The remaining memberships are the
+    // server's to mint (it fills any field the account lacks), so this only has to
+    // cover the one protocol.
+    credentialsFor(protocol) {
+      const uuid = RandomUtil.randomUUID();
+      const pw = RandomUtil.randomSeq(10);
+      switch (protocol) {
+        case 'vmess': case 'vless':
+          return { id: uuid, security: 'auto' };
+        case 'tuic':
+          return { id: uuid, password: pw };
+        case 'trojan': case 'shadowsocks': case 'anytls': case 'naive':
+          return { password: pw };
+        case 'hysteria':
+          return { auth: pw };
+        case 'l2tp': case 'pptp': case 'openvpn': case 'openconnect':
+        case 'sstp': case 'ikev2': case 'ssh':
+          return { id: RandomUtil.randomLowerAndNum(8), password: pw };
+        case 'mtproto':
+          return { secret: RandomUtil.randomSeq(32, { type: 'hex' }) };
+        default:
+          return { id: uuid };
+      }
+    },
+
+    async ok() {
+      const email = (this.client.email || '').trim();
+      if (!email) return;
+      if (!this.selected.length) return;
+      if (this.protocolClash) return;
+
+      const ids = this.selected.slice().sort((a, b) => a - b);
+      const first = this.assignable.find(x => x.inboundId === ids[0]);
+
+      const client = Object.assign({}, this.client, {
+        email,
+        totalGB: (this.totalGb || 0) * 1073741824,
+        expiryTime: this.days > 0 ? Date.now() + this.days * 86400000 : 0,
+      });
+      if (!this.isEdit) Object.assign(client, this.credentialsFor(first ? first.protocol : ''));
+
+      const body = { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) };
+      const url = this.isEdit
+        ? '/panel/api/inbounds/updateClient/' + encodeURIComponent(email)
+        : '/panel/api/inbounds/addClient';
+
+      this.confirmLoading = true;
+      const msg = await HttpUtil.post(url, body);
+      this.confirmLoading = false;
+      if (msg && msg.success) {
+        this.visible = false;
+        if (this.onDone) this.onDone();
+      }
+    },
+  };
+</script>
+{{end}}
