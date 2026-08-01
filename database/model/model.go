@@ -562,13 +562,23 @@ type Account struct {
 
 	// Quota and lifecycle: the entire point of the table. One set of these per
 	// account, however many inbounds it is on.
-	TotalGB    int64  `json:"totalGB" gorm:"column:total_gb"`
-	ExpiryTime int64  `json:"expiryTime" gorm:"column:expiry_time"`
-	Enable     bool   `json:"enable" gorm:"default:1"`
-	Reset      int    `json:"reset" gorm:"default:0"`
-	LimitIP    int    `json:"limitIp" gorm:"column:limit_ip"`
-	TgID       int64  `json:"tgId" gorm:"column:tg_id"`
-	Comment    string `json:"comment"`
+	TotalGB    int64 `json:"totalGB" gorm:"column:total_gb"`
+	ExpiryTime int64 `json:"expiryTime" gorm:"column:expiry_time"`
+	// NO gorm default, deliberately. `default:1` makes GORM treat Go's false as
+	// "unset" and write 1 instead, so a DISABLED client migrated to an ENABLED
+	// account. The projection then rendered enable:true over the stored false, the
+	// round-trip verification caught the difference, and the ENTIRE migration
+	// rolled back. That would have hit most real panels: exceeding a quota
+	// disables an account automatically, so a disabled client is the norm and not
+	// an edge case.
+	//
+	// The default buys nothing here. This table is new, so there are no legacy
+	// rows to backfill, and every writer sets the field explicitly.
+	Enable  bool   `json:"enable"`
+	Reset   int    `json:"reset" gorm:"default:0"`
+	LimitIP int    `json:"limitIp" gorm:"column:limit_ip"`
+	TgID    int64  `json:"tgId" gorm:"column:tg_id"`
+	Comment string `json:"comment"`
 
 	CreatedAt int64 `json:"createdAt" gorm:"autoCreateTime:milli"`
 	UpdatedAt int64 `json:"updatedAt" gorm:"autoUpdateTime:milli"`

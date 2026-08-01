@@ -292,9 +292,17 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 	var inbound model.Inbound
 	if err := tx.Model(&model.Inbound{}).Where("id = ?", inboundId).First(&inbound).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			// The inbound is gone: drop every membership pointing at it. The
-			// accounts themselves survive, because they may be on other inbounds.
-			return tx.Where("inbound_id = ?", inboundId).Delete(&model.AccountInbound{}).Error
+			// The inbound is gone: drop every membership pointing at it. An account
+			// that is on OTHER inbounds survives, which is why the memberships go
+			// rather than the accounts.
+			if derr := tx.Where("inbound_id = ?", inboundId).Delete(&model.AccountInbound{}).Error; derr != nil {
+				return derr
+			}
+			// But an account whose LAST membership was on that inbound is now
+			// served by nothing, and returning here without pruning left it
+			// listed forever on the Clients page and blocking revert-accounts.
+			// Found by deleting a test inbound on a live panel.
+			return s.pruneOrphanAccounts(tx)
 		}
 		return err
 	}
@@ -478,10 +486,27 @@ func (s *AccountService) upsertMembership(tx *gorm.DB, accountId int, inbound *m
 // An account with no membership is served by nothing and addressable by nothing;
 // leaving it would make the email look taken and refuse a later re-create of the
 // same customer.
+// Resolved in two explicit steps rather than as a NOT IN sub-select built from
+// the same *gorm.DB. That form reuses the caller's statement, and when this runs
+// straight after a Delete on that same tx (the deleted-inbound path) the
+// leftover statement state poisons the sub-select: it matched nothing, so EVERY
+// account was treated as an orphan and accounts still serving other inbounds
+// were deleted. Two queries, no shared statement, no ambiguity.
 func (s *AccountService) pruneOrphanAccounts(tx *gorm.DB) error {
-	return tx.Where("id NOT IN (?)",
-		tx.Model(&model.AccountInbound{}).Select("account_id"),
-	).Delete(&model.Account{}).Error
+	var live []int
+	if err := tx.Session(&gorm.Session{NewDB: true}).
+		Model(&model.AccountInbound{}).
+		Distinct().Pluck("account_id", &live).Error; err != nil {
+		return err
+	}
+
+	db := tx.Session(&gorm.Session{NewDB: true})
+	if len(live) == 0 {
+		// No memberships at all, so every account is an orphan. Expressed
+		// explicitly because "NOT IN ()" is not valid SQL everywhere.
+		return db.Where("1 = 1").Delete(&model.Account{}).Error
+	}
+	return db.Where("id NOT IN ?", live).Delete(&model.Account{}).Error
 }
 
 // ApplyMemberships puts an account on exactly inboundIds and re-projects, so

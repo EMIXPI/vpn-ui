@@ -206,7 +206,12 @@
           comment: row.comment, reset: row.reset,
         }, patch);
         const body = { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) };
-        return await HttpUtil.post('/panel/api/inbounds/updateClient/' + encodeURIComponent(row.email), body);
+        // The path parameter is the PROTOCOL's identity, not the email: a uuid for
+        // vmess and vless, the password for trojan and the credential VPNs, the
+        // auth for hysteria. Sending the email returns "empty client ID" for every
+        // protocol except shadowsocks. The list API reports it per membership.
+        const clientId = (row.memberships[0] && row.memberships[0].clientId) || row.email;
+        return await HttpUtil.post('/panel/api/inbounds/updateClient/' + encodeURIComponent(clientId), body);
       },
 
       confirmDelete(row) {

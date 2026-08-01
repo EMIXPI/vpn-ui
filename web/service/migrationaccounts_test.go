@@ -694,3 +694,47 @@ func TestRenderClientEntryDefaultsIdToEmailWhenAbsent(t *testing.T) {
 		}
 	}
 }
+
+// A DISABLED client must migrate. This is not an edge case: exceeding a quota
+// disables an account automatically, so most real panels have several.
+//
+// Account.Enable used to carry gorm:"default:1", which makes GORM treat Go's
+// false as "unset" and write 1. The account came back ENABLED, the projection
+// rendered enable:true over the stored false, the round-trip check caught the
+// difference, and the ENTIRE migration rolled back. Every panel holding one
+// disabled client would have stayed on the legacy model forever.
+func TestMigrationAccountsMigratesDisabledClients(t *testing.T) {
+	svc := newAccountsDB(t)
+	seedInboundWithClients(t, model.VLESS, 43901, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "off@example.com", "enable": false},
+		{"id": "11111111-2222-3333-4444-555555555555", "email": "on@example.com", "enable": true},
+	})
+
+	before := snapshotUntouchedTables(t)
+	svc.MigrationAccounts()
+	assertAdditiveOnly(t, before)
+
+	if !svc.AccountsMigrated() {
+		t.Fatal("the pass rolled back on a disabled client")
+	}
+	off, err := svc.GetAccountByEmail("off@example.com")
+	if err != nil || off == nil {
+		t.Fatalf("disabled account not migrated: %v", err)
+	}
+	if off.Enable {
+		t.Error("a DISABLED client migrated to an ENABLED account: it would start serving again")
+	}
+	on, _ := svc.GetAccountByEmail("on@example.com")
+	if on == nil || !on.Enable {
+		t.Error("the enabled account did not survive as enabled")
+	}
+
+	// And the projection must render the stored false straight back.
+	m, err := svc.GetMemberships(off.Id)
+	if err != nil || len(m) != 1 {
+		t.Fatalf("memberships: %v", err)
+	}
+	if got := renderClientEntry(off, &m[0], model.VLESS, nil)["enable"]; got != false {
+		t.Errorf("projected enable = %v, want false", got)
+	}
+}

@@ -370,3 +370,75 @@ func TestNewMembershipGetsTimestamps(t *testing.T) {
 		}
 	}
 }
+
+// One account on several inbounds is the feature, so the cross-inbound duplicate
+// check must not treat its own membership as a stranger. It used to: saving an
+// inbound that held ANY multi-inbound account failed with "Duplicate email ...
+// must be unique across all inbounds", and the operator could not edit that
+// inbound at all. Found on a live panel.
+func TestUpdateInboundAllowsAnAccountThatIsAlsoElsewhere(t *testing.T) {
+	svc := newAccountsDB(t)
+	a := seedInboundWithClients(t, model.VLESS, 47101, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "shared@example.com", "enable": false},
+	})
+	seedInboundWithClients(t, model.Trojan, 47102, []map[string]any{
+		{"password": "pw", "email": "shared@example.com", "enable": false},
+	})
+	svc.MigrationAccounts()
+
+	inboundSvc := &InboundService{}
+	stored, err := inboundSvc.GetInbound(a.Id)
+	if err != nil {
+		t.Fatalf("GetInbound: %v", err)
+	}
+	stored.Remark = "renamed"
+	if _, _, err := inboundSvc.UpdateInbound(stored); err != nil {
+		t.Fatalf("could not edit an inbound holding a multi-inbound account: %v", err)
+	}
+
+	// A genuinely NEW email that collides with another inbound's account is still
+	// refused: joining an account to an inbound goes through inboundIds.
+	stored2, _ := inboundSvc.GetInbound(a.Id)
+	stored2.Settings = `{"clients":[
+		{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","email":"shared@example.com","enable":false},
+		{"id":"11111111-2222-3333-4444-555555555555","email":"stranger@example.com","enable":false}
+	]}`
+	seedInboundWithClients(t, model.Shadowsocks, 47103, []map[string]any{
+		{"password": "pw2", "email": "stranger@example.com", "enable": false},
+	})
+	if _, _, err := inboundSvc.UpdateInbound(stored2); err == nil {
+		t.Error("typing another account's email into the client list was accepted")
+	}
+}
+
+// Deleting the INBOUND must not leave an account behind that is now served by
+// nothing: it stays listed on the Clients page forever and blocks
+// revert-accounts. The gone-inbound path used to return before pruning.
+func TestDeletingAnInboundPrunesAccountsLeftWithNothing(t *testing.T) {
+	svc := newAccountsDB(t)
+	solo := seedInboundWithClients(t, model.VLESS, 47201, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "solo@example.com", "enable": false},
+	})
+	keep := seedInboundWithClients(t, model.Trojan, 47202, []map[string]any{
+		{"password": "pw", "email": "both@example.com", "enable": false},
+	})
+	seedInboundWithClients(t, model.Shadowsocks, 47203, []map[string]any{
+		{"password": "pw2", "email": "both@example.com", "enable": false},
+	})
+	svc.MigrationAccounts()
+
+	if err := database.GetDB().Where("id = ?", solo.Id).Delete(&model.Inbound{}).Error; err != nil {
+		t.Fatalf("delete inbound: %v", err)
+	}
+	if err := svc.SyncInboundAccounts(database.GetDB(), solo.Id); err != nil {
+		t.Fatalf("SyncInboundAccounts: %v", err)
+	}
+
+	if acct, _ := svc.GetAccountByEmail("solo@example.com"); acct != nil {
+		t.Error("an account whose only inbound was deleted survived with no membership")
+	}
+	if acct, _ := svc.GetAccountByEmail("both@example.com"); acct == nil {
+		t.Error("an account still served on another inbound was pruned")
+	}
+	_ = keep
+}

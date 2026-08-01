@@ -72,6 +72,7 @@
     totalGb: 0,
     days: 0,
     client: {},
+    row: null,
     onDone: null,
 
     // Only these three cannot tell two of their own inbounds apart (bare
@@ -102,6 +103,7 @@
       this.assignable = assignable;
       this.onDone = onDone;
       this.isEdit = !!row;
+      this.row = row;
       this.title = row ? '{{ i18n "pages.clients.editTitle" }}' : '{{ i18n "pages.clients.addTitle" }}';
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
       if (row) {
@@ -169,8 +171,14 @@
       if (!this.isEdit) Object.assign(client, this.credentialsFor(first ? first.protocol : ''));
 
       const body = { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) };
+      // On edit the path parameter is the PROTOCOL's identity value, not the
+      // email (see applyToAccount on the Clients page). The row carries it per
+      // membership; the first membership's is the one to address.
+      const clientId = this.isEdit
+        ? ((this.row && this.row.memberships && this.row.memberships[0] && this.row.memberships[0].clientId) || email)
+        : '';
       const url = this.isEdit
-        ? '/panel/api/inbounds/updateClient/' + encodeURIComponent(email)
+        ? '/panel/api/inbounds/updateClient/' + encodeURIComponent(clientId)
         : '/panel/api/inbounds/addClient';
 
       this.confirmLoading = true;

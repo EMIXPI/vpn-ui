@@ -688,6 +688,25 @@ func (s *InboundService) checkPPPUsernamesForDuplicates(protocol string, clients
 // persisted (AddInbound) or whose write is additive (AddInboundClient) pass 0 and
 // get a plain global check.
 func (s *InboundService) checkEmailsExistExcludingInbound(clients []model.Client, ignoreInboundId int) (string, error) {
+	return s.checkEmailsExistExcludingKnown(clients, ignoreInboundId, nil)
+}
+
+// checkEmailsExistExcludingKnown is the same check with a set of emails that are
+// ALREADY served on this inbound and are therefore not new duplicates.
+//
+// This exists because one account may now legitimately be on several inbounds.
+// The plain check asks "does this email appear on any OTHER inbound", which used
+// to mean "a different account already owns it". It no longer does: the same
+// email on two inbounds is ONE account with two memberships, which is the whole
+// feature. So saving an inbound that holds any multi-inbound account failed with
+// "Duplicate email ... must be unique across all inbounds", and the operator
+// could not edit that inbound at all. Found on a live panel.
+//
+// The exemption is deliberately narrow: only emails ALREADY stored on this
+// inbound are forgiven, so re-saving an existing member works while typing a
+// stranger's email into the client list still fails. Joining an account to a new
+// inbound goes through inboundIds, where the intent is explicit.
+func (s *InboundService) checkEmailsExistExcludingKnown(clients []model.Client, ignoreInboundId int, known []string) (string, error) {
 	allEmails, err := s.getAllEmailsExcludingInbound(ignoreInboundId)
 	if err != nil {
 		return "", err
@@ -698,7 +717,12 @@ func (s *InboundService) checkEmailsExistExcludingInbound(clients []model.Client
 		if email == "" {
 			continue
 		}
-		if containsEmail(emails, email) || containsEmail(allEmails, email) {
+		// A duplicate WITHIN the posted list is always wrong, membership or not:
+		// one inbound cannot serve the same account twice.
+		if containsEmail(emails, email) {
+			return email, nil
+		}
+		if containsEmail(allEmails, email) && !containsEmail(known, email) {
 			return email, nil
 		}
 		emails = append(emails, email)
@@ -1273,10 +1297,19 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	// account created before these rules existed block every later edit to the
 	// inbound (its DNS, its remark, an unrelated new account) until someone went and
 	// fixed that row. See validateChangedClientIdentities.
+	// Emails already served on THIS inbound, needed twice below: to exempt an
+	// unchanged identity from the new validation rules, and to stop a legitimate
+	// membership reading as a duplicate.
+	var knownEmails []string
 	if storedInbound, gerr := s.GetInbound(inbound.Id); gerr == nil && storedInbound != nil {
 		storedClients, cerr := s.GetClients(storedInbound)
 		if cerr != nil {
 			return inbound, false, cerr
+		}
+		for i := range storedClients {
+			if e := strings.TrimSpace(storedClients[i].Email); e != "" {
+				knownEmails = append(knownEmails, e)
+			}
 		}
 		if err := validateChangedClientIdentities(inbound.Protocol, updatedClients, storedClients); err != nil {
 			return inbound, false, err
@@ -1285,7 +1318,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		return inbound, false, err
 	}
 
-	existEmail, err := s.checkEmailsExistExcludingInbound(updatedClients, inbound.Id)
+	existEmail, err := s.checkEmailsExistExcludingKnown(updatedClients, inbound.Id, knownEmails)
 	if err != nil {
 		return inbound, false, err
 	}

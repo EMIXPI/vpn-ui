@@ -30,6 +30,15 @@ type AccountMembershipView struct {
 	Port      int    `json:"port"`
 	Enable    bool   `json:"enable"`
 	Slot      *int   `json:"slot"`
+	// ClientId is the value THIS protocol addresses the account by, which is the
+	// path parameter /updateClient/:clientId and /delClient/:clientId take.
+	//
+	// It is protocol-dependent (a uuid for vmess and vless, the password for
+	// trojan and the credential VPNs, the auth for hysteria, the email only for
+	// shadowsocks), so a caller cannot derive it from the email. Without it the
+	// Clients page sent the email and every edit came back "empty client ID" for
+	// all but one protocol.
+	ClientId string `json:"clientId"`
 }
 
 // AccountRow is one line of the Clients table.
@@ -170,9 +179,43 @@ func (s *AccountService) membershipViews() (map[int][]AccountMembershipView, err
 		byId[inbounds[i].Id] = &inbounds[i]
 	}
 
+	// The settings blob of each inbound, so the protocol-correct identity can be
+	// read off the stored entry rather than guessed.
+	var full []model.Inbound
+	if err := db.Model(&model.Inbound{}).Select("id", "protocol", "settings").Find(&full).Error; err != nil {
+		return nil, err
+	}
+	identityByInbound := make(map[int]map[string]string, len(full))
+	for i := range full {
+		clients, ok := parseSettingsClients(full[i].Settings)
+		if !ok {
+			continue
+		}
+		m := map[string]string{}
+		for _, entry := range clients {
+			email, _ := entry["email"].(string)
+			if accountKey(email) == "" {
+				continue
+			}
+			key := clientIdentityKey(full[i].Protocol)
+			if v, isStr := entry[key].(string); isStr {
+				m[accountKey(email)] = v
+			}
+		}
+		identityByInbound[full[i].Id] = m
+	}
+
 	var rows []model.AccountInbound
 	if err := db.Order("inbound_id ASC").Find(&rows).Error; err != nil {
 		return nil, err
+	}
+	emailById := map[int]string{}
+	var accts []model.Account
+	if err := db.Select("id", "email").Find(&accts).Error; err != nil {
+		return nil, err
+	}
+	for i := range accts {
+		emailById[accts[i].Id] = accts[i].Email
 	}
 	out := make(map[int][]AccountMembershipView, len(rows))
 	for i := range rows {
@@ -183,11 +226,15 @@ func (s *AccountService) membershipViews() (map[int][]AccountMembershipView, err
 			// blank row: nothing serves it, so it is not somewhere the account is.
 			continue
 		}
-		out[m.AccountId] = append(out[m.AccountId], AccountMembershipView{
+		view := AccountMembershipView{
 			InboundId: inbound.Id, Protocol: string(inbound.Protocol),
 			Remark: inbound.Remark, Port: inbound.Port, Enable: inbound.Enable,
 			Slot: m.Slot,
-		})
+		}
+		if ids := identityByInbound[inbound.Id]; ids != nil {
+			view.ClientId = ids[accountKey(emailById[m.AccountId])]
+		}
+		out[m.AccountId] = append(out[m.AccountId], view)
 	}
 	return out, nil
 }
