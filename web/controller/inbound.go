@@ -877,6 +877,19 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.notFound"), errNotOwned)
 		return
 	}
+	// The account may be asked for on SEVERAL inbounds. Every one of them arrives
+	// in the body too, so each needs the same assertion data.Id just got: checking
+	// only the target would let an admin holding one inbound provision a live
+	// account on someone else's by listing it here.
+	membershipIds, membershipsExplicit := postedMembershipIds(c, data.Id)
+	if !a.callerOwnsInbounds(c, membershipIds) {
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.notFound"), errNotOwned)
+		return
+	}
+	if err := a.validateMembershipSet(membershipIds); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
 	// Prices the account against the reseller's balance, clamps the posted client to
 	// their limits, and RESERVES the bytes before the account exists. Inactive for an
 	// admin, who has no balance to reserve against.
@@ -899,40 +912,15 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
+	// Put the account on every requested inbound and re-project, so all of them
+	// carry it before any daemon config is regenerated below.
+	if _, merr := a.applyClientMemberships(c, postedClientEmail(data), membershipIds, membershipsExplicit); merr != nil {
+		logger.Warning("applying client memberships: ", merr)
+	}
+
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientAddSuccess"), nil)
 
-	// The request body may not include protocol, so look it up from the DB.
-	if data.Protocol == "" {
-		if dbInbound, err := a.inboundService.GetInbound(data.Id); err == nil {
-			data.Protocol = dbInbound.Protocol
-		}
-	}
-
-	if data.Protocol == model.L2TP {
-		a.onL2tpClientChanged()
-	} else if data.Protocol == model.PPTP {
-		a.onPptpClientChanged()
-	} else if data.Protocol == model.OPENVPN {
-		a.onOpenVpnClientChanged()
-	} else if data.Protocol == model.OPENCONNECT {
-		a.onOcservClientChanged()
-	} else if data.Protocol == model.SSTP {
-		a.onSstpClientChanged()
-	} else if data.Protocol == model.IKEV2 {
-		a.onIkev2ClientChanged()
-	} else if data.Protocol == model.WGC {
-		a.onWgcClientChanged()
-	} else if data.Protocol == model.AWG {
-		a.onAwgClientChanged()
-	} else if data.Protocol == model.GRE {
-		a.onGreClientChanged()
-	} else if data.Protocol == model.MTPROTO {
-		a.onMtprotoClientChanged()
-	} else if data.Protocol == model.SSH {
-		a.onSshClientChanged()
-	} else if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
+	a.reconcileForInbounds(membershipIds, needRestart)
 }
 
 // copyInboundClients copies clients from source inbound to target inbound.
@@ -1069,6 +1057,17 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.notFound"), errNotOwned)
 		return
 	}
+	// Same assertion over the whole requested membership set: an edit can ADD an
+	// inbound, so the ids in the body are as dangerous here as on the add path.
+	membershipIds, membershipsExplicit := postedMembershipIds(c, inbound.Id)
+	if !a.callerOwnsInbounds(c, membershipIds) {
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.notFound"), errNotOwned)
+		return
+	}
+	if err := a.validateMembershipSet(membershipIds); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
 	// Prices the edit and moves the balance by the delta. This also carries the
 	// ownership assertion for a reseller, which the grant check above cannot make:
 	// the inbound is shared, so holding it says nothing about who created THIS
@@ -1098,40 +1097,60 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 			}
 		}
 	}
-	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientUpdateSuccess"), nil)
-
-	// The request body may not include protocol, so look it up from the DB.
-	if inbound.Protocol == "" {
-		if dbInbound, err := a.inboundService.GetInbound(inbound.Id); err == nil {
-			inbound.Protocol = dbInbound.Protocol
+	// An edit can change the membership set, so this both re-projects the account
+	// onto its inbounds and removes it from any it was unticked from.
+	email := postedClientEmail(inbound)
+	if email == "" {
+		if dbInbound, gerr := a.inboundService.GetInbound(inbound.Id); gerr == nil {
+			email = a.clientEmailOnInbound(dbInbound, clientId)
 		}
 	}
-
-	if inbound.Protocol == model.L2TP {
-		a.onL2tpClientChanged()
-	} else if inbound.Protocol == model.PPTP {
-		a.onPptpClientChanged()
-	} else if inbound.Protocol == model.OPENVPN {
-		a.onOpenVpnClientChanged()
-	} else if inbound.Protocol == model.OPENCONNECT {
-		a.onOcservClientChanged()
-	} else if inbound.Protocol == model.SSTP {
-		a.onSstpClientChanged()
-	} else if inbound.Protocol == model.IKEV2 {
-		a.onIkev2ClientChanged()
-	} else if inbound.Protocol == model.WGC {
-		a.onWgcClientChanged()
-	} else if inbound.Protocol == model.AWG {
-		a.onAwgClientChanged()
-	} else if inbound.Protocol == model.GRE {
-		a.onGreClientChanged()
-	} else if inbound.Protocol == model.MTPROTO {
-		a.onMtprotoClientChanged()
-	} else if inbound.Protocol == model.SSH {
-		a.onSshClientChanged()
-	} else if needRestart {
-		a.xrayService.SetToNeedRestart()
+	previous, perr := accountService.InboundIdsForEmail(email)
+	if perr != nil {
+		logger.Warning("reading previous memberships: ", perr)
 	}
+	if _, merr := a.applyClientMemberships(c, email, membershipIds, membershipsExplicit); merr != nil {
+		logger.Warning("applying client memberships: ", merr)
+	}
+
+	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientUpdateSuccess"), nil)
+
+	// Reconcile the inbounds it is on now AND the ones it was just removed from:
+	// a dropped membership has to rewrite that daemon's config too, or the account
+	// keeps working there until something else happens to trigger a regeneration.
+	a.reconcileForInbounds(unionInboundIds(membershipIds, previous), needRestart)
+}
+
+// unionInboundIds merges two id lists, preserving order and dropping duplicates.
+func unionInboundIds(a, b []int) []int {
+	seen := make(map[int]bool, len(a)+len(b))
+	out := make([]int, 0, len(a)+len(b))
+	for _, list := range [][]int{a, b} {
+		for _, id := range list {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// validateMembershipSet refuses a set the data plane cannot actually serve.
+func (a *InboundController) validateMembershipSet(inboundIds []int) error {
+	if len(inboundIds) < 2 {
+		return nil
+	}
+	inbounds := make([]*model.Inbound, 0, len(inboundIds))
+	for _, id := range inboundIds {
+		inbound, err := a.inboundService.GetInbound(id)
+		if err != nil || inbound == nil {
+			return fmt.Errorf("inbound %d not found", id)
+		}
+		inbounds = append(inbounds, inbound)
+	}
+	return accountService.ValidateMembershipSet(inbounds)
 }
 
 // bulkUpdateClients applies one operation (add/subtract days or traffic, enable,
@@ -2009,6 +2028,137 @@ func (a *InboundController) delInboundClientByEmail(c *gin.Context) {
 // rather than a path param, so requireInboundAccess cannot see it.
 func (a *InboundController) callerOwnsInbound(c *gin.Context, inboundId int) bool {
 	return a.callerOwnsInbounds(c, []int{inboundId})
+}
+
+// postedMembershipIds reads the set of inbounds a client-mutating request wants
+// the account served on.
+//
+// Wire shape: a repeated "inboundIds" form field, which is what Qs.stringify
+// emits with arrayFormat 'repeat' and what the admin modal's inbound checklist
+// already posts. ABSENT means "just the inbound in the body", so every existing
+// caller (the Telegram bot, the bulk paths, and any script anyone wrote against
+// the documented API) keeps its exact current behaviour without sending a new
+// field.
+//
+// The target inbound is always included even if the caller omitted it from the
+// list, because it is the inbound the modal was opened from and the one the
+// reseller ticket was priced against.
+// The bool reports whether the caller actually SPOKE about memberships. An
+// absent field and a field naming exactly the target inbound are different
+// requests: the first is an ordinary single-inbound write that must keep its
+// current behaviour exactly, the second is "put this account on this inbound and
+// no other" and has to drop the memberships it left out.
+func postedMembershipIds(c *gin.Context, targetId int) ([]int, bool) {
+	raw := c.PostFormArray("inboundIds")
+	if len(raw) == 0 {
+		return []int{targetId}, false
+	}
+	seen := map[int]bool{targetId: true}
+	out := []int{targetId}
+	for _, value := range raw {
+		// The empty-string sentinel is how the browser posts a CLEARED checkbox
+		// group (see admin_modal.html); it means "none ticked", not "id 0".
+		if value == "" {
+			continue
+		}
+		id, err := strconv.Atoi(value)
+		if err != nil || id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out, true
+}
+
+// applyClientMemberships puts an account on exactly the given inbounds and
+// re-projects, so settings.clients on every one of them agrees with the account.
+//
+// Returns the inbound ids whose settings actually changed, for the reconcile
+// fan-out. A single-inbound request is a no-op beyond the mirror sync, which is
+// what keeps the legacy path byte-identical.
+func (a *InboundController) applyClientMemberships(c *gin.Context, email string, inboundIds []int, explicit bool) ([]int, error) {
+	if email == "" {
+		return nil, nil
+	}
+	// Which of the account's CURRENT memberships this caller is allowed to drop.
+	// Owning the inbounds being added says nothing about the ones being removed
+	// from, so an admin who simply did not tick an inbound they cannot even see
+	// must not unprovision the account there.
+	var removable []int
+	if explicit {
+		current, err := accountService.InboundIdsForEmail(email)
+		if err != nil {
+			return nil, err
+		}
+		wanted := make(map[int]bool, len(inboundIds))
+		for _, id := range inboundIds {
+			wanted[id] = true
+		}
+		for _, id := range current {
+			if wanted[id] {
+				continue
+			}
+			if a.callerOwnsInbound(c, id) {
+				removable = append(removable, id)
+			}
+		}
+	}
+	return accountService.ApplyMemberships(email, inboundIds, removable, explicit)
+}
+
+// reconcileForInbounds fires each protocol's reconcile hook once for the set of
+// inbounds a write touched.
+//
+// The per-protocol chain this replaces was an if/else-if on ONE protocol,
+// resolved from the single inbound in the request body. An account spanning
+// l2tp, wg-c and vless needs onL2tpClientChanged, onWgcClientChanged AND an Xray
+// restart from one request; the old shape could only ever fire the first.
+func (a *InboundController) reconcileForInbounds(inboundIds []int, needRestart bool) {
+	protocols := map[model.Protocol]bool{}
+	for _, id := range inboundIds {
+		inbound, err := a.inboundService.GetInbound(id)
+		if err != nil || inbound == nil {
+			continue
+		}
+		protocols[inbound.Protocol] = true
+	}
+
+	// Each VPN hook regenerates its own daemon config and requests the Xray
+	// restart itself, so only the native Xray protocols fall through to the
+	// bare SetToNeedRestart below.
+	xrayOnly := needRestart
+	for protocol := range protocols {
+		switch protocol {
+		case model.L2TP:
+			a.onL2tpClientChanged()
+		case model.PPTP:
+			a.onPptpClientChanged()
+		case model.OPENVPN:
+			a.onOpenVpnClientChanged()
+		case model.OPENCONNECT:
+			a.onOcservClientChanged()
+		case model.SSTP:
+			a.onSstpClientChanged()
+		case model.IKEV2:
+			a.onIkev2ClientChanged()
+		case model.WGC:
+			a.onWgcClientChanged()
+		case model.AWG:
+			a.onAwgClientChanged()
+		case model.GRE:
+			a.onGreClientChanged()
+		case model.MTPROTO:
+			a.onMtprotoClientChanged()
+		case model.SSH:
+			a.onSshClientChanged()
+		default:
+			xrayOnly = true
+		}
+	}
+	if xrayOnly {
+		a.xrayService.SetToNeedRestart()
+	}
 }
 
 // postedClientEmail reads the account name out of a client-mutating request body.

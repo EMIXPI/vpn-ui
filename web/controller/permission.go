@@ -305,6 +305,10 @@ var accessService service.AdminService
 // shared inbound belong to the caller. Stateless, like accessService.
 var resellerService service.ResellerService
 
+// accountService owns the accounts layer: one identity, N inbound memberships,
+// one quota. Stateless, like the two above.
+var accountService service.AccountService
+
 // denyNotFound refuses a cross-owner reference. It reports "not found" rather than
 // "forbidden" on purpose: a distinguishable 403 would confirm that an inbound with
 // that id exists and belongs to someone else, turning the middleware into an

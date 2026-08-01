@@ -135,6 +135,49 @@ func ValidateVpnUsername(username string) error {
 }
 
 // -----------------------------------------------------------------------------
+// Membership rules
+// -----------------------------------------------------------------------------
+
+// sameProtocolAmbiguous reports whether two inbounds of this protocol cannot tell
+// their accounts apart, so one account must not be a member of both.
+//
+// The deciding factor is the NAS-Identifier their shared daemon sends to the
+// in-binary RADIUS server. l2tp, pptp and ikev2 send a BARE protocol name
+// ("l2tp"), which parseNASIdentifier resolves to inbound 0, so findClientInbound
+// falls back to scanning every inbound of that protocol and taking the first
+// match by id. The account would silently authenticate against the lowest-id
+// inbound and take ITS ranges, user limit, strategy and slot, whichever inbound
+// the operator thought they were selling.
+//
+// openvpn, openconnect and sstp already send "<proto>-<inboundId>" (see
+// main.go's RADIUS packets, openconnect.go's nas-identifier and sstp.go's
+// accel-ppp config), so they resolve exactly and are safe to have twice.
+func sameProtocolAmbiguous(p model.Protocol) bool {
+	return p == model.L2TP || p == model.PPTP || p == model.IKEV2
+}
+
+// ValidateMembershipSet refuses a membership set the data plane cannot serve.
+//
+// Refused at the API rather than silently accepted, because the failure mode is
+// invisible: the account is created, appears on both inbounds, and logs in fine.
+// It simply always lands on one of them.
+func (s *AccountService) ValidateMembershipSet(inbounds []*model.Inbound) error {
+	seen := map[model.Protocol]*model.Inbound{}
+	for _, inbound := range inbounds {
+		if !sameProtocolAmbiguous(inbound.Protocol) {
+			continue
+		}
+		if first, clash := seen[inbound.Protocol]; clash {
+			return common.NewErrorf(
+				"an account cannot be on two %s inbounds at once (%q and %q). %s authenticates through a shared daemon that does not name the inbound, so the account would always be served by whichever has the lower id, silently taking that inbound's address range and user limit.",
+				inbound.Protocol, first.Remark, inbound.Remark, inbound.Protocol)
+		}
+		seen[inbound.Protocol] = inbound
+	}
+	return nil
+}
+
+// -----------------------------------------------------------------------------
 // Reads
 // -----------------------------------------------------------------------------
 
@@ -143,14 +186,18 @@ func ValidateVpnUsername(username string) error {
 // (accountKey). Returns nil with no error when there is none, because an
 // unmigrated panel legitimately has clients with no account row.
 func (s *AccountService) GetAccountByEmail(email string) (*model.Account, error) {
+	return s.GetAccountByEmailTx(database.GetDB(), email)
+}
+
+// GetAccountByEmailTx is GetAccountByEmail inside a caller's transaction, so a
+// read can see writes the same transaction has not committed yet.
+func (s *AccountService) GetAccountByEmailTx(tx *gorm.DB, email string) (*model.Account, error) {
 	key := accountKey(email)
 	if key == "" {
 		return nil, nil
 	}
 	var account model.Account
-	err := database.GetDB().
-		Where("LOWER(TRIM(email)) = ?", key).
-		First(&account).Error
+	err := tx.Where("LOWER(TRIM(email)) = ?", key).First(&account).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, nil
