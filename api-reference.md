@@ -137,7 +137,7 @@ Protocol-specific, documented in section 8:
 | POST | `/generate-ocserv-cert`, `/:id/generate-ocserv-cert` | Mint an OpenConnect server cert |
 | POST | `/generate-sstp-cert`, `/:id/generate-sstp-cert` | Mint an SSTP server cert |
 | POST | `/generate-ikev2-cert`, `/:id/generate-ikev2-cert` | Mint an IKEv2 CA + server cert |
-| POST | `/check-ikev2-cert` | Validate an IKEv2 cert against a server address |
+| POST | `/check-ikev2-cert` | Inspect an IKEv2 cert, returns its key type and any warning |
 
 The id-less cert variants exist so material can be generated for an inbound that has not
 been saved yet; the `:id` variants also persist it onto the inbound.
@@ -242,19 +242,19 @@ Note `wg-c`, not `wgc`. The literal string is `"wg-c"` (`model.WGC`).
 
 Shared vocabulary across the addressed protocols:
 
-- `userLimit` — devices per account. `0` = no limit, else `1..64`. An **absent** key is not
+- `userLimit` - devices per account. `0` = no limit, else `1..64`. An **absent** key is not
   the same as `0`: absent means a legacy single-device inbound.
-- `userLimitStrategy` — at the cap, `accept` (evict the oldest device) or `reject`.
+- `userLimitStrategy` - at the cap, `accept` (evict the oldest device) or `reject`.
   Anything else is rejected at save time rather than silently coerced.
-- `ipRanges` — the address pool, as inclusive host ranges **not CIDRs**:
+- `ipRanges` - the address pool, as inclusive host ranges **not CIDRs**:
   `"10.1.0.2-10.1.0.254"`, with a `"10.1.0.2-254"` last-octet shorthand. Both ends must sit
   in one `/24`. Panel-managed for most protocols; posting `10.1.0.0/24` is rejected.
-- `dns1` / `dns2` — literal IPs or empty. A hostname is rejected: these are written into a
+- `dns1` / `dns2` - literal IPs or empty. A hostname is rejected: these are written into a
   client config as nameserver addresses.
-- `mtu` — `0` means "let the protocol or kernel choose", otherwise 576-9216.
-- `clientToClient` — let this inbound's accounts reach each other.
-- `crossInbound` — let them reach other inbounds' accounts.
-- `externalProxy` — `[{"dest":"cdn.example.com","port":443,"remark":"eu"}]`. Rewrites the
+- `mtu` - `0` means "let the protocol or kernel choose", otherwise 576-9216.
+- `clientToClient` - let this inbound's accounts reach each other.
+- `crossInbound` - let them reach other inbounds' accounts.
+- `externalProxy` - `[{"dest":"cdn.example.com","port":443,"remark":"eu"}]`. Rewrites the
   address in generated links and configs only; no daemon reads it.
 
 ---
@@ -288,9 +288,11 @@ key and every client would fail at phase 1 with nothing surfacing in the panel.
 Client entry: `id` (the PPP username), `password`, `email`, `enable`, `expiryTime`, `tgId`,
 `subId`, `comment`, `totalGB`, `limitIp`, `reset`, `slot`, `created_at`, `updated_at`.
 
-**Two or more l2tp inbounds share one daemon**, so DNS, MTU and the PSK are taken from the
-lowest-id inbound. `CheckSharedDaemonConflicts` rejects a second inbound that disagrees
-rather than accepting a value it would then ignore.
+**Two or more l2tp inbounds share one daemon**, so one value of `ipsecPsk`, `dns1` and `mtu`
+applies to all of them. `CheckSharedDaemonConflicts` rejects a second inbound that disagrees
+on any of the three rather than accepting a value it would then silently ignore, which was
+the old failure mode: clients got a profile that could not authenticate and nothing in the
+UI explained why. ikev2 is checked the same way.
 
 ### 6.2 pptp
 
@@ -612,7 +614,13 @@ curl -b jar.txt -X POST 'https://HOST:PORT/<basePath>/panel/api/inbounds/generat
 
 - `generate-openvpn-certs` returns `caCert`, `caKey`, `serverCert`, `serverKey`, `tlsCrypt`.
 - `generate-ocserv-cert` and `generate-sstp-cert` return `certificate`, `key`.
-- `generate-ikev2-cert` also returns `caCert`; pass `serverAddr` so the SAN matches.
+- `generate-ikev2-cert` returns `certificate`, `key`, `caCert`. It takes **no parameters**:
+  the SAN is the panel's own detected server IP. If your clients dial a different name, set
+  `settings.serverAddr` to it and supply a certificate whose SAN matches, because charon's
+  cert will not.
+- `check-ikev2-cert` binds a whole inbound body (the same fields as `/add`) and returns
+  `{"keyType": "RSA", "warning": "..."}`. Use it before saving: iOS silently rejects an
+  ECDSA server cert, so `keyType` is worth asserting on.
 
 With `:id` the material is written onto the inbound in content mode (`tlsUseFile: false`) and
 the daemon is reloaded. Without it, the PEM is returned for you to put into `settings`
