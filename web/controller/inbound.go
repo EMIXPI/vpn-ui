@@ -746,8 +746,30 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundUpdateSuccess"), err)
 		return
 	}
-	inbound := &model.Inbound{
-		Id: id,
+	// Bind ONTO THE STORED ROW, not onto an empty struct.
+	//
+	// UpdateInbound copies about twenty editable columns from this struct onto the
+	// persisted row, and Gin's form binding leaves any field the request did not
+	// mention at its ZERO value. Binding onto an empty struct therefore made every
+	// omitted field a silent destructive write: an API client that sent only
+	// `remark` and `settings` (the obvious way to rename an inbound) also zeroed
+	// the traffic multiplier, every speed limit, the IP limit and strategy, and the
+	// inbound's own quota and expiry. Nothing reported it, because from the
+	// server's side those were simply the values it was sent.
+	//
+	// Pre-filling makes an omitted field mean "leave it alone", which is what a
+	// partial update should mean. It is a no-op for the panel itself: the form
+	// posts the whole inbound object, so every field is present and overwrites the
+	// pre-filled one.
+	inbound := &model.Inbound{Id: id}
+	if stored, gerr := a.inboundService.GetInbound(id); gerr == nil && stored != nil {
+		prefill := *stored
+		// ClientStats is a has-many association, not an editable column; carrying
+		// it into the bind target would hand UpdateInbound a preloaded association
+		// to write back.
+		prefill.ClientStats = nil
+		prefill.Id = id
+		inbound = &prefill
 	}
 	err = c.ShouldBind(inbound)
 	if err != nil {

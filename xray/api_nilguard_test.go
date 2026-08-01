@@ -57,3 +57,18 @@ func TestInitRefusesInvalidPort(t *testing.T) {
 		t.Error("Init left a handler client behind after refusing")
 	}
 }
+
+// GetAPIPort is called through a package global that is nil until a core has
+// started, and only about half its call sites in web/service check that first.
+// A nil deref there is not a failed request, it kills the panel process.
+func TestGetAPIPortIsNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("GetAPIPort PANICKED on a nil process (%v): this kills the panel", r)
+		}
+	}()
+	var p *Process
+	if got := p.GetAPIPort(); got != 0 {
+		t.Errorf("GetAPIPort() = %d on a nil process, want 0 so Init refuses it before dialling", got)
+	}
+}
