@@ -241,6 +241,12 @@
 "customGeoErrUpdateAllIncomplete" = "به‌روزرسانی یک یا چند منبع geo سفارشی ناموفق بود"
 
 [pages.inbounds]
+"inboundMembership" = "ورودی‌ها"
+"inboundMembershipDesc" = "ورودی‌هایی که این حساب روی آن‌ها سرویس می‌گیرد. روی همه آن‌ها همان ایمیل، همان حجم و همان تاریخ انقضا را دارد. برداشتن تیک یک ورودی، حساب را از آن ورودی حذف می‌کند. ورودی‌ای که این فرم از آن باز شده همیشه تیک‌خورده می‌ماند."
+"selectAllInbounds" = "انتخاب همه"
+"membershipCurrentInbound" = "ورودی فعلی"
+"membershipSameProtocol" = "هر حساب فقط می‌تواند روی یک ورودی l2tp، pptp یا ikev2 باشد. این پروتکل‌ها از یک سرویس مشترک احراز هویت می‌گیرند که نام ورودی را نمی‌فرستد، پس ورودی دوم هیچ‌وقت استفاده نمی‌شود."
+"membershipOnInbounds" = "روی %COUNT% ورودی"
 "totalUsers" = "کل کاربران"
 "exportTxt" = "Export TXT"
 "exportPdf" = "Export PDF"

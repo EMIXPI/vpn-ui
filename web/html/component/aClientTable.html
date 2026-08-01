@@ -118,6 +118,23 @@
           :style="{ margin: '0 0 0 4px', fontSize: '11px', lineHeight: '16px', padding: '0 5px' }">
           {{ i18n "pages.client.frozen" }}
         </a-tag>
+        <!-- The same account, served on other inbounds too. This table stays a list of
+             MEMBERSHIPS (one row per inbound the account is on, under the inbound that
+             serves it), so the badge is what says the rows belong together: one email,
+             one allowance, one expiry. Neutral, not a status hue: it reports a shape,
+             not a state. Absent at 1, where there is nothing to relate. -->
+        <a-tooltip v-if="clientInboundCount(client.email) > 1" :overlay-class-name="themeSwitcher.currentTheme">
+          <template slot="title">
+            <div>[[ clientMembershipTitle(client.email) ]]</div>
+            <div v-for="ib in clientInbounds(client.email)" :key="ib.id">
+              [[ ib.remark || ('#' + ib.id) ]] ([[ ib.protocol ]]:[[ ib.port ]])
+            </div>
+          </template>
+          <a-tag :style="{ margin: '0 0 0 4px', fontSize: '11px', lineHeight: '16px', padding: '0 5px' }">
+            <a-icon type="cluster" :style="{ fontSize: '11px' }"></a-icon>
+            [[ clientInboundCount(client.email) ]]
+          </a-tag>
+        </a-tooltip>
       </span>
       <template v-if="client.comment && client.comment.trim()">
         <a-tooltip v-if="client.comment.length > 50" :overlay-class-name="themeSwitcher.currentTheme">

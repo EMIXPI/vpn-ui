@@ -12,7 +12,6 @@ import (
 	"github.com/mhsanaei/3x-ui/v2/util/json_util"
 	"github.com/mhsanaei/3x-ui/v2/util/random"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
-	"github.com/mhsanaei/3x-ui/v2/xray"
 )
 
 //go:embed default.json
@@ -85,16 +84,26 @@ func NewSubJsonService(fragment string, noises string, mux string, rules string,
 	}
 }
 
+// forResponse mirrors SubService.forResponse. The controller builds one
+// SubJsonService at start-up and shares it across requests, so the per-response
+// scope has to live on a copy, and the copy has to be the one getConfig sees since
+// that is where the node names are composed.
+func (s *SubJsonService) forResponse() *SubJsonService {
+	scoped := *s
+	scoped.SubService = s.SubService.forResponse()
+	return &scoped
+}
+
 // GetJson generates a JSON subscription configuration for the given subscription ID and host.
 func (s *SubJsonService) GetJson(subId string, host string) (string, string, error) {
+	s = s.forResponse()
 	inbounds, err := s.SubService.getInboundsBySubId(subId)
 	if err != nil || len(inbounds) == 0 {
 		return "", "", err
 	}
 
 	var header string
-	var traffic xray.ClientTraffic
-	var clientTraffics []xray.ClientTraffic
+	usage := newSubUsage()
 	var configArray []json_util.RawMessage
 
 	// Prepare Inbounds
@@ -117,7 +126,8 @@ func (s *SubJsonService) GetJson(subId string, host string) (string, string, err
 
 		for _, client := range clients {
 			if client.Enable && client.SubID == subId {
-				clientTraffics = append(clientTraffics, s.SubService.getClientTraffics(inbound.ClientStats, client.Email))
+				ct, accountBacked, _ := s.SubService.resolveTraffic(inbound, client.Email)
+				usage.add(client.Email, ct, accountBacked)
 				newConfigs := s.getConfig(inbound, client, host)
 				configArray = append(configArray, newConfigs...)
 			}
@@ -128,28 +138,10 @@ func (s *SubJsonService) GetJson(subId string, host string) (string, string, err
 		return "", "", nil
 	}
 
-	// Prepare statistics
-	for index, clientTraffic := range clientTraffics {
-		if index == 0 {
-			traffic.Up = clientTraffic.Up
-			traffic.Down = clientTraffic.Down
-			traffic.Total = clientTraffic.Total
-			if clientTraffic.ExpiryTime > 0 {
-				traffic.ExpiryTime = clientTraffic.ExpiryTime
-			}
-		} else {
-			traffic.Up += clientTraffic.Up
-			traffic.Down += clientTraffic.Down
-			if traffic.Total == 0 || clientTraffic.Total == 0 {
-				traffic.Total = 0
-			} else {
-				traffic.Total += clientTraffic.Total
-			}
-			if clientTraffic.ExpiryTime != traffic.ExpiryTime {
-				traffic.ExpiryTime = 0
-			}
-		}
-	}
+	// Prepare statistics. Folded per identity, so an account served on several
+	// inbounds reports its own quota once instead of collapsing to unlimited; see
+	// subUsage.
+	traffic := usage.result()
 
 	// Combile outbounds
 	var finalJson []byte

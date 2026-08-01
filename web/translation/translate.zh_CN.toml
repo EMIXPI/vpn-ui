@@ -241,6 +241,12 @@
 "customGeoErrUpdateAllIncomplete" = "有一个或多个自定义 geo 源更新失败"
 
 [pages.inbounds]
+"inboundMembership" = "Inbounds"
+"inboundMembershipDesc" = "The inbounds this one account is served on. It keeps the same email, the same traffic allowance and the same expiry on every one of them. Unticking an inbound removes the account from it. The inbound this form was opened from stays ticked."
+"selectAllInbounds" = "Select all"
+"membershipCurrentInbound" = "current"
+"membershipSameProtocol" = "An account can only be on one l2tp, pptp or ikev2 inbound at a time. Each of those authenticates through a shared daemon that does not name the inbound, so a second one would silently never be used."
+"membershipOnInbounds" = "Served on %COUNT% inbounds"
 "totalUsers" = "用户总数"
 "exportTxt" = "Export TXT"
 "exportPdf" = "Export PDF"

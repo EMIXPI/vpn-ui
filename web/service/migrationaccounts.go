@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/mhsanaei/3x-ui/v2/config"
@@ -691,6 +692,85 @@ func (s *AccountService) ensurePreMigrationBackup() (string, error) {
 		logger.Warning("MigrationAccounts - backup taken but the path could not be recorded: ", err)
 	}
 	return dst, nil
+}
+
+// RevertAccounts drops the accounts layer, putting the panel back on the legacy
+// client model. The escape hatch for an operator who does not want this feature
+// after all.
+//
+// It REFUSES when any account holds more than one membership, and that refusal is
+// the whole point rather than an inconvenience. settings.clients is still the
+// truth, so dropping the tables under a single-membership panel is exactly a
+// no-op: every account keeps its entry, its credentials and its address. But an
+// account deliberately placed on three inbounds has no non-destructive answer.
+// Dropping the tables would leave three settings entries sharing one email and
+// one client_traffics row, which is the shape that leaks quota across inbounds
+// (each entry would need its own row, and the email is unique). Splitting them
+// into three renamed accounts is a real answer but it changes what customers
+// were sold. Neither is a decision this command may take silently, so it names
+// the accounts and stops.
+//
+// Returns the number of accounts and memberships removed.
+func (s *AccountService) RevertAccounts() (int, int, error) {
+	db := database.GetDB()
+	if db == nil {
+		return 0, 0, fmt.Errorf("no database")
+	}
+
+	var multi []model.Account
+	err := db.Where("id IN (?)",
+		db.Model(&model.AccountInbound{}).
+			Select("account_id").
+			Group("account_id").
+			Having("COUNT(inbound_id) > 1"),
+	).Find(&multi).Error
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(multi) > 0 {
+		names := make([]string, 0, len(multi))
+		for i, account := range multi {
+			if i == 10 {
+				names = append(names, fmt.Sprintf("... and %d more", len(multi)-10))
+				break
+			}
+			names = append(names, account.Email)
+		}
+		return 0, 0, fmt.Errorf(
+			"refusing to revert: %d account(s) are on more than one inbound (%s).\n"+
+				"There is no non-destructive way back for those: dropping the tables would leave several settings entries sharing one email and one traffic row, which leaks quota between them.\n"+
+				"Put each of them back on a single inbound first (edit the client and untick the extra inbounds), then re-run this.",
+			len(multi), strings.Join(names, ", "))
+	}
+
+	var accountCount, membershipCount int64
+	db.Model(&model.Account{}).Count(&accountCount)
+	db.Model(&model.AccountInbound{}).Count(&membershipCount)
+
+	// Ordinary deletes rather than DROP TABLE: AutoMigrate recreates the tables on
+	// the next start anyway, and the migration would simply refill them. What this
+	// really does is give the operator a clean slate plus the cleared flag, so the
+	// next pass starts from scratch.
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("1 = 1").Delete(&model.AccountInbound{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("1 = 1").Delete(&model.Account{}).Error; err != nil {
+			return err
+		}
+		var settingService SettingService
+		for _, key := range []string{accountsMigratedKey, accountsReportKey} {
+			if err := tx.Where("key = ?", key).Delete(&model.Setting{}).Error; err != nil {
+				return err
+			}
+			_ = settingService
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(accountCount), int(membershipCount), nil
 }
 
 // GetAccountsMigrationReport returns the stored report, or nil if no pass has

@@ -22,6 +22,125 @@
     {{template "form/client"}}
 </a-modal>
 <script>
+    // The protocols whose accounts must not be spread over two inbounds. Mirrors
+    // sameProtocolAmbiguous() in web/service/account.go: all three authenticate
+    // through one shared daemon that does not name the inbound, so the account
+    // would always be served by whichever has the lower id, silently. The server
+    // refuses the save; this list is only what stops the operator ticking it.
+    const SHARED_DAEMON_PROTOCOLS = [Protocols.L2TP, Protocols.PPTP, Protocols.IKEV2];
+
+    // The inbound-membership checklist's state, rebuilt every time the modal opens.
+    //
+    // Its methods reach the state through clientModal rather than `this`: they are
+    // handed to the template as bare event handlers (@change="membershipPicker
+    // .toggleAll"), which arrive with no receiver. Same reason adminModal's do.
+    function buildClientMembership(dbInbound, client) {
+        const currentId = dbInbound ? dbInbound.id : 0;
+        // Only inbounds that can hold an account at all. An inbound with no client
+        // list (dokodemo-door, socks/http, single-user shadowsocks) has nothing to
+        // be a member of, and the list is already scoped to what this admin or
+        // reseller may see, which is the same set the server checks ownership
+        // against.
+        const options = (app.dbInbounds || [])
+            .filter((row) => Array.isArray(app.getInboundClients(row)))
+            .map((row) => ({
+                id: row.id,
+                remark: row.remark,
+                protocol: row.protocol,
+                port: row.port,
+            }));
+        const offered = options.map((ib) => ib.id);
+        // An account's current memberships are already on this page: the projection
+        // writes the account into settings.clients on every inbound serving it, so
+        // "the same email elsewhere" IS the membership set. A new account has none
+        // yet and starts on the inbound the form was opened from.
+        const selected = app
+            .clientInbounds(client ? client.email : "")
+            .map((ib) => ib.id)
+            .filter((id) => offered.includes(id));
+        if (currentId && !selected.includes(currentId)) {
+            selected.push(currentId);
+        }
+        return {
+            // One inbound is not a choice, so the whole block stays hidden.
+            available: options.length > 1,
+            currentId,
+            options,
+            selected,
+            // The largest set that can actually be served: everything on offer,
+            // minus a second inbound of any shared-daemon protocol. The inbound
+            // the form was opened from claims its protocol's single place, since
+            // it is a member whatever else is ticked.
+            maxSet() {
+                const m = clientModal.membership;
+                const taken = {};
+                const out = [];
+                m.options.forEach((ib) => {
+                    if (ib.id !== m.currentId) return;
+                    taken[ib.protocol] = true;
+                    out.push(ib.id);
+                });
+                m.options.forEach((ib) => {
+                    if (out.includes(ib.id)) return;
+                    if (SHARED_DAEMON_PROTOCOLS.includes(ib.protocol)) {
+                        if (taken[ib.protocol]) return;
+                        taken[ib.protocol] = true;
+                    }
+                    out.push(ib.id);
+                });
+                return out;
+            },
+            // Two reasons a row cannot be ticked: it is the inbound this form was
+            // opened from (the server puts the account there whatever the form
+            // says), or it would be a second inbound of a shared-daemon protocol.
+            // Blocked before the click rather than refused after it, because a
+            // rejected tick has no honest way back: the checkbox is controlled, so
+            // leaving the model alone leaves the box looking ticked.
+            isLocked(ib) {
+                const m = clientModal.membership;
+                if (ib.id === m.currentId) return true;
+                if (!SHARED_DAEMON_PROTOCOLS.includes(ib.protocol)) return false;
+                if (m.selected.includes(ib.id)) return false;
+                return m.options.some(
+                    (other) =>
+                        other.protocol === ib.protocol &&
+                        other.id !== ib.id &&
+                        m.selected.includes(other.id),
+                );
+            },
+            get hasProtocolClash() {
+                const m = clientModal.membership;
+                return m.options.some((ib) => ib.id !== m.currentId && m.isLocked(ib));
+            },
+            // "All" means every inbound that can be served, not every inbound
+            // listed: with a second l2tp on the page the full list is unreachable,
+            // and a select-all that can never read as checked is a broken control.
+            get allChecked() {
+                const m = clientModal.membership;
+                const max = m.maxSet();
+                return max.length > 0 && max.every((id) => m.selected.includes(id));
+            },
+            get someChecked() {
+                const m = clientModal.membership;
+                return m.selected.length > 0 && !m.allChecked;
+            },
+            toggleAll(e) {
+                const m = clientModal.membership;
+                m.selected = e.target.checked
+                    ? m.maxSet()
+                    : [m.currentId].filter(Boolean);
+            },
+            change(ids) {
+                const m = clientModal.membership;
+                const next = (ids || []).slice();
+                if (m.currentId && !next.includes(m.currentId)) {
+                    next.push(m.currentId);
+                }
+                m.selected = next;
+            },
+        };
+    }
+
     const clientModal = {
         visible: false,
         confirmLoading: false,
@@ -36,6 +155,14 @@
         index: null,
         clientIps: null,
         delayedStart: false,
+        // Replaced wholesale by show(). Declared here so Vue observes the key and
+        // the checklist below it stays reactive when a later open swaps the object.
+        membership: {
+            available: false,
+            currentId: 0,
+            options: [],
+            selected: [],
+        },
         ok() {
             if (clientModal.isEdit) {
                 ObjectUtil.execute(
@@ -84,7 +211,34 @@
             this.clientStats = this.dbInbound.clientStats.find(
                 (row) => row.email === this.clients[this.index].email,
             );
+            this.membership = buildClientMembership(
+                this.dbInbound,
+                this.clients[this.index],
+            );
             this.confirm = confirm;
+        },
+        // What the form has to say about memberships, in the shape the write path
+        // posts.
+        //
+        // null means "say nothing", which is what every caller did before the
+        // checklist existed: an absent inboundIds field is read server-side as an
+        // ordinary single-inbound write (postedMembershipIds), so the bulk-add path
+        // and any script against the API keep their exact behaviour. Only a form
+        // that actually SHOWED the checklist names a set.
+        postedInboundIds() {
+            const m = clientModal.membership;
+            if (!m || !m.available) return null;
+            // The checklist is hidden until the account has an email, since that is
+            // what a membership is keyed on (and what the server keys it on too), so
+            // a form that never showed it must not speak for it.
+            const client = clientModalApp.client;
+            if (!client || !client.email) return null;
+            const ids = (m.selected || []).slice();
+            // The empty-string sentinel is how a cleared checkbox group is posted
+            // (the same convention admin_modal.html uses); the server skips the
+            // blank and keeps the target inbound. Unreachable while the current
+            // inbound is locked on, and kept so it stays that way if it is not.
+            return ids.length ? ids : [""];
         },
         // Single definition in model/inbound.js, mirrored by clientIdentityKey() in
         // web/service/inbound.go. Do not inline the switch here again.
@@ -207,6 +361,12 @@
             },
             get isEdit() {
                 return this.clientModal.isEdit;
+            },
+            // The inbound-membership checklist in form/client. Read by name there,
+            // and defined again in modals/inbound_modal.html, which renders the
+            // same form for an inbound that does not exist yet.
+            get membershipPicker() {
+                return this.clientModal.membership;
             },
             get datepicker() {
                 return app.datepicker;

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mhsanaei/3x-ui/v2/config"
@@ -540,6 +541,69 @@ func TestMigrationAccountsHandlesEmptyPanel(t *testing.T) {
 	assertAdditiveOnly(t, before)
 	if len(accountsInDB(t)) != 0 {
 		t.Error("accounts created on a panel with no clients")
+	}
+}
+
+// The escape hatch. On a panel where every account is on ONE inbound, reverting
+// is a no-op for the data plane: settings.clients is still the truth, so every
+// account keeps its entry, its credentials and its address.
+func TestRevertAccountsIsANoOpForSingleMembership(t *testing.T) {
+	svc := newAccountsDB(t)
+	seedInboundWithClients(t, model.L2TP, 43601, []map[string]any{
+		{"id": "bob", "password": "pw", "email": "bob@example.com", "enable": true, "slot": float64(0)},
+	})
+	seedInboundWithClients(t, model.VLESS, 43602, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "carol@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+
+	before := snapshotUntouchedTables(t)
+	accounts, memberships, err := svc.RevertAccounts()
+	if err != nil {
+		t.Fatalf("RevertAccounts: %v", err)
+	}
+	assertAdditiveOnly(t, before)
+
+	if accounts != 2 || memberships != 2 {
+		t.Errorf("removed %d accounts / %d memberships, want 2 / 2", accounts, memberships)
+	}
+	if len(accountsInDB(t)) != 0 || len(membershipsInDB(t)) != 0 {
+		t.Error("the tables were not cleared")
+	}
+	if svc.AccountsMigrated() {
+		t.Error("the migrated flag survived the revert, so the next start would not re-run the pass")
+	}
+}
+
+// It must REFUSE while any account is on several inbounds. Dropping the tables
+// there would leave several settings entries sharing one email and one traffic
+// row, which is exactly the shape that leaks quota between inbounds. Naming the
+// accounts and stopping is the only honest answer.
+func TestRevertAccountsRefusesMultiMembership(t *testing.T) {
+	svc := newAccountsDB(t)
+	seedInboundWithClients(t, model.VLESS, 43701, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	seedInboundWithClients(t, model.Trojan, 43702, []map[string]any{
+		{"password": "pw", "email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+	if len(membershipsInDB(t)) != 2 {
+		t.Fatal("setup: expected two memberships")
+	}
+
+	_, _, err := svc.RevertAccounts()
+	if err == nil {
+		t.Fatal("reverted a multi-membership panel: that silently creates duplicate settings entries sharing one traffic row")
+	}
+	if !strings.Contains(err.Error(), "bob@example.com") {
+		t.Errorf("the refusal must NAME the offending accounts so the operator can fix them; got: %v", err)
+	}
+	if len(accountsInDB(t)) != 1 || len(membershipsInDB(t)) != 2 {
+		t.Error("a refused revert must change nothing")
+	}
+	if !svc.AccountsMigrated() {
+		t.Error("a refused revert cleared the migrated flag")
 	}
 }
 

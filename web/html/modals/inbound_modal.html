@@ -281,6 +281,14 @@
             resellerForcedDays() {
                 return !!(RESELLER.isReseller && RESELLER.daysPerGb > 0);
             },
+            // The third name form/client reads and the reason it needs a definition
+            // here: the inbound-membership checklist. There is nothing to be a
+            // member of while the inbound is still being written, and its id (which
+            // the checklist is built around) does not exist yet, so the form is told
+            // there is no picker. The real one lives in modals/client_modal.html.
+            membershipPicker() {
+                return { available: false, currentId: 0, options: [], selected: [] };
+            },
             // The derived duration for the client being added. This modal has no
             // single `client` field (the form renders inside a v-for over the
             // inbound's clients), so read the first one, which is the only one

@@ -195,9 +195,22 @@ type ResellerClient struct {
 	// gorm:"unique", and AdminService.CanAccessClientEmail already keys on it, so
 	// this matches the seam that exists rather than inventing a second notion of
 	// "which client".
-	Email     string `json:"email" gorm:"uniqueIndex"`
-	InboundId int    `json:"inboundId" gorm:"index"`
-	UserId    int    `json:"userId" gorm:"index"`
+	Email string `json:"email" gorm:"uniqueIndex"`
+	// InboundId is the HOME inbound: the one this account was first sold on. It is
+	// DISPLAY ONLY, and nothing may decide anything by it.
+	//
+	// One account is served on N inbounds (see AccountInbound), and this column
+	// holds exactly one of them, so every question of the form "which inbound is
+	// this account on" has to be answered by resolving the memberships instead
+	// (service.servingInboundIds). Reading it as THE inbound is what made deleting
+	// a reseller remove one membership of three and leave the rest live and
+	// unbilled, and what made deleting the inbound an account really sits on refund
+	// nothing because the row named a different one.
+	//
+	// It is repointed when the inbound it names is deleted while the account lives
+	// on elsewhere, so it keeps naming something real.
+	InboundId int `json:"inboundId" gorm:"index"`
+	UserId    int `json:"userId" gorm:"index"`
 
 	// ChargedBytes is what this account currently holds against its reseller's
 	// balance: raised on create and top-up, lowered on deduct and delete.
@@ -447,8 +460,38 @@ type Client struct {
 	// slot, and the array's LENGTH is the slot count.
 	Peers []ClientGrePeer `json:"peers,omitempty"`
 
+	// WireGuard (C) / AmneziaWG key material. Same trap as the MTProto and GRE blocks
+	// above, and the one that actually bit: creating an inbound round-trips every client
+	// through THIS struct, so per-device keypairs posted to /panel/api/inbounds/add were
+	// silently dropped. ReconcileKeys then saw an account with no devices, rebuilt device
+	// 0 from the legacy PrivKey mirror and MINTED FRESH KEYS for devices 2..K, so every
+	// config already handed out for those devices stopped authenticating with no error
+	// anywhere. Editing an existing inbound never hit it, because that path mutates the
+	// settings map in place and keeps keys it does not know about.
+	//
+	// The legacy single-keypair trio is here for the same reason: it is what deviceList()
+	// reads for accounts written before per-device keys existed, and ReconcileKeys keeps
+	// it mirroring device 0. All omitempty so no other protocol's client JSON grows a byte.
+	PrivKey string         `json:"privKey,omitempty"`
+	PubKey  string         `json:"pubKey,omitempty"`
+	Psk     string         `json:"psk,omitempty"`
+	Devices []ClientDevice `json:"devices,omitempty"`
+
 	CreatedAt int64 `json:"created_at,omitempty"` // Creation timestamp
 	UpdatedAt int64 `json:"updated_at,omitempty"` // Last update timestamp
+}
+
+// ClientDevice is one wg-c/awg device slot: its own keypair (and optional preshared
+// key) and, from its index, its own /32 out of the account's block. The JSON tags MUST
+// match the service-side wgcDevice/awgDevice, or normalizing a client through Client
+// silently rewrites the key material the data plane loads into the interface.
+//
+// No omitempty inside the entry: the array's own LENGTH is the device-slot count, and a
+// slot whose keys have not been minted yet is a real, meaningful element.
+type ClientDevice struct {
+	PrivKey string `json:"privKey"`
+	PubKey  string `json:"pubKey"`
+	Psk     string `json:"psk"`
 }
 
 // ClientGrePeer is one GRE peer slot. The JSON tags MUST match the service-side grePeer, or

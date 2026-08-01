@@ -105,6 +105,32 @@ var multiplierColumns = []string{"id", "traffic_multiplier_enable", "traffic_mul
 // nothing to attribute. Rather than pretend, those records arrive with InboundId
 // 0 and take the max.
 
+// anyMultiplierEnabled reports whether ANY inbound on the panel weights traffic.
+//
+// It gates the membership resolution in addClientTraffic, which is a
+// settings-JSON scan over every inbound on a 10s tick. When no inbound has the
+// policy on, the answer cannot depend on which inbound bills a byte, so the scan
+// is pure waste and the tick costs exactly what it did before this feature.
+//
+// Asked of the whole table rather than of the inbounds already loaded, and that
+// distinction is the whole point: the inbound that would change the answer is
+// precisely the one NOT yet loaded (an account's other membership). Gating on the
+// loaded set instead silently skipped the lookup exactly when it mattered and
+// billed the account at its home inbound's rate.
+//
+// One indexed COUNT over a narrow column, with no JSON parsed.
+func anyMultiplierEnabled(tx *gorm.DB) bool {
+	var count int64
+	if err := tx.Model(model.Inbound{}).
+		Where("traffic_multiplier_enable = ?", true).
+		Count(&count).Error; err != nil {
+		// Cannot tell, so assume yes: doing the extra work is a slow tick, while
+		// skipping it when it was needed is a mis-billed account.
+		return true
+	}
+	return count > 0
+}
+
 // maxMultiplierInbound returns the member inbound with the highest effective
 // multiplier, for records whose source cannot be attributed.
 //

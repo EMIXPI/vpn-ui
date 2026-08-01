@@ -678,14 +678,19 @@ func (a *InboundController) delInbound(c *gin.Context) {
 	isOpenVpn := oldInbound != nil && oldInbound.Protocol == model.OPENVPN
 	isOcserv := oldInbound != nil && oldInbound.Protocol == model.OPENCONNECT
 	isSstp := oldInbound != nil && oldInbound.Protocol == model.SSTP
-	// Every reseller-owned account on this inbound, and how much each has moved,
-	// captured while their traffic rows still exist. Deleting the inbound takes
-	// those rows with it, so a refund priced afterwards would treat every account
-	// as untouched and hand back the whole charge for all of them at once.
-	var resellerUsage map[string]int64
+	// Every reseller-owned account this inbound serves, and how much each has moved,
+	// captured while the inbound's settings and their traffic rows still exist.
+	// Deleting the inbound takes both with it: the roster can no longer be read at
+	// all, and a refund priced afterwards would treat every account as untouched and
+	// hand back the whole charge for all of them at once.
+	var (
+		resellerOwned []string
+		resellerUsage map[string]int64
+	)
 	if owned, oerr := resellerService.OwnedEmailsOnInbound(id); oerr != nil {
 		logger.Warning("listing reseller accounts before an inbound delete: ", oerr)
 	} else if len(owned) > 0 {
+		resellerOwned = owned
 		if resellerUsage, oerr = resellerService.UsageSnapshot(owned); oerr != nil {
 			logger.Warning("reading traffic before an inbound delete: ", oerr)
 		}
@@ -695,11 +700,12 @@ func (a *InboundController) delInbound(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
-	// The mirror of the grant revocation DelInbound already does: drop every reseller
-	// ownership row for this inbound, refunding what those accounts had left. Left
-	// behind, the rows outlive the inbound and a recycled id inherits them.
-	if rerr := resellerService.DropInbound(id, resellerUsage); rerr != nil {
-		logger.Warning("dropping reseller ownership of a deleted inbound's accounts: ", rerr)
+	// The mirror of the grant revocation DelInbound already does: settle the ledger
+	// for the accounts this inbound served, refunding the ones it was the LAST
+	// inbound for. An account still served elsewhere keeps its row and its charge,
+	// because it is still selling.
+	if rerr := resellerService.DropInbound(id, resellerOwned, resellerUsage); rerr != nil {
+		logger.Warning("settling reseller ownership after an inbound delete: ", rerr)
 	}
 	jsonMsgObj(c, I18nWeb(c, "pages.inbounds.toasts.inboundDeleteSuccess"), id, nil)
 	if isL2tp {
@@ -1251,12 +1257,14 @@ func (a *InboundController) bulkUpdateClients(c *gin.Context) {
 	if req.Op == "delete" {
 		a.refundBulkDeleted(req.Targets, usage)
 	}
-	// Under days-per-GB an account's deadline is a function of its traffic, and
-	// the applier above moves traffic alone. This writes the deadlines the quote
-	// derived, so a bulk top-up extends the accounts it just sold bytes to
-	// instead of silently leaving them to expire on the old date.
-	if aerr := resellerService.ApplyBulkExpiry(ticket); aerr != nil {
-		logger.Warning("applying derived expiry after a reseller bulk operation: ", aerr)
+	// The applier above works one (inbound, email) target at a time and moves
+	// traffic alone. This writes back what the quote actually decided: the priced
+	// quota onto every inbound serving the account (charged once, so it must land
+	// once), and under days-per-GB the deadline that traffic bought, so a bulk
+	// top-up extends the accounts it just sold bytes to instead of silently leaving
+	// them to expire on the old date.
+	if aerr := resellerService.ApplyBulkCharges(ticket); aerr != nil {
+		logger.Warning("applying priced quota and expiry after a reseller bulk operation: ", aerr)
 	}
 	jsonObj(c, result, nil)
 

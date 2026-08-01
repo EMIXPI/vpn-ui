@@ -1287,6 +1287,13 @@
   // matching option shows the bare value string instead of a label.
   const DEFAULT_BULK_OP = BULK_OPS.find(isBulkOpAllowed) || 'addTraffic';
 
+  // One account's identity, the way the server keys it (accountKey in
+  // web/service/account.go): the email, trimmed and lower-cased. Two rows that
+  // reduce to the same key are the SAME account on two inbounds, not two accounts.
+  function accountKeyOf(email) {
+    return typeof email === 'string' ? email.trim().toLowerCase() : '';
+  }
+
   const app = new Vue({
     delimiters: ['[[', ']]'],
     el: '#app',
@@ -2200,7 +2207,7 @@
           okText: '{{ i18n "pages.client.submitAdd"}}',
           dbInbound: dbInbound,
           confirm: async (clients, dbInboundId) => {
-            await this.addClient(clients, dbInboundId, clientModal);
+            await this.addClient(clients, dbInboundId, clientModal, clientModal.postedInboundIds());
           },
           isEdit: false
         });
@@ -2230,7 +2237,7 @@
           index: index,
           confirm: async (client, dbInboundId, clientId) => {
             clientModal.loading();
-            await this.updateClient(client, dbInboundId, clientId);
+            await this.updateClient(client, dbInboundId, clientId, clientModal.postedInboundIds());
             clientModal.close();
           },
           isEdit: true
@@ -2258,18 +2265,25 @@
           default: return clients.findIndex(item => item && item.id === client.id && item.email === client.email);
         }
       },
-      async addClient(clients, dbInboundId, modal) {
+      // inboundIds is the account's whole membership set: these inbounds and no
+      // others. It is OMITTED unless the caller has a checklist to speak for, and an
+      // absent field means "just the inbound in the body", which is what the bulk-add
+      // modal, the enable switch and every scripted caller rely on. Qs.stringify
+      // posts an array as repeated keys, which is what the server binds.
+      async addClient(clients, dbInboundId, modal, inboundIds) {
         const data = {
           id: dbInboundId,
           settings: '{"clients": [' + clients.toString() + ']}',
         };
+        if (inboundIds) data.inboundIds = inboundIds;
         await this.submit(`/panel/api/inbounds/addClient`, data, modal);
       },
-      async updateClient(client, dbInboundId, clientId) {
+      async updateClient(client, dbInboundId, clientId, inboundIds) {
         const data = {
           id: dbInboundId,
           settings: '{"clients": [' + client.toString() + ']}',
         };
+        if (inboundIds) data.inboundIds = inboundIds;
         await this.submit(`/panel/api/inbounds/updateClient/${clientId}`, data, clientModal);
       },
       resetTraffic(dbInboundId) {
@@ -2313,36 +2327,6 @@
         } else {
           this.submit(`/panel/api/inbounds/${dbInboundId}/delClient/${clientId}`);
         }
-      },
-      getSubGroupClients(dbInbounds, currentClient) {
-        const response = {
-          inbounds: [],
-          clients: [],
-          editIds: []
-        }
-        if (dbInbounds && dbInbounds.length > 0 && currentClient) {
-          dbInbounds.forEach((dbInboundItem) => {
-            const dbInbound = new DBInbound(dbInboundItem);
-            if (dbInbound) {
-              const inbound = dbInbound.toInbound();
-              if (inbound) {
-                const clients = inbound.clients;
-                if (clients.length > 0) {
-                  clients.forEach((client) => {
-                    if (client['subId'] === currentClient['subId']) {
-                      client['inboundId'] = dbInboundItem.id
-                      client['clientId'] = this.getClientId(dbInbound.protocol, client)
-                      response.inbounds.push(dbInboundItem.id)
-                      response.clients.push(client)
-                      response.editIds.push(client['clientId'])
-                    }
-                  })
-                }
-              }
-            }
-          })
-        }
-        return response;
       },
       // Single definition in model/inbound.js, mirrored by clientIdentityKey() in
       // web/service/inbound.go. Do not inline the switch here again.
@@ -2573,6 +2557,20 @@
         if (!dbInbound) return null;
         const inbound = dbInbound.toInbound();
         return inbound && inbound.clients ? inbound.clients : null;
+      },
+      // Every inbound serving this account, for the row badge and for the client
+      // form's membership checklist. Reads the index below, so a row costs a map
+      // lookup rather than a walk over every inbound's settings JSON.
+      clientInbounds(email) {
+        return this.membershipIndex[accountKeyOf(email)] || [];
+      },
+      clientInboundCount(email) {
+        return this.clientInbounds(email).length;
+      },
+      // The badge's tooltip heading. The inbounds themselves are listed under it.
+      clientMembershipTitle(email) {
+        return '{{ i18n "pages.inbounds.membershipOnInbounds" }}'
+          .replace('%COUNT%', this.clientInboundCount(email));
       },
       resetClientTraffic(client, dbInboundId, confirmation = true) {
         if (confirmation) {
@@ -2967,6 +2965,34 @@
       }
     },
     computed: {
+      // Which inbounds serve each account, keyed by account identity (the email,
+      // the way accountKey reduces it server-side).
+      //
+      // No request behind it: an account served on several inbounds is written into
+      // settings.clients on every one of them (the projection in
+      // web/service/accountproject.go), so the list this page already holds IS the
+      // membership set. Cached as a computed because building it parses every
+      // inbound's settings JSON, and both readers run per rendered row.
+      membershipIndex() {
+        const index = {};
+        this.dbInbounds.forEach(dbInbound => {
+          const clients = this.getInboundClients(dbInbound);
+          if (!Array.isArray(clients)) return;
+          const entry = {
+            id: dbInbound.id,
+            remark: dbInbound.remark,
+            protocol: dbInbound.protocol,
+            port: dbInbound.port,
+          };
+          clients.forEach(client => {
+            const key = accountKeyOf(client && client.email);
+            if (!key) return;
+            if (!index[key]) index[key] = [];
+            index[key].push(entry);
+          });
+        });
+        return index;
+      },
       // Whether to offer reordering at all. The order is the PANEL's and shared by
       // every admin, so it is gated on editInbound, which a reseller never holds.
       // Presentation only: /reorder re-checks the bit and the grants.

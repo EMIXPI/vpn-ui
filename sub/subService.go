@@ -28,10 +28,17 @@ import (
 
 // SubService provides business logic for generating subscription links and managing subscription data.
 type SubService struct {
-	address        string
-	showInfo       bool
-	remarkModel    string
-	datepicker     string
+	address     string
+	showInfo    bool
+	remarkModel string
+	datepicker  string
+	// scope is the state of the ONE response being rendered: which identities it
+	// spans, what each one's real quota is, and which node names have been handed
+	// out. Nil on the shared instance the router builds, and set on the per-response
+	// copy forResponse returns; every reader of it is nil-safe, so a caller that
+	// generates a single link without going through GetSubs (the tests, the panel's
+	// own link buttons) keeps working unchanged.
+	scope          *subScope
 	inboundService service.InboundService
 	settingService service.SettingService
 	sshService     service.SshService
@@ -49,13 +56,46 @@ func NewSubService(showInfo bool, remarkModel string) *SubService {
 	}
 }
 
+// forResponse returns a copy of the service scoped to ONE subscription response.
+//
+// The router builds a single SubService at start-up and every request is served by
+// it, while GetSubs writes the caller's host onto it before generating links: two
+// subscribers fetching at once can already be handed each other's address. This
+// copy closes that for the request-scoped fields, and more importantly keeps the
+// per-response maps in subScope off the shared instance, where a concurrent write
+// would panic the process rather than merely return the wrong host.
+func (s *SubService) forResponse() *SubService {
+	scoped := *s
+	scoped.scope = newSubScope()
+	return &scoped
+}
+
+// resolveTraffic answers with the traffic figures one membership reports, and says
+// where they came from:
+//
+//   - accountBacked: the row is the ACCOUNT's (quota and expiry from the account,
+//     usage from its single client_traffics row), so the header has to count it
+//     once however many inbounds serve that account.
+//   - exists: there are figures at all. The Show Info suffix is skipped without
+//     them, which is what an account that has never been counted gets.
+//
+// The per-inbound fallback is the legacy path, unchanged, and is what an unmigrated
+// panel keeps using.
+func (s *SubService) resolveTraffic(inbound *model.Inbound, email string) (traffic xray.ClientTraffic, accountBacked bool, exists bool) {
+	if row, ok := s.scope.traffic(email); ok {
+		return row, true, true
+	}
+	row, ok := s.getClientTraffics(inbound.ClientStats, email)
+	return row, false, ok
+}
+
 // GetSubs retrieves subscription links for a given subscription ID and host.
 func (s *SubService) GetSubs(subId string, host string) ([]string, int64, xray.ClientTraffic, error) {
+	s = s.forResponse()
 	s.address = host
 	var result []string
 	var traffic xray.ClientTraffic
-	var lastOnline int64
-	var clientTraffics []xray.ClientTraffic
+	usage := newSubUsage()
 	inbounds, err := s.getInboundsBySubId(subId)
 	if err != nil {
 		return nil, 0, traffic, err
@@ -92,11 +132,8 @@ func (s *SubService) GetSubs(subId string, host string) ([]string, int64, xray.C
 				// no raw link (wg-c/awg deliver via the Clash sub and gre via the page's
 				// config downloads; the credential VPNs add a connection-info line via
 				// getLink).
-				ct := s.getClientTraffics(inbound.ClientStats, client.Email)
-				clientTraffics = append(clientTraffics, ct)
-				if ct.LastOnline > lastOnline {
-					lastOnline = ct.LastOnline
-				}
+				ct, accountBacked, _ := s.resolveTraffic(inbound, client.Email)
+				usage.add(client.Email, ct, accountBacked)
 				if link := s.getLink(inbound, client.Email); link != "" {
 					result = append(result, link)
 				}
@@ -104,57 +141,60 @@ func (s *SubService) GetSubs(subId string, host string) ([]string, int64, xray.C
 		}
 	}
 
-	// Prepare statistics
-	for index, clientTraffic := range clientTraffics {
-		if index == 0 {
-			traffic.Up = clientTraffic.Up
-			traffic.Down = clientTraffic.Down
-			traffic.Total = clientTraffic.Total
-			if clientTraffic.ExpiryTime > 0 {
-				traffic.ExpiryTime = clientTraffic.ExpiryTime
-			}
-		} else {
-			traffic.Up += clientTraffic.Up
-			traffic.Down += clientTraffic.Down
-			if traffic.Total == 0 || clientTraffic.Total == 0 {
-				traffic.Total = 0
-			} else {
-				traffic.Total += clientTraffic.Total
-			}
-			if clientTraffic.ExpiryTime != traffic.ExpiryTime {
-				traffic.ExpiryTime = 0
-			}
-		}
-	}
-	return result, lastOnline, traffic, nil
+	return result, usage.lastOnline, usage.result(), nil
 }
 
+// getInboundsBySubId returns every enabled inbound holding a client with this subId.
+//
+// The protocol list is a maintenance trap worth knowing about: a protocol missing
+// from it is invisible to the whole subscription layer (no link, no quota, no page
+// entry) with nothing logged, and there is no compile-time tie to model's protocol
+// constants to catch the omission.
+//
+// The JSON_VALID guard is not decoration. SQLite's JSON functions RAISE on
+// malformed input rather than returning null, and the cross join evaluates
+// JSON_EXTRACT once per inbound row, so a single settings blob that is not valid
+// JSON (an ImportDB of a hand-edited backup is the realistic way in) failed this
+// query outright and took down EVERY subscription on the panel with a bare
+// "Error!", not just the one broken inbound's. Guarding the argument itself rather
+// than adding a WHERE term is deliberate: a WHERE term only works while the planner
+// happens to evaluate it first.
 func (s *SubService) getInboundsBySubId(subId string) ([]*model.Inbound, error) {
 	db := database.GetDB()
 	var inbounds []*model.Inbound
 	// allow "hysteria2" so imports stored with the literal v2 protocol
 	// string still surface here (#4081)
+	//
+	// Ordered by id so the response is stable across refreshes: an account served on
+	// several inbounds is rendered in membership order, and the node-name
+	// disambiguation in subScope.uniqueName leaves the FIRST claimant's name alone,
+	// so an unspecified order would let a subscriber's node names shuffle between
+	// polls. SQLite already returns rowid order for this shape; this pins it.
 	err := db.Model(model.Inbound{}).Preload("ClientStats").Where(`id in (
 		SELECT DISTINCT inbounds.id
 		FROM inbounds,
-			JSON_EACH(JSON_EXTRACT(inbounds.settings, '$.clients')) AS client
+			JSON_EACH(CASE WHEN JSON_VALID(inbounds.settings)
+				THEN JSON_EXTRACT(inbounds.settings, '$.clients') ELSE '[]' END) AS client
 		WHERE
 			protocol in ('vmess','vless','trojan','shadowsocks','hysteria','hysteria2','anytls','tuic','naive','mtproto','ssh','wg-c','awg','gre','openvpn','l2tp','pptp','openconnect','sstp','ikev2')
 			AND JSON_EXTRACT(client.value, '$.subId') = ? AND enable = ?
-	)`, subId, true).Find(&inbounds).Error
+	)`, subId, true).Order("id ASC").Find(&inbounds).Error
 	if err != nil {
 		return nil, err
 	}
 	return inbounds, nil
 }
 
-func (s *SubService) getClientTraffics(traffics []xray.ClientTraffic, email string) xray.ClientTraffic {
+// getClientTraffics finds an email's row among an inbound's preloaded stats. The
+// second return distinguishes "no row" from a row that is genuinely all zeroes,
+// which is what decides whether a remark gets a Show Info suffix at all.
+func (s *SubService) getClientTraffics(traffics []xray.ClientTraffic, email string) (xray.ClientTraffic, bool) {
 	for _, traffic := range traffics {
 		if traffic.Email == email {
-			return traffic
+			return traffic, true
 		}
 	}
-	return xray.ClientTraffic{}
+	return xray.ClientTraffic{}, false
 }
 
 func (s *SubService) getFallbackMaster(dest string, streamSettings string) (string, int, string, error) {
@@ -1430,20 +1470,17 @@ func (s *SubService) genRemark(inbound *model.Inbound, email string, extra strin
 	}
 
 	if s.showInfo {
-		statsExist := false
-		var stats xray.ClientTraffic
-		for _, clientStat := range inbound.ClientStats {
-			if clientStat.Email == email {
-				stats = clientStat
-				statsExist = true
-				break
-			}
-		}
+		// The account's own figures when it has an account, this inbound's preloaded
+		// row otherwise. Reading the preload alone is what left an account served on
+		// three inbounds showing its remaining traffic and days on ONE node and
+		// nothing on the other two, since its single client_traffics row can only
+		// name one of them.
+		stats, _, statsExist := s.resolveTraffic(inbound, email)
 
 		// Get remained days
 		if statsExist {
 			if !stats.Enable {
-				return fmt.Sprintf("⛔️N/A%s%s", separationChar, strings.Join(remark, separationChar))
+				return s.scope.uniqueName(fmt.Sprintf("⛔️N/A%s%s", separationChar, strings.Join(remark, separationChar)), inbound, separationChar)
 			}
 			if vol := stats.Total - (stats.Up + stats.Down); vol > 0 {
 				remark = append(remark, fmt.Sprintf("%s%s", common.FormatTraffic(vol), "📊"))
@@ -1484,7 +1521,9 @@ func (s *SubService) genRemark(inbound *model.Inbound, email string, extra strin
 			}
 		}
 	}
-	return strings.Join(remark, separationChar)
+	// Every exit goes through the namer: a node name that collides with one already
+	// handed out in this response would REPLACE it in the client. See uniqueName.
+	return s.scope.uniqueName(strings.Join(remark, separationChar), inbound, separationChar)
 }
 
 func searchKey(data any, key string) (any, bool) {

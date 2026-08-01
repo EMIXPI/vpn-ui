@@ -1722,6 +1722,32 @@ func GetListenIP(getListen bool) {
 }
 
 // migrateDb performs database migration operations for the vpn-ui panel.
+// revertAccounts is the operator's way out of the accounts layer.
+//
+// Safe by construction for the panels that would want it: settings.clients is
+// still the truth, so on a panel where every account is on ONE inbound this is
+// exactly a no-op for the data plane. Every account keeps its entry, its
+// credentials and its tunnel address; only the two index tables and the migrated
+// flag go, and the next start simply rebuilds them (or does not, if the operator
+// stays on an older binary).
+//
+// It refuses while any account is on SEVERAL inbounds, because there is no
+// non-destructive answer for those. See AccountService.RevertAccounts.
+func revertAccounts() {
+	if err := database.InitDB(config.GetDBPath()); err != nil {
+		log.Fatal(err)
+	}
+	accountService := service.AccountService{}
+	accounts, memberships, err := accountService.RevertAccounts()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Printf("Reverted: removed %d account(s) and %d membership(s).\n", accounts, memberships)
+	fmt.Println("settings.clients was not touched, so every account keeps its entry, credentials and address.")
+	fmt.Println("Restart the panel to continue on the legacy client model.")
+}
+
 func migrateDb() {
 	inboundService := service.InboundService{}
 
@@ -2668,6 +2694,10 @@ func main() {
 		fmt.Println("                   work-safe like --random (stops the unit, applies,")
 		fmt.Println("                   restarts it); combinable with --systemd, e.g.")
 		fmt.Println("                   --user u --pass p --port 8443 --path panel --systemd")
+		fmt.Println("    revert-accounts")
+		fmt.Println("                   drop the accounts layer and go back to the legacy")
+		fmt.Println("                   one-client-per-inbound model (refuses while any")
+		fmt.Println("                   account is on more than one inbound)")
 		fmt.Println("    --uninstall    remove the panel: systemd unit, daemons, firewall,")
 		fmt.Println("                   routing, /etc configs, bundles, logs, DB and the binary")
 		fmt.Println("                   (--yes to skip the confirmation prompt)")
@@ -2689,6 +2719,8 @@ func main() {
 		runWebServer()
 	case "migrate":
 		migrateDb()
+	case "revert-accounts":
+		revertAccounts()
 	case "import":
 		importDb()
 	case "setting":

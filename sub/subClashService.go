@@ -10,7 +10,6 @@ import (
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
-	"github.com/mhsanaei/3x-ui/v2/xray"
 )
 
 type SubClashService struct {
@@ -30,14 +29,24 @@ func NewSubClashService(subService *SubService) *SubClashService {
 	return &SubClashService{SubService: subService}
 }
 
+// forResponse mirrors SubService.forResponse: one SubClashService is built at
+// start-up and shared across requests, so the per-response scope lives on a copy.
+// It matters more here than anywhere else, because Clash proxies are keyed by name
+// and a duplicate name is not a second server, it is a replacement.
+func (s *SubClashService) forResponse() *SubClashService {
+	scoped := *s
+	scoped.SubService = s.SubService.forResponse()
+	return &scoped
+}
+
 func (s *SubClashService) GetClash(subId string, host string) (string, string, error) {
+	s = s.forResponse()
 	inbounds, err := s.SubService.getInboundsBySubId(subId)
 	if err != nil || len(inbounds) == 0 {
 		return "", "", err
 	}
 
-	var traffic xray.ClientTraffic
-	var clientTraffics []xray.ClientTraffic
+	usage := newSubUsage()
 	var proxies []map[string]any
 
 	for _, inbound := range inbounds {
@@ -58,7 +67,8 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 		}
 		for _, client := range clients {
 			if client.Enable && client.SubID == subId {
-				clientTraffics = append(clientTraffics, s.SubService.getClientTraffics(inbound.ClientStats, client.Email))
+				ct, accountBacked, _ := s.SubService.resolveTraffic(inbound, client.Email)
+				usage.add(client.Email, ct, accountBacked)
 				proxies = append(proxies, s.getProxies(inbound, client, host)...)
 			}
 		}
@@ -68,27 +78,9 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 		return "", "", nil
 	}
 
-	for index, clientTraffic := range clientTraffics {
-		if index == 0 {
-			traffic.Up = clientTraffic.Up
-			traffic.Down = clientTraffic.Down
-			traffic.Total = clientTraffic.Total
-			if clientTraffic.ExpiryTime > 0 {
-				traffic.ExpiryTime = clientTraffic.ExpiryTime
-			}
-		} else {
-			traffic.Up += clientTraffic.Up
-			traffic.Down += clientTraffic.Down
-			if traffic.Total == 0 || clientTraffic.Total == 0 {
-				traffic.Total = 0
-			} else {
-				traffic.Total += clientTraffic.Total
-			}
-			if clientTraffic.ExpiryTime != traffic.ExpiryTime {
-				traffic.ExpiryTime = 0
-			}
-		}
-	}
+	// Folded per identity: see subUsage. Summing the per-inbound rows reported an
+	// account served on several inbounds as unlimited and never expiring.
+	traffic := usage.result()
 
 	proxyNames := make([]string, 0, len(proxies)+1)
 	for _, proxy := range proxies {

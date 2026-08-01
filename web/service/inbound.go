@@ -989,6 +989,20 @@ func (s *InboundService) validateInboundConfig(inbound *model.Inbound) error {
 }
 
 func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	// Fill in every settings key of the protocol's shape the caller left out, then
+	// validate what is left, so a MINIMAL API body (or none at all) creates the same
+	// inbound the panel's own Add form would. Only for the protocols whose settings JSON
+	// is built client-side (see web/service/protocoldefaults.go); an Xray-native inbound
+	// passes through untouched.
+	//
+	// Defaults only ADD absent keys, so every request the UI makes today (all of which
+	// already carry the full shape) comes back byte-identical and nothing it sent is
+	// second-guessed. Ahead of everything below, so the blob validated is the blob
+	// stored.
+	if err := NormalizeInboundSettings(inbound); err != nil {
+		return inbound, false, err
+	}
+
 	// Before anything parses the settings, so the emails checked below and the ones
 	// persisted are the same strings.
 	inbound.Settings = normalizeClientEmails(inbound.Settings)
@@ -2774,37 +2788,66 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 		return err
 	}
 
-	// Inbounds for the traffic-multiplier policy. Three id sources, because the
-	// inbound that BILLS a byte is no longer necessarily the one on the client's
-	// row: a collected record may name the inbound it actually came from, and an
-	// account can be a member of several. A failure here must not cost us the
-	// tick's traffic, so it falls back to billing everything 1:1.
+	// Inbounds for the traffic-multiplier policy. Two id sources plus, ONLY when it
+	// is actually needed, the account's memberships: the inbound that BILLS a byte
+	// is no longer necessarily the one on the client's row, since a collected
+	// record may name the inbound it really came from and an account can be a
+	// member of several. A failure here must not cost us the tick's traffic, so it
+	// falls back to billing everything 1:1.
 	homeIds := make([]int, 0, len(dbClientTraffics))
-	memberIdsByEmail := make(map[string][]int, len(dbClientTraffics))
-	billedEmails := make([]string, 0, len(dbClientTraffics))
 	for _, ct := range dbClientTraffics {
 		homeIds = append(homeIds, ct.InboundId)
-		billedEmails = append(billedEmails, ct.Email)
 	}
 	sourceIds := make([]int, 0, len(traffics))
+	unattributed := false
 	for _, t := range traffics {
 		sourceIds = append(sourceIds, t.InboundId)
-	}
-	memberRows, merr := s.inboundsServingEmails(tx, billedEmails)
-	if merr != nil {
-		logger.Warning("traffic multiplier: cannot resolve memberships, using the home inbound: ", merr)
-	}
-	memberIds := make([]int, 0, len(memberRows))
-	for _, row := range memberRows {
-		memberIds = append(memberIds, row.Id)
-		key := accountKey(row.Email)
-		memberIdsByEmail[key] = append(memberIdsByEmail[key], row.Id)
+		if t.InboundId == 0 {
+			unattributed = true
+		}
 	}
 
-	multiplierInbounds, err := loadMultiplierInbounds(tx, homeIds, sourceIds, memberIds)
+	multiplierInbounds, err := loadMultiplierInbounds(tx, homeIds, sourceIds)
 	if err != nil {
 		logger.Warning("traffic multiplier: cannot load inbounds, counting raw: ", err)
 		multiplierInbounds = nil
+	}
+	if multiplierInbounds == nil {
+		// loadMultiplierInbounds returns nil both on error and when there was
+		// nothing to load, and the merge below writes into this map. Writing to a
+		// nil map panics, and it would take the whole 10s traffic job down.
+		multiplierInbounds = map[int]*model.Inbound{}
+	}
+
+	// Resolving memberships means scanning every inbound's settings JSON, and this
+	// runs every 10 seconds on a panel that can hold thousands of accounts. It is
+	// therefore done ONLY when it can change an answer: when some record could not
+	// be attributed to a source inbound AND some inbound actually has a multiplier
+	// enabled. On the overwhelmingly common panel (no multiplier configured at all)
+	// this is skipped entirely and the tick costs exactly what it did before.
+	memberIdsByEmail := map[string][]int{}
+	if unattributed && anyMultiplierEnabled(tx) {
+		billedEmails := make([]string, 0, len(dbClientTraffics))
+		for _, ct := range dbClientTraffics {
+			billedEmails = append(billedEmails, ct.Email)
+		}
+		memberRows, merr := s.inboundsServingEmails(tx, billedEmails)
+		if merr != nil {
+			logger.Warning("traffic multiplier: cannot resolve memberships, using the home inbound: ", merr)
+		}
+		memberIds := make([]int, 0, len(memberRows))
+		for _, row := range memberRows {
+			memberIds = append(memberIds, row.Id)
+			key := accountKey(row.Email)
+			memberIdsByEmail[key] = append(memberIdsByEmail[key], row.Id)
+		}
+		// Second pass now that the membership ids are known: those inbounds' own
+		// multiplier columns still have to be loaded to be compared.
+		if extra, eerr := loadMultiplierInbounds(tx, memberIds); eerr == nil {
+			for id, inb := range extra {
+				multiplierInbounds[id] = inb
+			}
+		}
 	}
 
 	// Every record matching an email is applied, not just the first. A tick can legitimately
