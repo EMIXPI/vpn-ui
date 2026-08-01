@@ -1315,6 +1315,37 @@ a partial apply would be worse than a refusal.
 parseable settings blob or fails with a message naming the field. All arrive as HTTP 200 with
 `success:false`.
 
+### The order checks run in
+
+A body with more than one problem reports only the **first** failure in this order, and
+nothing after it has run. This matters when you are debugging a rejection that names
+something you did not expect:
+
+1. Per-protocol settings shape (defaults filled, then `ValidateProtocolSettings`)
+2. Client emails trimmed
+3. `validateInboundConfig`: traffic multiplier, speed limits, IP limit and strategy, the
+   **certificate requirement** for openvpn / sstp / ikev2, and the port range
+4. `CheckSharedDaemonConflicts`: the panel-wide l2tp and ikev2 values (section 13)
+5. Port already in use
+6. Client identity rules (section 12.1)
+7. Duplicate email, panel-wide
+8. Empty client identity for the protocol
+9. Duplicate VPN username, then the anytls password and naive username collisions
+
+The consequence worth internalising: **the certificate, port and shared-daemon checks all
+fire before anything looks at your clients.** Posting a second l2tp inbound with a
+different `ipsecPsk` is refused at step 4, so a client identity problem in the same body is
+never reported at all, and fixing the identity will not make the request succeed. Fix what
+the message actually names, then re-post.
+
+**Expect the error to move as you fix things, and expect that especially from step 1.**
+The settings shape is judged first because it has to be: nothing can validate the clients
+inside a blob it cannot parse, and steps 3 and 6 both unmarshal that same JSON. So a single
+`"mtu": ""` masks all eight later steps, and correcting it can make the very next attempt
+fail somewhere completely different, on a port clash or a duplicate email you were never
+told about. That is the checks running in order rather than a moving target. Re-post until
+it succeeds instead of trying to fix everything the first message implies.
+
 | Message contains | Cause |
 |---|---|
 | `"mtu" must be a number` | A numeric field sent as a string, including `""`. The protocol's own Go struct cannot unmarshal it, and the daemon config writer that hits it has nowhere to report from |
