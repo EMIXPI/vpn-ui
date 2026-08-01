@@ -423,6 +423,7 @@
 "daysAfterFirstUse" = "днів після першого використання"
 "deleteTitle" = "Видалити клієнта"
 "deleteContent" = "Цього клієнта буде видалено з усіх вхідних, які його обслуговують:"
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "Видалити клієнтів"
 "bulkDeleteContent" = "клієнт(ів) буде видалено з усіх вхідних, які їх обслуговують."
 "ipLimit" = "Обмеження IP"

@@ -423,6 +423,7 @@
 "daysAfterFirstUse" = "hari setelah penggunaan pertama"
 "deleteTitle" = "Hapus Klien"
 "deleteContent" = "Klien ini akan dihapus dari setiap inbound yang melayaninya:"
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "Hapus Klien"
 "bulkDeleteContent" = "klien akan dihapus dari setiap inbound yang melayaninya."
 "ipLimit" = "Batas IP"

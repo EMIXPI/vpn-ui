@@ -423,6 +423,7 @@
 "daysAfterFirstUse" = "天（首次使用後）"
 "deleteTitle" = "刪除客戶端"
 "deleteContent" = "此客戶端將從所有為其提供服務的入站中刪除："
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "刪除客戶端"
 "bulkDeleteContent" = "個客戶端將從所有為其提供服務的入站中刪除。"
 "ipLimit" = "IP 限制"

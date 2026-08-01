@@ -423,6 +423,7 @@
 "daysAfterFirstUse" = "日 (初回使用後)"
 "deleteTitle" = "クライアントを削除"
 "deleteContent" = "このクライアントは、提供中のすべてのインバウンドから削除されます:"
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "クライアントを削除"
 "bulkDeleteContent" = "件のクライアントを、提供中のすべてのインバウンドから削除します。"
 "ipLimit" = "IP制限"

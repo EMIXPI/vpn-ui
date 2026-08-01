@@ -423,6 +423,7 @@
 "daysAfterFirstUse" = "gün (ilk kullanımdan sonra)"
 "deleteTitle" = "Müşteriyi Sil"
 "deleteContent" = "Bu müşteri, kendisine hizmet veren tüm gelenlerden silinecek:"
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "Müşterileri Sil"
 "bulkDeleteContent" = "müşteri, kendilerine hizmet veren tüm gelenlerden silinecek."
 "ipLimit" = "IP Limiti"

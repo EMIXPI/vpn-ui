@@ -569,6 +569,7 @@
 "daysAfterFirstUse" = "days after first use"
 "deleteTitle" = "Delete Client"
 "deleteContent" = "This client will be deleted from every inbound serving it:"
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "Delete Clients"
 "bulkDeleteContent" = "clients will be deleted from every inbound serving them."
 "ipLimit" = "IP Limit"

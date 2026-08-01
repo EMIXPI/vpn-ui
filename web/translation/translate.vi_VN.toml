@@ -423,6 +423,7 @@
 "daysAfterFirstUse" = "ngày sau lần dùng đầu tiên"
 "deleteTitle" = "Xóa người dùng"
 "deleteContent" = "Người dùng này sẽ bị xóa khỏi mọi đầu vào đang phục vụ họ:"
+"partialDeleteTitle" = "Some inbounds still hold this client"
 "bulkDeleteTitle" = "Xóa người dùng"
 "bulkDeleteContent" = "người dùng sẽ bị xóa khỏi mọi đầu vào đang phục vụ họ."
 "ipLimit" = "Giới hạn IP"

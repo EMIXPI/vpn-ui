@@ -221,15 +221,36 @@
           okText: '{{ i18n "delete" }}',
           cancelText: '{{ i18n "cancel" }}',
           okType: 'danger',
-          onOk: async () => { await this.deleteAccount(row); await this.loadClients(); },
+          onOk: async () => {
+            const stuck = await this.deleteAccount(row);
+            await this.loadClients();
+            this.reportStuck(row.email, stuck);
+          },
         });
       },
       // Removed from EVERY inbound serving it. Deleting it from one and leaving the
-      // rest is a working account nobody is billed for.
+      // rest is a working account nobody is billed for, so a partial result has to
+      // be reported rather than left looking like success.
+      //
+      // The panel refuses to remove the LAST client of an inbound ("no client
+      // remained in Inbound"), which is pre-existing behaviour and is exactly when
+      // this bites: an account that is the only client of one of its inbounds is
+      // removed from the others and stays on that one.
       async deleteAccount(row) {
+        const stuck = [];
         for (const m of (row.memberships || [])) {
-          await HttpUtil.post(`/panel/api/inbounds/${m.inboundId}/delClientByEmail/${encodeURIComponent(row.email)}`);
+          const msg = await HttpUtil.post(
+            `/panel/api/inbounds/${m.inboundId}/delClientByEmail/${encodeURIComponent(row.email)}`);
+          if (!msg || !msg.success) stuck.push(m.remark || (m.protocol + ':' + m.port));
         }
+        return stuck;
+      },
+      reportStuck(email, stuck) {
+        if (!stuck.length) return;
+        this.$error({
+          title: '{{ i18n "pages.clients.partialDeleteTitle" }}',
+          content: email + ': ' + stuck.join(', '),
+        });
       },
 
       selectedRows() { return this.clients.filter(c => this.selectedEmails.includes(c.email)); },
@@ -250,8 +271,13 @@
           okType: 'danger',
           onOk: async () => {
             this.spinning = true;
-            for (const row of rows) await this.deleteAccount(row);
+            const failures = [];
+            for (const row of rows) {
+              const stuck = await this.deleteAccount(row);
+              if (stuck.length) failures.push(row.email + ' (' + stuck.join(', ') + ')');
+            }
             this.spinning = false;
+            if (failures.length) this.reportStuck('', failures);
             this.selectedEmails = [];
             await this.loadClients();
           },
