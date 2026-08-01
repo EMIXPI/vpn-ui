@@ -179,11 +179,19 @@ ever used **Copy Clients**, you have been exposed to them.
   `AddInboundClient` and `UpdateInboundClient`. Each is separately reachable from
   the API, so any one left out would be a hole the whole class walks through.
 
-  **The upgrade itself cannot strand anyone.** The migration does not apply these
-  checks, so an account that predates them keeps working, and the delete paths do
-  not apply them either, so it stays removable. The one consequence is that
-  *editing* such an account requires fixing the offending value first; the error
-  names the field and the reason.
+  **The upgrade itself cannot strand anyone, and neither can a legacy account.**
+  Only entries that actually CHANGED are held to the rules. The whole-inbound
+  save posts every client on the inbound, so without that exemption a single
+  account created years ago with a space in its username would fail validation on
+  every later save, and the operator could not change the inbound's DNS, rename
+  it, or add an unrelated account until they first fixed that one row. On a panel
+  with hundreds of sold accounts that would be an upgrade that bricks an inbound.
+
+  So: a pre-existing bad value keeps working, stays deletable, and can still have
+  its quota or expiry edited. What it cannot do is be edited into a *different*
+  bad value, because the exemption is on the exact (email, subId, username)
+  triple: touch any part of it and the whole triple is new and is held to the
+  current rules. Creating a bad value is refused outright.
 
 ---
 

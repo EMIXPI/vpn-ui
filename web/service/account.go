@@ -159,8 +159,44 @@ func ValidateVpnUsername(username string) error {
 // protocols store a uuid or a password there, so applying the filename and
 // whitespace rules to those would reject values that are correct.
 func validateClientIdentities(protocol model.Protocol, clients []model.Client) error {
+	return validateChangedClientIdentities(protocol, clients, nil)
+}
+
+// clientIdentityTuple is the exact triple these rules judge. Two clients with the
+// same tuple are indistinguishable to every check below.
+func clientIdentityTuple(c *model.Client) string {
+	return c.Email + "\x00" + c.SubID + "\x00" + c.ID
+}
+
+// validateChangedClientIdentities is validateClientIdentities with an exemption
+// for entries that are byte-identical to one already stored.
+//
+// This is what makes the rules safe to switch on over live data, and it is the
+// difference between "enforced on writes" and "enforced retroactively".
+//
+// The whole-inbound save posts EVERY client on the inbound, not just the edited
+// one. Without the exemption, a single account created years ago with a space in
+// its VPN username would fail validation on every subsequent save, so the
+// operator could not change the inbound's DNS, rename it, or add an unrelated
+// account until they first went and fixed that one row. On a panel with hundreds
+// of sold accounts that is an upgrade that bricks an inbound, which is a worse
+// outcome than the hole the rules close.
+//
+// Exempting on the exact tuple rather than per field is deliberate: the moment
+// any part of an account's identity is touched, the whole tuple is new and is
+// held to the current rules. So a bad value can be kept but never edited into a
+// different bad value, and it still cannot be created.
+func validateChangedClientIdentities(protocol model.Protocol, clients []model.Client, stored []model.Client) error {
+	unchanged := make(map[string]struct{}, len(stored))
+	for i := range stored {
+		unchanged[clientIdentityTuple(&stored[i])] = struct{}{}
+	}
+
 	for i := range clients {
 		client := &clients[i]
+		if _, exempt := unchanged[clientIdentityTuple(client)]; exempt {
+			continue
+		}
 		if err := ValidateClientEmail(client.Email); err != nil {
 			return err
 		}

@@ -777,6 +777,13 @@ Client entry: the shared base plus
 | `method` | string | `""` (inherit the inbound's) |
 | `password` | string | a random password |
 
+The per-client `method` is Shadowsocks multi-user's per-account cipher. It round-trips on
+every write path as of `f350d437`, which added `Method` to `model.Client`. On an older
+binary `/add` dropped it (the account silently collapsed onto the inbound's cipher and
+could not connect with the one it was handed) while `/addClient` kept it, so if you are
+driving a panel you have not upgraded, set it through `/addClient` rather than in the
+`/add` body.
+
 Identity: **`email`**. Shadowsocks is the only protocol whose identity field is literally
 `email`. wg-c, awg, gre and mtproto also address an account by its email, but they do it
 through an `id` field that is required to hold a copy of it, so for those the field name
@@ -796,9 +803,8 @@ curl -sS -b "$JAR" -X POST "$BASE/panel/api/inbounds/add" \
   --data-urlencode 'settings={"method":"2022-blake3-aes-256-gcm","password":"REPLACE_32_BYTE_BASE64","network":"tcp,udp","ivCheck":false,"clients":[{"method":"","password":"REPLACE_32_BYTE_BASE64","email":"dave","enable":true,"limitIp":0,"totalGB":0,"expiryTime":0,"tgId":0,"subId":"davesub","comment":"","reset":0}]}'
 ```
 
-A per-client `method` sent to **`/add`** is silently dropped; see section 14.3. Set it
-through `/addClient` or `/updateClient/:clientId` instead, or leave it empty and let the
-account inherit the inbound's.
+Leaving the per-client `method` empty makes the account inherit the inbound's, which is
+what the panel's own form produces.
 
 ### 7.8 hysteria
 
@@ -1203,6 +1209,49 @@ parseable settings blob or fails with a message naming the field. All arrive as 
 | `OpenVPN certificate is required` | Also `SSTP` and `IKEv2` variants |
 | `Duplicate email: ...` | Emails are the panel's global account identity, unique across every inbound |
 | `Port already exists` | Another inbound holds it |
+| `Client email ... contains a control character or '>'` | See the identity rules below |
+| `Subscription id ... cannot contain / \ ? # or %` | See the identity rules below |
+| `VPN username ... cannot contain a path separator` | See the identity rules below |
+
+### 12.1 Client identity rules
+
+Three fields on a client entry are checked on write, because each one is spliced into
+something that has no escaping and no way to report a problem later. Enforced since
+`f350d437`; on an older binary these functions existed but nothing called them, so
+anything below got through.
+
+| Field | Rejected | Why |
+|---|---|---|
+| `email` | empty; leading or trailing whitespace; any control character; `>` | It is the global account identity, and Xray's counter is named `user>>><email>>>>traffic`, so a `>` misattributes traffic between accounts |
+| `subId` | leading or trailing whitespace; any control character; `/` `\` `?` `#` `%`; the literal `.` or `..` | It is used directly as the `/sub/<subId>` URL path component, so an escaped value would no longer match the stored id |
+| `id` (the VPN username) | empty is fine; otherwise leading or trailing whitespace, control characters, `>`, spaces, tabs, `/`, `\`, and the literal `.` or `..` | The credential files are whitespace-delimited, and on openvpn the value becomes a filename under the per-inbound client-config-dir |
+
+The username rule applies only to the protocols that actually key on it: **l2tp, pptp,
+openvpn, openconnect, sstp, ikev2 and ssh**. It is deliberately not applied to wg-c, awg,
+gre or mtproto (whose `id` holds a copy of the email, which nothing reads as a login) nor
+to the Xray-native protocols (whose `id` holds a uuid or a password), because the filename
+and whitespace rules would reject values that are correct there.
+
+Checked on all four write paths: `/add`, `/update/:id`, `/addClient` and
+`/updateClient/:clientId`. On the two client paths the protocol is taken from the
+**stored** inbound rather than the request body, since those bodies carry only `id` and
+`settings` and a body-derived protocol would skip the username rules for exactly the
+protocols that need them.
+
+**Not** checked on the delete paths and **not** applied by the accounts migration, so an
+account created before these rules keeps working and stays deletable.
+
+**Unchanged entries are exempt.** `/update/:id` posts every client on the inbound, not
+just the edited one, so validating all of them would let one account created years ago
+block every later edit to that inbound (its DNS, its remark, an unrelated new account)
+until someone fixed that row. Instead each posted entry is compared against the stored
+list and skipped when its identity triple (`email`, `subId`, `id`) is byte-identical to
+one already there.
+
+The exemption is on the whole triple rather than per field, which is what keeps it from
+becoming a loophole: touch any part of an account's identity and the tuple is new and
+held to the current rules. A pre-existing bad value can be carried forward, but never
+edited into a different bad value, and never created.
 
 A validation failure on `/add` writes nothing.
 
@@ -1213,6 +1262,13 @@ A validation failure on `/add` writes nothing.
 - **Whole-inbound update does not sync `client_traffics`.** An expiry or quota set by
   `/update/:id` never auto-disables the account. Use the client endpoints for per-account
   changes.
+- **An account that predates the identity rules can be kept but not edited.** The rules in
+  section 12.1 exempt any client entry that is byte-identical to one already stored, so a
+  legacy account with (say) a space in its VPN username keeps working, stays deletable,
+  and does not block edits to anything else on its inbound. The moment you change any part
+  of its identity triple (`email`, `subId`, `id`) the entry is new and is held to the
+  current rules, so a bad value can be carried forward but never edited into a different
+  bad value, and never created.
 - **`inbounds/list` is a GET, not a POST.** So are `/get/:id`,
   `/getClientTraffics/:email`, `/getClientTrafficsById/:id`, `/resellerBalance`,
   `/:id/ovpn/:proto` and all four `*-configs` routes. Meanwhile `/onlines` and
@@ -1245,12 +1301,17 @@ A validation failure on `/add` writes nothing.
 The Go table in `web/service/protocoldefaults.go` was ported from the JS classes in
 `web/assets/js/model/inbound.js`, key for key. It matches them, with the exceptions below.
 **The Go value is what gets stored**, because `FillSettingsDefaults` runs on the way in.
-Each of these is a real difference worth knowing about, not a documentation nit.
 
 Verified field by field against both files: l2tp, pptp, openvpn, openconnect, sstp, ikev2,
 wg-c, awg, gre, mtproto, ssh, anytls, tuic and naive all agree on every key and every
 default, except as listed here. The openvpn `ciphers` list and the anytls
 `paddingScheme` list are byte-identical in both.
+
+Everything in 14.1, 14.2 and 14.4 to 14.6 is a live constructor-versus-`fromJson` split
+that you can work around by sending the key explicitly. 14.3 records two entries that were
+real bugs and have since been fixed, kept because the behaviour differs across binaries.
+14.7 and 14.8 are not divergences at all: they are two things that look like one when you
+diff the Go against the JS, listed so you do not go hunting.
 
 ### 14.1 openvpn `separatePorts`: constructor `false`, `fromJson` `true`
 
@@ -1269,42 +1330,35 @@ Same split. Go uses **`0`** (no limit), matching the constructor. The `fromJson`
 1 exists so inbounds stored before the field existed resolve the way `effectiveSshK(nil)`
 resolves them. For a new inbound created over the API, 0 is what you get.
 
-### 14.3 A per-client `method` is dropped on the `/add` path (shadowsocks only)
+### 14.3 Two entries that used to live here are now fixed
 
-`AddInbound` re-marshals `settings.clients` through `[]model.Client`, and `model.Client`
-has no `method` field. So a shadowsocks inbound created in one `/add` call with per-client
-`method` values loses them; only the inbound-level `method` survives. `/addClient` and
-`/updateClient/:clientId` splice the raw client map instead and are unaffected, as is
-editing an existing inbound.
+Both were real bugs rather than model divergences, and both were closed in `f350d437`.
+They are kept named here because the behaviour differs across binaries, and a script
+written against an older panel may still be working around them.
 
-This is the same class of bug that `Username`, `Slot`, `Secret`, the MTProto mode flags,
-`Peers` and `Devices` were each added to `model.Client` to close. `method` is the one
-still outstanding.
+**A per-client `method` was dropped on `/add` (shadowsocks).** `AddInbound` re-marshals
+`settings.clients` through `[]model.Client`, which had no `method` field, so a shadowsocks
+inbound created in one `/add` call lost every per-account cipher and collapsed onto the
+inbound's. The same account created through `/addClient` worked, because that path splices
+the raw client map, which is why it presented as protocol flakiness rather than as a
+path-specific bug. `model.Client.Method` now exists (`omitempty`), so the field round-trips
+on every path. Same class as the `Username`, `Slot`, `Secret`, MTProto mode flag, `Peers`
+and `Devices` fields added before it.
 
-### 14.4 The three identity validators are not wired into the write path
+**The three identity validators were never called.** `ValidateClientEmail`,
+`ValidateClientSubID` and `ValidateVpnUsername` existed with tests, and both a code
+comment and `accounts-upgrade-guide.md` claimed they were enforced, but no write path
+invoked them: pure functions validate nothing until something calls them. They are now
+wired into all four write paths, with the protocol taken from the stored inbound on the
+two client paths. The rules themselves, and the deliberate carve-out for deletes and for
+the migration, are documented as live behaviour in **section 12.1**, not here.
 
-`ValidateClientEmail`, `ValidateClientSubID` and `ValidateVpnUsername` exist in
-`web/service/account.go` and have tests, but at the current HEAD **nothing calls them**:
-the only reference outside their own definitions and their tests is a comment in
-`database/model/model.go`. `accounts-upgrade-guide.md` section 4 says these are "now
-enforced on writes"; today they are not.
+If you are driving a panel older than `f350d437`, neither of the above holds: send a
+shadowsocks per-client `method` through `/addClient` rather than `/add`, and treat the
+section 12.1 rules as your own responsibility, since nothing server-side will enforce
+them.
 
-For an API caller that means, right now:
-
-- a `subId` containing `/`, `\`, `?`, `#` or `%` is accepted, and it is used directly as
-  the `/sub/<subId>` URL path component,
-- a VPN username containing a space, a tab or a path separator is accepted, and it is
-  written into whitespace-delimited credential files and, for openvpn, used as a filename
-  under the per-inbound CCD directory,
-- an email containing a control character or `>` is accepted, and Xray's counter is named
-  `user>>><email>>>>traffic`.
-
-What IS still enforced: emails are trimmed (`normalizeClientEmails`) before anything
-parses the settings, and they are checked for panel-wide uniqueness on create and on
-rename. Treat the three rules above as your own responsibility until the write path
-enforces them.
-
-### 14.5 The JS constructors seed one account, the Go defaults seed none
+### 14.4 The JS constructors seed one account, the Go defaults seed none
 
 `Inbound.L2tpSettings` and every sibling start with one client in the array, so the
 panel's Add form always shows an account. `DefaultSettingsFor` deliberately returns
@@ -1312,7 +1366,7 @@ panel's Add form always shows an account. `DefaultSettingsFor` deliberately retu
 server-side would be one the caller never asked for and never sees the password of. Post
 no `clients` and you get an inbound with none.
 
-### 14.6 The IPsec pre-shared keys are minted by only one of the two JS entry points
+### 14.5 The IPsec pre-shared keys are minted by only one of the two JS entry points
 
 For l2tp (`randomSeq(16)`) and gre (`randomSeq(24)`) the JS **constructor** mints a PSK
 while `fromJson` does not: l2tp passes an absent `ipsecPsk` through as `undefined`, gre
@@ -1320,9 +1374,42 @@ defaults it to `""`. Go mints one, matching the constructor, so a new inbound cr
 the API always has a usable secret. GRE mints it even with `ipsecEnable` off, exactly as
 the form does, so turning IPsec on later does not also require inventing a secret.
 
-### 14.7 anytls `paddingScheme` seeds only on a new inbound
+### 14.6 anytls `paddingScheme` seeds only on a new inbound
 
 Constructor seeds the 9-line default; `fromJson` reads an absent key as `[]` so an
 operator who deliberately cleared the field sees it stay cleared. Go seeds the default,
 matching the constructor. The practical rule for an API caller is in section 7.1: omit the
-key for the default, send `[]` for no padding at all.
+key for the default, send `[]` for no padding at all. Note that `[]` survives, because
+`FillSettingsDefaults` only adds keys that are **absent**; a present empty array is a
+choice and is left alone.
+
+### 14.7 Key order differs, and that is expected
+
+`DefaultSettingsFor` and `FillSettingsDefaults` build a `map[string]any` and marshal it,
+and Go sorts map keys, so the stored settings JSON comes out **alphabetical**. The JS
+`toJson()` emits in the order its object literal is written. The ordering in
+`protocoldefaults.go` follows the JS so the table reads as a diff against the spec, but it
+does not survive into storage.
+
+Nothing depends on order, and `AddInbound` already re-marshals a UI-created inbound the
+same sorted way, so a panel-created and an API-created inbound of the same protocol agree.
+It is listed here only because anyone diffing the two texts sees it immediately and
+reasonably wonders whether something was rewritten.
+
+### 14.8 Three settings keys exist on the Go side with no place in the defaults table
+
+`localIp` and the legacy singular `ipRange` are real keys the server reads but that
+`protocolSettingDefaults` deliberately does not list, so they will not appear in any
+section 6 table. **Do not post either one.**
+
+| Key | Where | What it is |
+|---|---|---|
+| `localIp` | `l2tpSettings`, `pptpSettings`, `sstpSettings` (Go structs only) | The PPP gateway address, derived server-side as the first range's `.1`. It has no JS counterpart at all and nothing reads a posted value as authoritative |
+| `ipRange` | read generically by `decodeRanges` in `vpnrange.go` | The legacy single-range field, kept as a **read-only fallback**: consulted only when `ipRanges` is absent or contains nothing but blanks |
+
+One correction worth making explicitly, because it is easy to get backwards: `ipRange` is
+**not** Go-only and **not** limited to the three PPP-family structs. `decodeRanges` reads
+it out of the raw settings map for any protocol that goes through `NormalizeVpnRanges`,
+and the browser reads it too, on l2tp and pptp, whose `fromJson` seeds `ipRanges` from it
+when the list is empty. It is a compatibility path on both sides, not a server-side
+oddity. `localIp` is the one that is genuinely Go-only.

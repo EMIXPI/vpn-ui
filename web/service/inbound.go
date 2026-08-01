@@ -1268,7 +1268,20 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err != nil {
 		return inbound, false, err
 	}
-	if err := validateClientIdentities(inbound.Protocol, updatedClients); err != nil {
+	// Only entries that actually CHANGED are held to the identity rules. This save
+	// posts every client on the inbound, so validating all of them would let one
+	// account created before these rules existed block every later edit to the
+	// inbound (its DNS, its remark, an unrelated new account) until someone went and
+	// fixed that row. See validateChangedClientIdentities.
+	if storedInbound, gerr := s.GetInbound(inbound.Id); gerr == nil && storedInbound != nil {
+		storedClients, cerr := s.GetClients(storedInbound)
+		if cerr != nil {
+			return inbound, false, cerr
+		}
+		if err := validateChangedClientIdentities(inbound.Protocol, updatedClients, storedClients); err != nil {
+			return inbound, false, err
+		}
+	} else if err := validateClientIdentities(inbound.Protocol, updatedClients); err != nil {
 		return inbound, false, err
 	}
 
@@ -2178,8 +2191,12 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 
-	// Validated against the STORED protocol, for the same reason as the add path.
-	if err := validateClientIdentities(oldInbound.Protocol, clients); err != nil {
+	// Validated against the STORED protocol, for the same reason as the add path,
+	// and exempting an identity that is unchanged: editing only the QUOTA of an
+	// account created before these rules existed has to keep working, or the rules
+	// would be retroactive in practice. Touching any part of the identity makes the
+	// tuple new and holds it to the current rules.
+	if err := validateChangedClientIdentities(oldInbound.Protocol, clients, oldClients); err != nil {
 		return false, err
 	}
 

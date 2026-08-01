@@ -136,3 +136,55 @@ func TestAddInboundKeepsPerClientShadowsocksMethod(t *testing.T) {
 			got, "chacha20-ietf-poly1305")
 	}
 }
+
+// The rules must be enforced on WRITES, not retroactively. A whole-inbound save
+// posts EVERY client, so validating all of them would let one account created
+// before these rules existed block every later edit to that inbound: its DNS, its
+// remark, an unrelated new account. On a panel with hundreds of sold accounts
+// that is an upgrade that bricks an inbound, which is worse than the hole.
+func TestLegacyBadIdentityDoesNotBlockUnrelatedEdits(t *testing.T) {
+	svc := newInboundDB(t)
+	// Seeded directly, the way a row written before the rules existed looks: the
+	// VPN username carries a space, which the service layer would now refuse.
+	host := seedInboundWithClients(t, model.L2TP, 26501, []map[string]any{
+		{"id": "legacy user", "password": "pw", "email": "legacy", "enable": false, "slot": float64(0)},
+	})
+
+	// An ordinary edit that does not touch that account at all.
+	stored, err := svc.GetInbound(host.Id)
+	if err != nil {
+		t.Fatalf("GetInbound: %v", err)
+	}
+	stored.Remark = "renamed"
+	if _, _, err := svc.UpdateInbound(stored); err != nil {
+		t.Fatalf("a legacy account blocked an unrelated edit to its inbound: %v", err)
+	}
+
+	// And adding a well-formed account alongside it must work too.
+	stored, _ = svc.GetInbound(host.Id)
+	stored.Settings = `{"clients":[
+		{"id":"legacy user","password":"pw","email":"legacy","enable":false,"slot":0},
+		{"id":"newguy","password":"pw2","email":"newguy","enable":false,"slot":1}
+	]}`
+	if _, _, err := svc.UpdateInbound(stored); err != nil {
+		t.Fatalf("could not add a valid account beside a legacy one: %v", err)
+	}
+}
+
+// The exemption is on the exact tuple, so a bad value can be KEPT but never
+// edited into a different bad value.
+func TestLegacyBadIdentityCannotBeEditedIntoAnotherBadValue(t *testing.T) {
+	svc := newInboundDB(t)
+	host := seedInboundWithClients(t, model.L2TP, 26601, []map[string]any{
+		{"id": "legacy user", "password": "pw", "email": "legacy", "enable": false, "slot": float64(0)},
+	})
+
+	stored, err := svc.GetInbound(host.Id)
+	if err != nil {
+		t.Fatalf("GetInbound: %v", err)
+	}
+	stored.Settings = `{"clients":[{"id":"still bad","password":"pw","email":"legacy","enable":false,"slot":0}]}`
+	if _, _, err := svc.UpdateInbound(stored); err == nil {
+		t.Fatal("a legacy bad username was edited into a different bad username")
+	}
+}
