@@ -609,9 +609,15 @@ func TestValidateProtocolSettings(t *testing.T) {
 		{"user limit 0 is no limit", model.WGC, `{"userLimit":0}`, ""},
 		{"strategy typo", model.SSTP, `{"userLimitStrategy":"Accept"}`, `"userLimitStrategy"`},
 
-		{"ip range without a prefix", model.OPENCONNECT, `{"ipRanges":["10.4.0.0"]}`, `"ipRanges"`},
-		{"ip range v6", model.OPENCONNECT, `{"ipRanges":["fd00::/64"]}`, `IPv4`},
-		{"ip range blank row", model.OPENCONNECT, `{"ipRanges":["","10.4.0.0/24"]}`, ""},
+		// The pool format is the allocator's own "A.B.C.s-A.B.C.e", NOT a CIDR, and
+		// parseRange drops anything else without a word.
+		{"ip range as a CIDR", model.OPENCONNECT, `{"ipRanges":["10.4.0.0/24"]}`, `"ipRanges"`},
+		{"ip range spanning two /24s", model.OPENCONNECT, `{"ipRanges":["10.4.0.2-10.4.1.254"]}`, `"ipRanges"`},
+		{"ip range backwards", model.OPENCONNECT, `{"ipRanges":["10.4.0.200-10.4.0.10"]}`, `"ipRanges"`},
+		{"ip range v6", model.OPENCONNECT, `{"ipRanges":["fd00::1-fd00::5"]}`, `"ipRanges"`},
+		{"ip range as the allocator writes it", model.OPENCONNECT, `{"ipRanges":["10.4.0.2-10.4.0.254"]}`, ""},
+		{"ip range last-octet shorthand", model.OPENCONNECT, `{"ipRanges":["10.4.0.2-254"]}`, ""},
+		{"ip range blank row", model.OPENCONNECT, `{"ipRanges":["","10.4.0.2-10.4.0.254"]}`, ""},
 
 		{"l2tp ipsec without a psk", model.L2TP, `{"ipsecEnable":true,"ipsecPsk":""}`, `"ipsecPsk" is required`},
 		{"gre ipsec without a psk", model.GRE, `{"ipsecEnable":true,"ipsecPsk":"  "}`, `"ipsecPsk" is required`},
@@ -656,6 +662,48 @@ func TestValidateProtocolSettings(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error does not name the field\n got: %v\nwant substring: %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Validation that is stricter than reality is a regression, not a safety net: it runs on
+// the UI's own requests and on the E2E harness's. These blobs are copied from
+// test_unit/harness/server_setup.py, the panel's existing real API client, and are also
+// the partial-body shape this whole feature is meant to serve. Every one must pass.
+func TestValidateProtocolSettingsAcceptsTheExistingApiClientsBodies(t *testing.T) {
+	bodies := map[model.Protocol]string{
+		model.L2TP: `{"ipsecEnable":true,"ipsecPsk":"e2e-psk","allowRaw":true,
+			"clientToClient":true,"crossInbound":true,
+			"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1400,"clients":[]}`,
+		model.PPTP: `{"clientToClient":true,"crossInbound":true,
+			"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1400,"clients":[]}`,
+		model.OPENVPN: `{"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1500,
+			"cipherMode":"all","ciphers":["AES-256-GCM","AES-128-GCM","CHACHA20-POLY1305","AES-256-CBC"],
+			"clientToClient":true,"crossInbound":true,"clients":[]}`,
+		model.OPENCONNECT: `{"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1420,"tlsUseFile":false,
+			"certificate":"-----BEGIN CERTIFICATE-----","key":"-----BEGIN PRIVATE KEY-----",
+			"clientToClient":true,"crossInbound":true,"clients":[]}`,
+		model.SSTP: `{"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1400,"tlsUseFile":false,
+			"certificate":"-----BEGIN CERTIFICATE-----","key":"-----BEGIN PRIVATE KEY-----",
+			"clientToClient":true,"crossInbound":true,"clients":[]}`,
+		model.IKEV2: `{"dns1":"1.1.1.1","dns2":"8.8.8.8","authMode":"eap-mschapv2","serverAddr":"",
+			"tlsUseFile":false,"certificate":"-----BEGIN CERTIFICATE-----","key":"k","caCert":"ca",
+			"clientToClient":true,"crossInbound":true,"clients":[]}`,
+		model.WGC: `{"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1420,"pskEnable":false,
+			"clientToClient":true,"crossInbound":true,"clients":[]}`,
+		model.AWG: `{"dns1":"1.1.1.1","dns2":"8.8.8.8","mtu":1420,"pskEnable":false,
+			"clientToClient":true,"crossInbound":true,"clients":[]}`,
+		model.GRE: `{"mtu":0,"ttl":64,"ipsecEnable":false,"ipsecPsk":"gre-psk","allowRaw":true,
+			"fouEnable":false,"fouPort":15547,"clientToClient":true,"crossInbound":true,
+			"userLimit":1,"clients":[]}`,
+		model.SSH:     `{"userLimit":1,"userLimitStrategy":"reject","clients":[]}`,
+		model.MTPROTO: `{"clients":[]}`,
+	}
+	for protocol, settings := range bodies {
+		t.Run(string(protocol), func(t *testing.T) {
+			if err := ValidateProtocolSettings(protocol, settings); err != nil {
+				t.Fatalf("rejected a body an existing API client sends today: %v", err)
 			}
 		})
 	}
@@ -726,6 +774,55 @@ func TestAddInboundFillsDefaultsForAMinimalBody(t *testing.T) {
 	}
 }
 
+// The headline case, run in the controller's own order: NormalizeVpnRanges (which the
+// add handler calls before AddInbound, and which parses the settings itself) followed by
+// AddInbound, with NO settings at all. The defaults land after the range assignment, so
+// neither step can undo the other.
+func TestAddInboundFromAnEmptyBody(t *testing.T) {
+	for _, tc := range []struct {
+		protocol model.Protocol
+		port     int
+		wantDns1 string
+		wantMtu  int
+	}{
+		{model.L2TP, 11201, "8.8.8.8", 1400},
+		{model.WGC, 11202, "1.1.1.1", 1420},
+	} {
+		t.Run(string(tc.protocol), func(t *testing.T) {
+			s := newInboundDB(t)
+
+			inbound := &model.Inbound{
+				UserId: 1, Tag: fmt.Sprintf("inbound-%d", tc.port), Port: tc.port,
+				Protocol: tc.protocol, Enable: true,
+			}
+			if err := NormalizeVpnRanges(inbound, 0); err != nil {
+				t.Fatalf("NormalizeVpnRanges: %v", err)
+			}
+			added, _, err := s.AddInbound(inbound)
+			if err != nil {
+				t.Fatalf("AddInbound: %v", err)
+			}
+
+			got := decodeSettingsMap(t, readStoredSettings(t, added.Id))
+			if got["dns1"] != tc.wantDns1 {
+				t.Errorf("dns1 = %#v, want %q", got["dns1"], tc.wantDns1)
+			}
+			if got["mtu"] != float64(tc.wantMtu) {
+				t.Errorf("mtu = %#v, want %d", got["mtu"], tc.wantMtu)
+			}
+			if got["userLimitStrategy"] != "accept" {
+				t.Errorf("userLimitStrategy = %#v", got["userLimitStrategy"])
+			}
+			// The pool NormalizeVpnRanges assigned has to survive the defaults pass:
+			// overwriting it with the empty list would hand the inbound no addresses.
+			ranges, _ := got["ipRanges"].([]any)
+			if len(ranges) == 0 {
+				t.Errorf("the assigned address pool was overwritten: %#v", got["ipRanges"])
+			}
+		})
+	}
+}
+
 // A settings blob the protocol's own struct could never parse used to save cleanly and
 // break at the daemon, which reports nowhere the operator can see.
 func TestAddInboundRejectsUnusableSettings(t *testing.T) {
@@ -769,28 +866,28 @@ func TestAddInboundKeepsWireguardDeviceKeys(t *testing.T) {
 				t.Fatalf("AddInbound: %v", err)
 			}
 
-			var stored struct {
-				Clients []model.Client `json:"clients"`
+			// Read the STORED JSON as a raw map, the way wgc.go/awg.go read it, rather
+			// than back through model.Client: parsing it with the very struct whose
+			// missing field caused the bug would hide the bug.
+			stored := decodeSettingsMap(t, readStoredSettings(t, added.Id))
+			list, _ := stored["clients"].([]any)
+			if len(list) != 1 {
+				t.Fatalf("want 1 stored client, got %#v", stored["clients"])
 			}
-			if err := json.Unmarshal([]byte(readStoredSettings(t, added.Id)), &stored); err != nil {
-				t.Fatalf("unmarshal stored settings: %v", err)
+			got, _ := list[0].(map[string]any)
+			for key, want := range map[string]any{
+				"privKey": "device-0-priv", "pubKey": "device-0-pub", "psk": "device-0-psk",
+			} {
+				if got[key] != want {
+					t.Errorf("the legacy keypair mirror was dropped: %q = %#v, want %q", key, got[key], want)
+				}
 			}
-			if len(stored.Clients) != 1 {
-				t.Fatalf("want 1 stored client, got %d", len(stored.Clients))
+			want := []any{
+				map[string]any{"privKey": "device-0-priv", "pubKey": "device-0-pub", "psk": "device-0-psk"},
+				map[string]any{"privKey": "device-1-priv", "pubKey": "device-1-pub", "psk": "device-1-psk"},
 			}
-			got := stored.Clients[0]
-			if got.PrivKey != "device-0-priv" || got.PubKey != "device-0-pub" || got.Psk != "device-0-psk" {
-				t.Errorf("the legacy keypair mirror was dropped: priv=%q pub=%q psk=%q", got.PrivKey, got.PubKey, got.Psk)
-			}
-			if len(got.Devices) != 2 {
-				t.Fatalf("want 2 device slots, got %d: %#v", len(got.Devices), got.Devices)
-			}
-			want := []model.ClientDevice{
-				{PrivKey: "device-0-priv", PubKey: "device-0-pub", Psk: "device-0-psk"},
-				{PrivKey: "device-1-priv", PubKey: "device-1-pub", Psk: "device-1-psk"},
-			}
-			if !reflect.DeepEqual(got.Devices, want) {
-				t.Errorf("device keys were rewritten\n got: %#v\nwant: %#v", got.Devices, want)
+			if !reflect.DeepEqual(got["devices"], want) {
+				t.Errorf("per-device key material did not survive the add path\n got: %#v\nwant: %#v", got["devices"], want)
 			}
 		})
 	}

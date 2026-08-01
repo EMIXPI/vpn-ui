@@ -56,18 +56,48 @@ func NewSubService(showInfo bool, remarkModel string) *SubService {
 	}
 }
 
-// forResponse returns a copy of the service scoped to ONE subscription response.
+// forResponse returns a service scoped to ONE subscription response.
 //
 // The router builds a single SubService at start-up and every request is served by
 // it, while GetSubs writes the caller's host onto it before generating links: two
 // subscribers fetching at once can already be handed each other's address. This
-// copy closes that for the request-scoped fields, and more importantly keeps the
+// closes that for the request-scoped fields, and more importantly keeps the
 // per-response maps in subScope off the shared instance, where a concurrent write
 // would panic the process rather than merely return the wrong host.
+//
+// The protocol services are rebuilt as zero values rather than copied across, and
+// that is not a shortcut: nothing ever assigns them (NewSubService sets the two
+// display settings and nothing else), so a fresh one is the same object, while
+// WgcService, AwgService and GreService each carry a sync.Mutex that must not be
+// copied at all. If one of them ever does need configuring, it has to be carried
+// here BY POINTER, or the response will quietly render against an unconfigured one.
 func (s *SubService) forResponse() *SubService {
-	scoped := *s
-	scoped.scope = newSubScope()
-	return &scoped
+	return &SubService{
+		address:     s.address,
+		showInfo:    s.showInfo,
+		remarkModel: s.remarkModel,
+		datepicker:  s.datepicker,
+		scope:       newSubScope(),
+	}
+}
+
+// resolveDatepicker returns the calendar the subscriber page renders dates in.
+//
+// It reads the setting rather than trusting s.datepicker alone because the two
+// halves of a page render run on DIFFERENT service instances: the controller calls
+// GetSubs (which works on the per-response copy forResponse returns) and then
+// BuildPageData on the shared one, so a value stashed on the copy is not there to
+// be read back. Answering "gregorian" for a panel configured on the Jalali calendar
+// is a silent wrong answer, not a missing one.
+func (s *SubService) resolveDatepicker() string {
+	if s.datepicker != "" {
+		return s.datepicker
+	}
+	datepicker, err := s.settingService.GetDatepicker()
+	if err != nil || datepicker == "" {
+		return "gregorian"
+	}
+	return datepicker
 }
 
 // resolveTraffic answers with the traffic figures one membership reports, and says
@@ -105,10 +135,7 @@ func (s *SubService) GetSubs(subId string, host string) ([]string, int64, xray.C
 		return nil, 0, traffic, common.NewError("No inbounds found with ", subId)
 	}
 
-	s.datepicker, err = s.settingService.GetDatepicker()
-	if err != nil {
-		s.datepicker = "gregorian"
-	}
+	s.datepicker = s.resolveDatepicker()
 	for _, inbound := range inbounds {
 		clients, err := s.inboundService.GetClients(inbound)
 		if err != nil {
@@ -1442,6 +1469,15 @@ func cloneStringMap(source map[string]string) map[string]string {
 	return cloned
 }
 
+// genRemark composes the node name a client displays: the inbound remark, the
+// email and a per-protocol extra, in the operator's configured order, plus the
+// remaining traffic and days when Show Info is on.
+//
+// Any of the three parts can be empty and the order is configurable (the panel lets
+// the inbound remark be dropped entirely), so the name is NOT guaranteed to
+// distinguish two memberships of one account on its own. That is why every exit
+// runs through subScope.uniqueName rather than the composition trying to be unique
+// by construction.
 func (s *SubService) genRemark(inbound *model.Inbound, email string, extra string) string {
 	separationChar := string(s.remarkModel[0])
 	orderChars := s.remarkModel[1:]
@@ -2306,11 +2342,6 @@ func (s *SubService) BuildPageData(subId string, hostHeader string, traffic xray
 		remained = common.FormatTraffic(left)
 	}
 
-	datepicker := s.datepicker
-	if datepicker == "" {
-		datepicker = "gregorian"
-	}
-
 	return PageData{
 		Host:         hostHeader,
 		BasePath:     basePath,
@@ -2322,7 +2353,7 @@ func (s *SubService) BuildPageData(subId string, hostHeader string, traffic xray
 		Remained:     remained,
 		Expire:       traffic.ExpiryTime / 1000,
 		LastOnline:   lastOnline,
-		Datepicker:   datepicker,
+		Datepicker:   s.resolveDatepicker(),
 		DownloadByte: traffic.Down,
 		UploadByte:   traffic.Up,
 		TotalByte:    traffic.Total,

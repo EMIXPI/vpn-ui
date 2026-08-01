@@ -489,9 +489,11 @@ func checkMTU(m map[string]any) error {
 	return nil
 }
 
-// checkIPRanges refuses an address pool entry that is not an IPv4 CIDR. The allocators
-// (web/service/vpnrange.go) parse these into /24 blocks and hand the addresses to the
-// daemons; an entry they cannot parse is dropped, which silently shrinks the pool.
+// checkIPRanges refuses an address pool entry the allocator cannot read. These are NOT
+// CIDRs: the format is the inclusive "A.B.C.s-A.B.C.e" host range (with an "A.B.C.s-e"
+// last-octet shorthand) that vpnrange.go's parseRange accepts, both ends inside one /24
+// and non-decreasing. parseRange silently DROPS anything else, so a caller who writes
+// the pool as "10.4.0.0/24" gets an inbound with no addresses and no complaint.
 func checkIPRanges(m map[string]any) error {
 	ranges, present, err := optStrings(m, "ipRanges")
 	if err != nil {
@@ -507,12 +509,8 @@ func checkIPRanges(m map[string]any) error {
 		if r == "" {
 			continue
 		}
-		prefix, err := netip.ParsePrefix(r)
-		if err != nil {
-			return common.NewErrorf(`"ipRanges" entry %q is not a CIDR (want e.g. "10.1.0.0/24")`, r)
-		}
-		if !prefix.Addr().Is4() {
-			return common.NewErrorf(`"ipRanges" entry %q must be IPv4: the address pools are IPv4 only`, r)
+		if _, _, ok := parseRange(r); !ok {
+			return common.NewErrorf(`"ipRanges" entry %q is not an address range (want e.g. "10.1.0.2-10.1.0.254", both ends in one /24)`, r)
 		}
 	}
 	return nil

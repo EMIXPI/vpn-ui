@@ -33,10 +33,10 @@ func NewSubClashService(subService *SubService) *SubClashService {
 // start-up and shared across requests, so the per-response scope lives on a copy.
 // It matters more here than anywhere else, because Clash proxies are keyed by name
 // and a duplicate name is not a second server, it is a replacement.
+// Its own service fields are rebuilt as zero values for the same reason as in
+// SubService.forResponse: nothing assigns them, and two of them carry a mutex.
 func (s *SubClashService) forResponse() *SubClashService {
-	scoped := *s
-	scoped.SubService = s.SubService.forResponse()
-	return &scoped
+	return &SubClashService{SubService: s.SubService.forResponse()}
 }
 
 func (s *SubClashService) GetClash(subId string, host string) (string, string, error) {

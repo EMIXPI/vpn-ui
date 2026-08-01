@@ -101,6 +101,16 @@ func (x *XrayAPI) Close() {
 
 // AddInbound adds a new inbound configuration to the Xray core via gRPC.
 func (x *XrayAPI) AddInbound(inbound []byte) error {
+	// Init is allowed to fail (Xray not running, API port 0, dial refused) and
+	// every caller in web/service ignores that error, so this can be reached with
+	// no client at all. Dereferencing a nil *HandlerServiceClient here does not
+	// return an error, it panics, and it panics on the request goroutine: the
+	// whole PANEL process dies. That is reachable in the exact situation an
+	// operator is most likely to be clicking around in, namely a core that
+	// refused its config and is not up. Report it instead.
+	if x.HandlerServiceClient == nil {
+		return fmt.Errorf("xray api is not connected")
+	}
 	client := *x.HandlerServiceClient
 
 	conf := new(conf.InboundDetourConfig)
@@ -123,6 +133,9 @@ func (x *XrayAPI) AddInbound(inbound []byte) error {
 
 // DelInbound removes an inbound configuration from the Xray core by tag.
 func (x *XrayAPI) DelInbound(tag string) error {
+	if x.HandlerServiceClient == nil {
+		return fmt.Errorf("xray api is not connected")
+	}
 	client := *x.HandlerServiceClient
 	_, err := client.RemoveInbound(context.Background(), &command.RemoveInboundRequest{
 		Tag: tag,
@@ -207,6 +220,9 @@ func appendProtoVarint(buf []byte, v uint64) []byte {
 
 // AddUser adds a user to an inbound in the Xray core using the specified protocol and user data.
 func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]any) error {
+	if x.HandlerServiceClient == nil {
+		return fmt.Errorf("xray api is not connected")
+	}
 	userEmail, err := getRequiredUserString(user, "email")
 	if err != nil {
 		return err
@@ -373,6 +389,9 @@ func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]an
 
 // RemoveUser removes a user from an inbound in the Xray core by email.
 func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
+	if x.HandlerServiceClient == nil {
+		return fmt.Errorf("xray api is not connected")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

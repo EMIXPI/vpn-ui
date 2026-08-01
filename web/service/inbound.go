@@ -4814,11 +4814,20 @@ func (s *InboundService) DelInboundClientByEmail(inboundId int, email string) (b
 
 	// remove stats too
 	if len(email) > 0 {
-		traffic, err := s.GetClientTrafficByEmail(email)
-		if err != nil {
+		// Counted directly rather than read through GetClientTrafficByEmail. That one
+		// resolves the account's inbound (to attach a uuid this path never uses) and
+		// reports a MISSING row as a hard error, "Inbound Not Found For Email".
+		//
+		// A missing row is not an error here, it is "no stats to delete", and it is
+		// the ordinary state of the SECOND membership of one account: an account on
+		// N inbounds has ONE traffic row, the first delete takes it, and every
+		// remaining membership then failed outright and could never be removed. That
+		// left a deleted account still serving on every inbound but the first.
+		var stats int64
+		if err := db.Model(xray.ClientTraffic{}).Where("email = ?", email).Count(&stats).Error; err != nil {
 			return false, err
 		}
-		if traffic != nil {
+		if stats > 0 {
 			if err := s.DelClientStat(db, email); err != nil {
 				logger.Error("Delete stats Data Error")
 				return false, err

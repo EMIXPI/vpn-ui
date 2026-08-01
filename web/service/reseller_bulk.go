@@ -270,19 +270,18 @@ func scopeBulkTargets(req *BulkClientUpdateRequest, owned map[string]bool) {
 }
 
 // scopeBulkTargetsToPriced drops every target whose account the pricer passed
-// over, in place, so the applier and the ledger act on the same set.
+// over, in place, so the applier is handed the priced list and not the raw request.
 //
-// bulkPriceables skips a target the applier will not change (a skip toggle, an op
-// that is a no-op for that account) and prices each ACCOUNT once however many
-// memberships the batch names. Both of those are per account; the applier's filters
-// are per membership. An account skipped on the inbound the pricer looked at, but
-// targeted on a second one the request also names, was therefore mutated for free:
-// the applier moved its quota and no charge existed for it.
+// A guard rather than a repair. bulkPriceables runs the applier's own rules over
+// every targeted membership, so an account it prices nothing for is one the applier
+// would skip anyway; what this pins is that the two can never come apart, because
+// they are filtered by different code (one per account, one per membership) and a
+// drift between them is a mutation nobody was charged for.
 //
 // Runs AFTER scopeBulkTargets and can only ever remove more, so it cannot widen
-// what a reseller reaches. The surviving memberships of an account that WAS priced
-// are all kept, because they all have to end up holding the one figure that was
-// priced; ApplyBulkCharges writes it onto them.
+// what a reseller reaches. Every membership of an account that WAS priced is kept:
+// they all have to end up holding the one figure the balance paid for, which
+// ApplyBulkCharges writes onto them.
 func scopeBulkTargetsToPriced(req *BulkClientUpdateRequest, items []bulkPriceable) {
 	priced := make(map[string]bool, len(items))
 	for _, it := range items {
