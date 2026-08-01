@@ -1028,6 +1028,12 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		return inbound, false, err
 	}
 
+	// Reject an identity that cannot safely round-trip through the daemon config
+	// files and the Xray stat names, BEFORE anything is written.
+	if err := validateClientIdentities(inbound.Protocol, clients); err != nil {
+		return inbound, false, err
+	}
+
 	// Nothing to exclude: this inbound has no row yet, so the whole DB is "other".
 	existEmail, err := s.checkEmailsExistExcludingInbound(clients, 0)
 	if err != nil {
@@ -1262,6 +1268,10 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err != nil {
 		return inbound, false, err
 	}
+	if err := validateClientIdentities(inbound.Protocol, updatedClients); err != nil {
+		return inbound, false, err
+	}
+
 	existEmail, err := s.checkEmailsExistExcludingInbound(updatedClients, inbound.Id)
 	if err != nil {
 		return inbound, false, err
@@ -1558,6 +1568,16 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	clients, err := s.GetClients(data)
 	if err != nil {
 		return false, err
+	}
+
+	// Reject an unusable identity before it reaches the settings blob. The protocol
+	// comes from the STORED inbound: the request body carries only id and settings
+	// on this path, so data.Protocol is usually empty and the VPN username rules
+	// would be skipped for exactly the protocols that need them.
+	if target, terr := s.GetInbound(data.Id); terr == nil && target != nil {
+		if err := validateClientIdentities(target.Protocol, clients); err != nil {
+			return false, err
+		}
 	}
 
 	var settings map[string]any
@@ -2155,6 +2175,11 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 
 	oldClients, err := s.GetClients(oldInbound)
 	if err != nil {
+		return false, err
+	}
+
+	// Validated against the STORED protocol, for the same reason as the add path.
+	if err := validateClientIdentities(oldInbound.Protocol, clients); err != nil {
 		return false, err
 	}
 

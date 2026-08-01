@@ -893,6 +893,43 @@ func TestAddInboundKeepsWireguardDeviceKeys(t *testing.T) {
 	}
 }
 
+// Shadowsocks is not one of the 14 protocols this file defaults, but it shares the
+// model.Client normalization on the add path, and its per-account cipher was the last
+// field still missing from that struct. The core reads clients[].method and only falls
+// back to the inbound's when blank (infra/conf/shadowsocks.go), so dropping an explicit
+// one silently re-ciphers the account: on an SS2022 inbound it simply stops
+// authenticating, and nothing is logged.
+func TestAddInboundKeepsShadowsocksPerClientMethod(t *testing.T) {
+	s := newInboundDB(t)
+
+	posted := `{"method":"2022-blake3-aes-256-gcm","password":"inbound-psk","network":"tcp,udp","ivCheck":false,` +
+		`"clients":[{"method":"2022-blake3-chacha20-poly1305","password":"client-psk","email":"erin@example.com","enable":false}]}`
+	added, _, err := s.AddInbound(&model.Inbound{
+		UserId: 1, Tag: "inbound-11301", Port: 11301, Protocol: model.Shadowsocks,
+		Enable: true, Settings: posted,
+	})
+	if err != nil {
+		t.Fatalf("AddInbound: %v", err)
+	}
+
+	// Read the stored JSON as a raw map, the way the core reads it, rather than back
+	// through model.Client: parsing it with the struct whose missing field caused the
+	// bug would hide the bug.
+	stored := decodeSettingsMap(t, readStoredSettings(t, added.Id))
+	list, _ := stored["clients"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("want 1 stored client, got %#v", stored["clients"])
+	}
+	got, _ := list[0].(map[string]any)
+	if got["method"] != "2022-blake3-chacha20-poly1305" {
+		t.Errorf("the per-account cipher did not survive the add path: %#v", got["method"])
+	}
+	// The inbound-level method is not touched by the client normalization at all.
+	if stored["method"] != "2022-blake3-aes-256-gcm" {
+		t.Errorf("the inbound-level method changed: %#v", stored["method"])
+	}
+}
+
 // Adding fields to model.Client must not put a single byte into any other protocol's
 // stored client JSON, which is what the omitempty on each of them buys.
 func TestClientKeyFieldsAreOmittedForOtherProtocols(t *testing.T) {
@@ -900,7 +937,7 @@ func TestClientKeyFieldsAreOmittedForOtherProtocols(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, key := range []string{"privKey", "pubKey", "psk", "devices"} {
+	for _, key := range []string{"privKey", "pubKey", "psk", "devices", "method"} {
 		if strings.Contains(string(bs), `"`+key+`"`) {
 			t.Errorf("a plain client grew a %q key: %s", key, bs)
 		}

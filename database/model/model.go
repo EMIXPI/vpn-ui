@@ -405,6 +405,19 @@ type Client struct {
 	Comment    string `json:"comment" form:"comment"`       // Client comment
 	Reset      int    `json:"reset" form:"reset"`           // Reset period in days
 
+	// Shadowsocks per-client cipher. Multi-user shadowsocks lets each account carry
+	// its own method, and the inbound-level one is only the default.
+	//
+	// Here for the same reason as Username, Slot, Secret, Peers and the MTProto block
+	// below: AddInbound re-marshals every posted client through THIS struct, so a
+	// field missing here is silently dropped no matter what was sent. The symptom was
+	// narrow enough to hide: creating a multi-user shadowsocks inbound through the API
+	// collapsed every client onto the inbound's cipher, while /addClient and
+	// /updateClient (which splice the raw map) kept it, so the same account worked or
+	// did not depending on which call created it. omitempty so no other protocol's
+	// client JSON grows a byte.
+	Method string `json:"method,omitempty"`
+
 	// naive's HTTP Basic username. Empty means "use Email", which is what every naive
 	// account created before this field existed relies on: nothing backfills them, so
 	// the fallback is the compatibility guarantee, not a convenience.

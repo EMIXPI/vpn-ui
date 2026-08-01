@@ -141,6 +141,42 @@ func ValidateVpnUsername(username string) error {
 	return nil
 }
 
+// validateClientIdentities enforces the three checks above over a whole posted
+// client list. This is the ONLY thing that makes them real: they are pure
+// functions, so a path that does not call this does not validate.
+//
+// Called from all four write paths (AddInbound, UpdateInbound, AddInboundClient,
+// UpdateInboundClient) rather than from one of them, because each is separately
+// reachable from the HTTP API and any one left out is a hole through which the
+// whole class walks in.
+//
+// Deliberately NOT called from the delete paths. An account that predates these
+// checks and violates one has to remain deletable, or the only way to clean it up
+// would be editing the database by hand.
+//
+// The VPN username is only checked for the protocols that actually key on it.
+// wg-c, awg, gre and mtproto store id=email (nothing reads it) and the Xray-native
+// protocols store a uuid or a password there, so applying the filename and
+// whitespace rules to those would reject values that are correct.
+func validateClientIdentities(protocol model.Protocol, clients []model.Client) error {
+	for i := range clients {
+		client := &clients[i]
+		if err := ValidateClientEmail(client.Email); err != nil {
+			return err
+		}
+		if err := ValidateClientSubID(client.SubID); err != nil {
+			return err
+		}
+		switch protocol {
+		case model.L2TP, model.PPTP, model.OPENVPN, model.OPENCONNECT, model.SSTP, model.IKEV2, model.SSH:
+			if err := ValidateVpnUsername(client.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // -----------------------------------------------------------------------------
 // Membership rules
 // -----------------------------------------------------------------------------

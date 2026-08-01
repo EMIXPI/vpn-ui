@@ -168,10 +168,22 @@ ever used **Copy Clients**, you have been exposed to them.
   admin holding inbound B but not A was denied every per-client route for a
   client sitting in their own inbound.
 - **No validation existed on emails, subIds or VPN usernames.** The credential
-  VPNs authenticate out of whitespace-delimited, line-oriented files, and Xray's
-  counter is named `user>>><email>>>>traffic`, and neither a newline nor a `>`
-  was rejected anywhere. Now enforced on writes (never retroactively, so an
-  upgrade cannot strand an existing account).
+  VPNs authenticate out of whitespace-delimited, line-oriented files (so a
+  newline in a username appends a record the operator never created), the
+  openvpn per-client block is a file *named* after the username (so a `/` or
+  `..` escapes the directory), the subId is used directly as the `/sub/<subId>`
+  path component, and Xray's counter is named `user>>><email>>>>traffic` (so a
+  `>` misattributes traffic between accounts). None of it was rejected anywhere.
+
+  Now enforced on all four write paths: `AddInbound`, `UpdateInbound`,
+  `AddInboundClient` and `UpdateInboundClient`. Each is separately reachable from
+  the API, so any one left out would be a hole the whole class walks through.
+
+  **The upgrade itself cannot strand anyone.** The migration does not apply these
+  checks, so an account that predates them keeps working, and the delete paths do
+  not apply them either, so it stays removable. The one consequence is that
+  *editing* such an account requires fixing the offending value first; the error
+  names the field and the reason.
 
 ---
 
