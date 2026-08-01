@@ -1444,9 +1444,13 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 		return &runtimeInbound, nil
 	}
 
+	// Deliberately NOT filtered by inbound_id. client_traffics.Email is UNIQUE
+	// panel-wide, so one account has one row naming one inbound; scoping this read
+	// to inbound.Id meant that on every other inbound serving the same account the
+	// lookup missed and a depleted client was pushed to the live core as enabled.
+	// This is the no-restart twin of the same hole in GetXrayConfig.
 	var clientStats []xray.ClientTraffic
 	err := tx.Model(xray.ClientTraffic{}).
-		Where("inbound_id = ?", inbound.Id).
 		Select("email", "enable").
 		Find(&clientStats).Error
 	if err != nil {
@@ -1455,7 +1459,7 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 
 	enableMap := make(map[string]bool, len(clientStats))
 	for _, clientTraffic := range clientStats {
-		enableMap[clientTraffic.Email] = clientTraffic.Enable
+		enableMap[accountKey(clientTraffic.Email)] = clientTraffic.Enable
 	}
 
 	finalClients := make([]any, 0, len(clients))
@@ -1466,7 +1470,7 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 		}
 
 		email, _ := c["email"].(string)
-		if enable, exists := enableMap[email]; exists && !enable {
+		if enable, exists := enableMap[accountKey(email)]; exists && !enable {
 			continue
 		}
 
@@ -2830,19 +2834,54 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 }
 
 func (s *InboundService) adjustTraffics(tx *gorm.DB, dbClientTraffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
-	inboundIds := make([]int, 0, len(dbClientTraffics))
+	// Which ACCOUNTS are converting a "N days from first use" expiry into an
+	// absolute deadline, and then every inbound serving them.
+	//
+	// This used to collect inbound ids from dbClientTraffic.InboundId, which names
+	// only the account's home inbound. The absolute deadline was therefore written
+	// into that one inbound's settings while every other member kept the NEGATIVE
+	// value forever, which the client table renders as "delayed start" on an
+	// account whose clock has actually been running since its first connection.
+	pendingEmails := make([]string, 0, len(dbClientTraffics))
 	for _, dbClientTraffic := range dbClientTraffics {
 		if dbClientTraffic.ExpiryTime < 0 {
-			inboundIds = append(inboundIds, dbClientTraffic.InboundId)
+			pendingEmails = append(pendingEmails, dbClientTraffic.Email)
 		}
 	}
 
-	if len(inboundIds) > 0 {
-		var inbounds []*model.Inbound
-		err := tx.Model(model.Inbound{}).Where("id IN (?)", inboundIds).Find(&inbounds).Error
+	if len(pendingEmails) > 0 {
+		inboundIds, err := s.inboundIdsServingEmails(tx, pendingEmails)
 		if err != nil {
 			return nil, err
 		}
+		if len(inboundIds) == 0 {
+			return dbClientTraffics, nil
+		}
+		var inbounds []*model.Inbound
+		err = tx.Model(model.Inbound{}).Where("id IN (?)", inboundIds).Find(&inbounds).Error
+		if err != nil {
+			return nil, err
+		}
+		// The deadline is computed ONCE PER ACCOUNT, before any inbound is
+		// rewritten, and read from the traffic row rather than from each inbound's
+		// settings. Both details matter now that an account can be on several
+		// inbounds: computing it inside the loop would convert the first inbound,
+		// flip the row positive, and then skip every remaining member (leaving
+		// exactly the negative values this fix exists to remove), and taking the
+		// base from each inbound's own JSON would give one account a different
+		// deadline per inbound.
+		now := time.Now().Unix() * 1000
+		newExpiryByEmail := make(map[string]int64, len(pendingEmails))
+		for traffic_index := range dbClientTraffics {
+			if dbClientTraffics[traffic_index].ExpiryTime >= 0 {
+				continue
+			}
+			// The stored value is negative and means "this many ms from first use".
+			newExpiry := now - dbClientTraffics[traffic_index].ExpiryTime
+			newExpiryByEmail[accountKey(dbClientTraffics[traffic_index].Email)] = newExpiry
+			dbClientTraffics[traffic_index].ExpiryTime = newExpiry
+		}
+
 		for inbound_index := range inbounds {
 			settings := map[string]any{}
 			json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings)
@@ -2850,22 +2889,20 @@ func (s *InboundService) adjustTraffics(tx *gorm.DB, dbClientTraffics []*xray.Cl
 			if ok {
 				var newClients []any
 				for client_index := range clients {
-					c := clients[client_index].(map[string]any)
-					for traffic_index := range dbClientTraffics {
-						if dbClientTraffics[traffic_index].ExpiryTime < 0 && c["email"] == dbClientTraffics[traffic_index].Email {
-							oldExpiryTime := c["expiryTime"].(float64)
-							newExpiryTime := (time.Now().Unix() * 1000) - int64(oldExpiryTime)
-							c["expiryTime"] = newExpiryTime
-							c["updated_at"] = time.Now().Unix() * 1000
-							dbClientTraffics[traffic_index].ExpiryTime = newExpiryTime
-							break
-						}
+					c, ok := clients[client_index].(map[string]any)
+					if !ok {
+						newClients = append(newClients, clients[client_index])
+						continue
+					}
+					email, _ := c["email"].(string)
+					if newExpiry, converting := newExpiryByEmail[accountKey(email)]; converting {
+						c["expiryTime"] = newExpiry
 					}
 					// Backfill created_at and updated_at
 					if _, ok := c["created_at"]; !ok {
-						c["created_at"] = time.Now().Unix() * 1000
+						c["created_at"] = now
 					}
-					c["updated_at"] = time.Now().Unix() * 1000
+					c["updated_at"] = now
 					newClients = append(newClients, any(c))
 				}
 				settings["clients"] = newClients
@@ -2911,46 +2948,82 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		client   map[string]any
 	}
 
+	// Every inbound serving a renewing account, not just the one its traffic row
+	// names. Renewing on the home inbound alone left the other members holding the
+	// OLD, already-passed expiry in their settings, so the account read as expired
+	// wherever it had actually been renewed.
+	renewEmails := make([]string, 0, len(traffics))
 	for _, traffic := range traffics {
-		inbound_ids = append(inbound_ids, traffic.InboundId)
+		renewEmails = append(renewEmails, traffic.Email)
+	}
+	inbound_ids, err = s.inboundIdsServingEmails(tx, renewEmails)
+	if err != nil {
+		return false, 0, err
+	}
+	if len(inbound_ids) == 0 {
+		return false, 0, nil
 	}
 	err = tx.Model(model.Inbound{}).Where("id IN ?", inbound_ids).Find(&inbounds).Error
 	if err != nil {
 		return false, 0, err
 	}
+
+	// One new deadline per ACCOUNT, computed before any inbound is touched, so
+	// every membership lands on the same date and a second inbound cannot
+	// re-advance a deadline the first already moved.
+	renewedByEmail := make(map[string]int64, len(traffics))
+	// Whether the account was disabled BEFORE this renewal, captured up front.
+	// Read inside the inbound loop instead, the first membership would flip the
+	// flag to true and every later membership would then look "already enabled",
+	// so the account would be re-added to one inbound's tag and silently left out
+	// of the rest.
+	wasDisabled := make(map[string]bool, len(traffics))
+	for traffic_index, traffic := range traffics {
+		newExpiryTime := traffic.ExpiryTime
+		for newExpiryTime < now {
+			newExpiryTime += (int64(traffic.Reset) * 86400000)
+		}
+		renewedByEmail[accountKey(traffic.Email)] = newExpiryTime
+		wasDisabled[accountKey(traffic.Email)] = !traffic.Enable
+		traffics[traffic_index].ExpiryTime = newExpiryTime
+		traffics[traffic_index].Down = 0
+		traffics[traffic_index].Up = 0
+		traffics[traffic_index].Enable = true
+	}
+
 	for inbound_index := range inbounds {
 		settings := map[string]any{}
 		json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings)
-		clients := settings["clients"].([]any)
+		clients, ok := settings["clients"].([]any)
+		if !ok {
+			continue
+		}
 		for client_index := range clients {
-			c := clients[client_index].(map[string]any)
-			for traffic_index, traffic := range traffics {
-				if traffic.Email == c["email"].(string) {
-					newExpiryTime := traffic.ExpiryTime
-					for newExpiryTime < now {
-						newExpiryTime += (int64(traffic.Reset) * 86400000)
-					}
-					c["expiryTime"] = newExpiryTime
-					traffics[traffic_index].ExpiryTime = newExpiryTime
-					traffics[traffic_index].Down = 0
-					traffics[traffic_index].Up = 0
-					if !traffic.Enable {
-						traffics[traffic_index].Enable = true
-						clientsToAdd = append(clientsToAdd,
-							struct {
-								protocol string
-								tag      string
-								client   map[string]any
-							}{
-								protocol: string(inbounds[inbound_index].Protocol),
-								tag:      inbounds[inbound_index].Tag,
-								client:   c,
-							})
-					}
-					clients[client_index] = any(c)
-					break
-				}
+			c, ok := clients[client_index].(map[string]any)
+			if !ok {
+				continue
 			}
+			email, _ := c["email"].(string)
+			newExpiryTime, renewing := renewedByEmail[accountKey(email)]
+			if !renewing {
+				continue
+			}
+			c["expiryTime"] = newExpiryTime
+			if wasDisabled[accountKey(email)] {
+				// One entry per MEMBERSHIP: the account has to be re-added to
+				// every inbound tag it serves on, not just to one of them.
+				clientsToAdd = append(clientsToAdd,
+					struct {
+						protocol string
+						tag      string
+						client   map[string]any
+					}{
+						protocol: string(inbounds[inbound_index].Protocol),
+						tag:      inbounds[inbound_index].Tag,
+						client:   c,
+					})
+			}
+			clients[client_index] = any(c)
 		}
 		settings["clients"] = clients
 		newSettings, err := json.MarshalIndent(settings, "", "  ")
@@ -3037,17 +3110,25 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []stri
 	var ovpnDisabledEmails []string
 
 	if p != nil {
-		var results []struct {
-			Tag      string
-			Email    string
-			Protocol string
+		// Which accounts are depleted, and then SEPARATELY which inbounds each of
+		// them is served on.
+		//
+		// This used to be one query joining inbounds to client_traffics on
+		// inbound_id. That join can only ever return ONE row per account, because
+		// client_traffics.Email is unique panel-wide and its inbound_id names a
+		// single inbound. So RemoveUser fired for exactly one tag and an account
+		// that had exhausted its quota kept passing traffic on every other inbound
+		// serving it, while still billing into the same row: up+down grows past
+		// total forever with enable already false. Free traffic, silently.
+		var depletedEmails []string
+		err := tx.Model(xray.ClientTraffic{}).
+			Where("((total > 0 AND up + down >= total) OR (expiry_time > 0 AND expiry_time <= ?)) AND enable = ?", now, true).
+			Pluck("email", &depletedEmails).Error
+		if err != nil {
+			return false, 0, nil, nil, nil, err
 		}
 
-		err := tx.Table("inbounds").
-			Select("inbounds.tag, inbounds.protocol, client_traffics.email").
-			Joins("JOIN client_traffics ON inbounds.id = client_traffics.inbound_id").
-			Where("((client_traffics.total > 0 AND client_traffics.up + client_traffics.down >= client_traffics.total) OR (client_traffics.expiry_time > 0 AND client_traffics.expiry_time <= ?)) AND client_traffics.enable = ?", now, true).
-			Scan(&results).Error
+		results, err := s.inboundsServingEmails(tx, depletedEmails)
 		if err != nil {
 			return false, 0, nil, nil, nil, err
 		}
@@ -3089,6 +3170,100 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []stri
 	err := result.Error
 	count := result.RowsAffected
 	return needRestart, count, l2tpDisabledEmails, pptpDisabledEmails, ovpnDisabledEmails, err
+}
+
+// inboundServingEmail is one (account, inbound) pair the enforcement paths have
+// to act on: an account is disabled on EVERY inbound serving it, not just on the
+// one its client_traffics row happens to name.
+type inboundServingEmail struct {
+	Id       int
+	Tag      string
+	Email    string
+	Protocol string
+}
+
+// inboundIdsServingEmails is inboundsServingEmails reduced to distinct inbound
+// ids, for the paths that rewrite settings rather than call the Xray API.
+func (s *InboundService) inboundIdsServingEmails(tx *gorm.DB, emails []string) ([]int, error) {
+	rows, err := s.inboundsServingEmails(tx, emails)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int]bool{}
+	out := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if seen[row.Id] {
+			continue
+		}
+		seen[row.Id] = true
+		out = append(out, row.Id)
+	}
+	return out, nil
+}
+
+// inboundsServingEmails resolves emails to every inbound that actually serves
+// them, by reading settings.clients.
+//
+// settings.clients is used rather than the account_inbounds table on purpose:
+// it is the source of truth in BOTH worlds, so this is correct before the
+// accounts migration has run, after it, and on an inbound added by an older
+// binary in between. An enforcement path is the last place that should depend
+// on a backfill having completed.
+func (s *InboundService) inboundsServingEmails(tx *gorm.DB, emails []string) ([]inboundServingEmail, error) {
+	if len(emails) == 0 {
+		return nil, nil
+	}
+	wanted := make(map[string]string, len(emails))
+	for _, email := range emails {
+		// Keyed on the normalized form, valued with the original, because the
+		// original is what RemoveUser and the RADIUS-side disable lists must carry.
+		wanted[accountKey(email)] = email
+	}
+
+	var inbounds []*model.Inbound
+	if err := tx.Model(&model.Inbound{}).
+		Select("id", "tag", "protocol", "settings").
+		Order("id ASC").Find(&inbounds).Error; err != nil {
+		return nil, err
+	}
+
+	var out []inboundServingEmail
+	for _, inbound := range inbounds {
+		clients, ok := parseSettingsClients(inbound.Settings)
+		if !ok {
+			continue
+		}
+		for _, entry := range clients {
+			entryEmail, _ := entry["email"].(string)
+			original, hit := wanted[accountKey(entryEmail)]
+			if !hit {
+				continue
+			}
+			out = append(out, inboundServingEmail{
+				Id:       inbound.Id,
+				Tag:      inbound.Tag,
+				Email:    original,
+				Protocol: string(inbound.Protocol),
+			})
+		}
+	}
+	return out, nil
+}
+
+// EnableStateByEmail returns every account's enable state, keyed by normalized
+// email. Panel-wide and NOT scoped to an inbound: depletion is a property of the
+// account, and one account can be served on many inbounds.
+func (s *InboundService) EnableStateByEmail() (map[string]bool, error) {
+	var rows []xray.ClientTraffic
+	if err := database.GetDB().Model(xray.ClientTraffic{}).
+		Select("email", "enable").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		out[accountKey(row.Email)] = row.Enable
+	}
+	return out, nil
 }
 
 func (s *InboundService) GetInboundTags() (string, error) {

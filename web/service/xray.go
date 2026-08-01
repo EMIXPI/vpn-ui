@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mhsanaei/3x-ui/v2/database"
+	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/xray"
 
@@ -210,6 +212,24 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Depletion is decided per ACCOUNT (per email), never per inbound.
+	//
+	// This map used to be built per inbound from inbound.ClientStats, which is a
+	// has-many on InboundId, while client_traffics.Email is UNIQUE panel-wide: one
+	// account has exactly ONE row, naming exactly ONE inbound. So on every OTHER
+	// inbound serving that same email the lookup missed, `exists` came back false,
+	// and a client whose quota was exhausted was rendered into the config as
+	// ENABLED. Restarting the core did not repair that, it re-created it.
+	//
+	// Reading the enable state by email closes it for every inbound at once, and
+	// matches what the ten non-Xray protocols already do (RADIUS checks
+	// client_traffics with no inbound filter at all).
+	enableByEmail, err := s.inboundService.EnableStateByEmail()
+	if err != nil {
+		return nil, err
+	}
+
 	for _, inbound := range inbounds {
 		if !inbound.Enable {
 			continue
@@ -230,13 +250,6 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		json.Unmarshal([]byte(inbound.Settings), &settings)
 		clients, ok := settings["clients"].([]any)
 		if ok {
-			// Fast O(N) lookup map for client traffic enablement
-			clientStats := inbound.ClientStats
-			enableMap := make(map[string]bool, len(clientStats))
-			for _, clientTraffic := range clientStats {
-				enableMap[clientTraffic.Email] = clientTraffic.Enable
-			}
-
 			// filter and clean clients
 			var final_clients []any
 			for _, client := range clients {
@@ -247,8 +260,8 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 
 				email, _ := c["email"].(string)
 
-				// check users active or not via stats
-				if enable, exists := enableMap[email]; exists && !enable {
+				// check users active or not via stats (panel-wide, by account)
+				if enable, exists := enableByEmail[accountKey(email)]; exists && !enable {
 					logger.Infof("Remove Inbound User %s due to expiration or traffic limit", email)
 					continue
 				}
@@ -465,6 +478,41 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 // mtproto to BuildVpnEmailToIPMap to "complete" it: a relay has no per-client IP,
 // so it would translate the rule into a source match on an IP that never exists
 // and the rule would silently stop matching anything.
+// buildXrayNativeEmailSet returns the normalized emails that appear on an inbound
+// Xray terminates ITSELF, and can therefore match a routing rule's "user" field.
+//
+// The predicate is the complement of what GetXrayConfig skips: the nine pool VPN
+// protocols (isVpnProtocol) plus the two relays, mtproto and ssh, none of which
+// hand Xray a user list to match on.
+func buildXrayNativeEmailSet() map[string]bool {
+	out := map[string]bool{}
+	var inbounds []*model.Inbound
+	if err := database.GetDB().Model(&model.Inbound{}).
+		Select("protocol", "settings", "enable").Find(&inbounds).Error; err != nil {
+		logger.Warning("could not read inbounds while building the native-email set:", err)
+		return out
+	}
+	for _, inbound := range inbounds {
+		if !inbound.Enable {
+			continue
+		}
+		if isVpnProtocol(inbound.Protocol) || inbound.Protocol == model.MTPROTO || inbound.Protocol == model.SSH {
+			continue
+		}
+		clients, ok := parseSettingsClients(inbound.Settings)
+		if !ok {
+			continue
+		}
+		for _, entry := range clients {
+			email, _ := entry["email"].(string)
+			if key := accountKey(email); key != "" {
+				out[key] = true
+			}
+		}
+	}
+	return out
+}
+
 func (s *XrayService) translateVpnRoutingRules(config *xray.Config) {
 	if len(config.RouterConfig) == 0 {
 		return
@@ -474,6 +522,10 @@ func (s *XrayService) translateVpnRoutingRules(config *xray.Config) {
 	if len(vpnMap) == 0 {
 		return
 	}
+
+	// Emails Xray authenticates itself, so a rule's "user" match can still fire
+	// for them even though they also hold a tunnel address.
+	nativeEmails := buildXrayNativeEmailSet()
 
 	var routing map[string]any
 	if err := json.Unmarshal(config.RouterConfig, &routing); err != nil {
@@ -501,7 +553,19 @@ func (s *XrayService) translateVpnRoutingRules(config *xray.Config) {
 			continue
 		}
 
-		// Separate VPN emails from regular Xray emails
+		// Separate VPN emails from regular Xray emails.
+		//
+		// An account can be BOTH: one email on vless and on l2tp is exactly what
+		// the accounts layer exists to allow. This used to be an either/or -- the
+		// moment an email had any pool-protocol membership it was moved out of the
+		// rule's "user" list entirely and replaced by a source-IP match -- so the
+		// account's vless traffic stopped matching its own routing rule: the source
+		// rule only covers tunnel addresses, and the native user match was gone.
+		// Silently, with a valid config and a running core.
+		//
+		// So an email that Xray also authenticates natively stays in BOTH lists:
+		// it gets the source rule for its tunnel addresses AND keeps the user rule
+		// for the traffic the core terminates itself.
 		var vpnIPs []any
 		var regularEmails []any
 		for _, u := range usersRaw {
@@ -510,11 +574,15 @@ func (s *XrayService) translateVpnRoutingRules(config *xray.Config) {
 				regularEmails = append(regularEmails, u)
 				continue
 			}
-			if ips, found := vpnMap[email]; found {
-				for _, ip := range ips {
-					vpnIPs = append(vpnIPs, ip)
-				}
-			} else {
+			ips, found := vpnMap[email]
+			if !found {
+				regularEmails = append(regularEmails, u)
+				continue
+			}
+			for _, ip := range ips {
+				vpnIPs = append(vpnIPs, ip)
+			}
+			if nativeEmails[accountKey(email)] {
 				regularEmails = append(regularEmails, u)
 			}
 		}
