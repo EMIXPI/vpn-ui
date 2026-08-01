@@ -627,3 +627,70 @@ func TestMigrationAccountsTakesPreFlightBackup(t *testing.T) {
 		t.Errorf("recorded backup %q does not exist: %v", report.BackupPath, err)
 	}
 }
+
+// The four email-identity protocols (wg-c, awg, gre, mtproto) store an "id" that
+// NOTHING reads, so nothing has ever forced it to equal the email. On a real
+// panel it does not: a live GRE account was found with id "grelive" against email
+// "grelive@t". The projection used to overwrite it with the email, which is a
+// gratuitous rewrite of stored data, and it rolled the entire migration back on
+// the first live panel it met.
+func TestMigrationAccountsPreservesEmailIdentityProtocolIds(t *testing.T) {
+	svc := newAccountsDB(t)
+	port := 43800
+	for _, protocol := range []model.Protocol{model.GRE, model.WGC, model.AWG, model.MTPROTO} {
+		port++
+		entry := map[string]any{
+			// id deliberately DIFFERENT from email, as the live box had it.
+			"id": "shortname", "email": "shortname@t", "enable": true,
+		}
+		if protocol == model.MTPROTO {
+			entry["secret"] = "0123456789abcdef0123456789abcdef"
+		} else {
+			entry["slot"] = float64(0)
+		}
+		if protocol == model.GRE {
+			entry["peers"] = []any{map[string]any{}, map[string]any{}}
+		}
+		seedInboundWithClients(t, protocol, port, []map[string]any{entry})
+	}
+
+	before := snapshotUntouchedTables(t)
+	svc.MigrationAccounts()
+	assertAdditiveOnly(t, before)
+
+	if !svc.AccountsMigrated() {
+		t.Fatal("the pass rolled back: an id that differs from the email must not fail the round-trip")
+	}
+
+	// And re-projecting must leave that id alone rather than rewriting it.
+	account, err := svc.GetAccountByEmail("shortname@t")
+	if err != nil || account == nil {
+		t.Fatalf("GetAccountByEmail: %v", err)
+	}
+	for _, m := range membershipsInDB(t) {
+		if m.AccountId != account.Id {
+			continue
+		}
+		var inbound model.Inbound
+		if err := database.GetDB().Where("id = ?", m.InboundId).First(&inbound).Error; err != nil {
+			t.Fatalf("read inbound: %v", err)
+		}
+		rendered := renderClientEntry(account, &m, inbound.Protocol, nil)
+		if got, _ := rendered["id"].(string); got != "shortname" {
+			t.Errorf("%s: projected id = %q, want the stored %q left untouched",
+				inbound.Protocol, got, "shortname")
+		}
+	}
+}
+
+// A brand new membership has no entry to preserve, so the email is the fallback.
+func TestRenderClientEntryDefaultsIdToEmailWhenAbsent(t *testing.T) {
+	account := &model.Account{Email: "fresh@example.com"}
+	m := &model.AccountInbound{}
+	for _, protocol := range []model.Protocol{model.GRE, model.WGC, model.AWG, model.MTPROTO} {
+		rendered := renderClientEntry(account, m, protocol, nil)
+		if got, _ := rendered["id"].(string); got != "fresh@example.com" {
+			t.Errorf("%s: new membership id = %q, want the email as the fallback", protocol, got)
+		}
+	}
+}

@@ -88,18 +88,38 @@ func applyAccountCredential(entry map[string]any, account *model.Account, protoc
 		entry["id"] = account.VpnUsername
 		entry["password"] = account.Password
 	case model.MTPROTO:
-		// Identity is the email; the secret is the credential.
-		entry["id"] = account.Email
+		// The secret is the credential; the identity is the email.
 		entry["secret"] = account.Secret
+		preserveOrDefaultID(entry, account.Email)
 	case model.WGC, model.AWG, model.GRE:
 		// Nothing reads "id" for these three (verified: no .ID reference in
-		// wgc.go/awg.go/gre.go); the email is the identity and the per-device
-		// keypairs live in the passed-through part of the entry. Written anyway so
-		// the JSON keeps the shape the rest of the panel expects.
-		entry["id"] = account.Email
+		// wgc.go, awg.go or gre.go), and the per-device keypairs live in the
+		// passed-through part of the entry.
+		preserveOrDefaultID(entry, account.Email)
 	default:
 		entry["id"] = account.UUID
 	}
+}
+
+// preserveOrDefaultID keeps an existing "id" and only supplies one when the entry
+// has none.
+//
+// For the four email-identity protocols (wg-c, awg, gre, mtproto) the stored "id"
+// is a convention, not a guarantee. Nothing reads it, so nothing has ever forced
+// it to equal the email, and on a real panel it does not: a live GRE account was
+// found with id "grelive" against email "grelive@t". Overwriting it with the email
+// was a gratuitous rewrite of stored data, and it broke the migration's
+// round-trip check on the first live panel it met, correctly rolling the whole
+// pass back.
+//
+// This is the projection's own overlay rule applied properly: write the fields
+// the account OWNS, and pass through the ones it does not. The email is only a
+// fallback for a brand new membership, which has no entry to preserve.
+func preserveOrDefaultID(entry map[string]any, email string) {
+	if existing, ok := entry["id"].(string); ok && existing != "" {
+		return
+	}
+	entry["id"] = email
 }
 
 // renderClientEntry produces the settings.clients entry for one membership,
