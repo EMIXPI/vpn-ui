@@ -882,12 +882,307 @@
         </a-form-item>
       </template>
 
+      <!-- anytls settings. Address, port and the whole TLS section come from the
+           shared blocks above and below: AnyTLS carries no transport of its own,
+           it is a session layer over whatever stream Xray dials, so everything
+           here is the handful of fields that are the protocol's own.
+
+           The three session numbers are left BLANK on purpose. Each one is a
+           uint32 whose zero value means "use my default" on the core side, so a
+           prefilled 0 would read as a deliberate choice and behave as though the
+           operator had made none. Blank is dropped from the config entirely. -->
+      <template v-if="outbound.protocol === Protocols.AnyTLS">
+        <a-form-item label='{{ i18n "password" }}'>
+          <a-input v-model.trim="outbound.settings.password"></a-input>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                How often idle sessions are swept, in seconds. Leave blank for
+                the default (30). This is a local tuning knob: it does not have
+                to match the server. 5 and below is not accepted here because the
+                session library silently rewrites anything in that range to 30.
+              </template>
+              Idle Check
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-input-number
+            v-model.number="outbound.settings.idleSessionCheckInterval"
+            :min="6"
+            :max="86400"
+            :style="{ width: '100%' }"
+            placeholder="30"
+          ></a-input-number>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                How long a session may sit idle before it is closed, in seconds.
+                Blank for the default (30). 5 and below is not accepted here: the
+                session library rewrites anything in that range to 30, so a "2
+                second timeout" would quietly become fifteen times that.
+              </template>
+              Idle Timeout
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-input-number
+            v-model.number="outbound.settings.idleSessionTimeout"
+            :min="6"
+            :max="86400"
+            :style="{ width: '100%' }"
+            placeholder="30"
+          ></a-input-number>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                How many idle sessions to keep open ready for the next request.
+                Costs a little memory and one connection each, and saves the
+                handshake on a burst of new connections. Blank means none held.
+              </template>
+              Min Idle
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-input-number
+            v-model.number="outbound.settings.minIdleSession"
+            :min="0"
+            :max="1024"
+            :style="{ width: '100%' }"
+            placeholder="0"
+          ></a-input-number>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                Opens a fresh session for every connection instead of reusing an
+                idle one. Costs a full handshake each time, and is the escape
+                hatch for a server or a middlebox that mishandles reuse.
+              </template>
+              No Reuse
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-switch v-model="outbound.settings.disableReuse"></a-switch>
+        </a-form-item>
+      </template>
+
+      <!-- tuic settings -->
+      <template v-if="outbound.protocol === Protocols.Tuic">
+        <a-form-item label="UUID">
+          <a-input v-model.trim="outbound.settings.id"></a-input>
+        </a-form-item>
+        <a-form-item label='{{ i18n "password" }}'>
+          <a-input v-model.trim="outbound.settings.password"></a-input>
+        </a-form-item>
+        <!-- Bound to the STREAM's alpn, which is where TUIC's dialer reads it
+             from, and repeated here rather than left to the TLS section alone
+             because this is the one field on the form that silently kills the
+             outbound. The server side is pinned to h3; neither end has a
+             permissive setting; and every other client (sing-box, mihomo, the
+             Rust tuic-client) defaults ALPN to EMPTY, which does not negotiate
+             down, it fails the handshake with "tls: no application protocol",
+             a message naming neither the setting nor the side that rejected it.
+             Prefilled with h3 by Outbound.defaultStreamFor. -->
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                Must match the server EXACTLY. Leave it at h3 unless the server
+                was changed too: an empty-vs-h3 mismatch fails the TLS handshake
+                with "tls: no application protocol" and nothing more specific.
+              </template>
+              ALPN
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-select
+            mode="multiple"
+            :dropdown-class-name="themeSwitcher.currentTheme"
+            v-model="outbound.stream.tls.alpn"
+          >
+            <a-select-option v-for="alpn in ALPN_OPTION" :value="alpn"
+              >[[ alpn ]]</a-select-option
+            >
+          </a-select>
+          <div
+            v-if="!outbound.stream.tls.alpn || !outbound.stream.tls.alpn.length"
+            :style="{ color: 'var(--error)', fontSize: '12px', lineHeight: '1.5', marginTop: '4px' }"
+          >
+            An empty ALPN will not connect to a TUIC server. Set h3.
+          </div>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                QUIC congestion controller. Must be supported by the server, but
+                does not have to match it: each direction picks its own.
+              </template>
+              Congestion
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-select
+            v-model="outbound.settings.congestionControl"
+            :dropdown-class-name="themeSwitcher.currentTheme"
+          >
+            <a-select-option value="cubic">cubic</a-select-option>
+            <a-select-option value="bbr">bbr</a-select-option>
+            <a-select-option value="new_reno">new_reno</a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                native sends each UDP packet as its own QUIC datagram, which is
+                what UDP is; quic wraps the session in a reliable stream, which
+                survives paths that drop datagrams at the cost of head-of-line
+                blocking. Both ends must agree.
+              </template>
+              UDP Relay
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-select
+            v-model="outbound.settings.udpRelayMode"
+            :dropdown-class-name="themeSwitcher.currentTheme"
+          >
+            <a-select-option value="native">native</a-select-option>
+            <a-select-option value="quic">quic</a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                Sends the first request with the TLS handshake instead of waiting
+                for it to finish. Saves a round trip and gives up replay
+                protection for that request. Off unless the server enables it.
+              </template>
+              0-RTT
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-switch v-model="outbound.settings.zeroRttHandshake"></a-switch>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                Keepalive interval in seconds. Blank for the core's default (10).
+              </template>
+              Heartbeat
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-input-number
+            v-model.number="outbound.settings.heartbeat"
+            :min="0"
+            :max="3600"
+            :style="{ width: '100%' }"
+            placeholder="10"
+          ></a-input-number>
+        </a-form-item>
+      </template>
+
+      <!-- naive settings. It does NOT bring its own TLS, which is the thing that
+           looks otherwise: the h2 path writes CONNECT onto whatever stream Xray
+           dials, and the h3 path goes through the "naive" transport, which reads
+           its TLS off streamSettings. So the transmission and TLS sections below
+           belong to this protocol too, and the picker here drives the stream. -->
+      <template v-if="outbound.protocol === Protocols.Naive">
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                The account's email on the server. It is what the server books the
+                traffic against, and it is also the Basic username unless the
+                account has a separate one, in which case fill that in below.
+              </template>
+              Email
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-input v-model.trim="outbound.settings.email"></a-input>
+        </a-form-item>
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                Only if the account on the server has its own username. naive sends
+                one Basic header and this is the username half of it; leave it empty
+                and the email above is used, which is what every account created
+                before servers had this field uses. A colon cannot be expressed in
+                Basic, so it is refused.
+              </template>
+              Username
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-input
+            v-model.trim="outbound.settings.username"
+            :placeholder="outbound.settings.email"
+          ></a-input>
+        </a-form-item>
+        <a-form-item label='{{ i18n "password" }}'>
+          <a-input v-model.trim="outbound.settings.password"></a-input>
+        </a-form-item>
+        <!-- :value + @change, not v-model, and the setter moves BOTH this and
+             the stream. They are two settings for one decision: the core reads
+             this one to pick h2 or h3, the transport layer reads the stream's
+             network to pick the dialer, and setting one without the other dials
+             the wrong stack. Picking UDP with the stream left on tcp is the bad
+             case: the tcp dialer ignores the CONNECT the h3 path put in the
+             context, so the outbound fails with "server rejected CONNECT with
+             status 0", which points at the server. -->
+        <a-form-item>
+          <template slot="label">
+            <a-tooltip>
+              <template slot="title">
+                Which HTTP the dialer speaks. TCP is HTTP/2 over TLS and works
+                anywhere; UDP is HTTP/3 over QUIC, which is faster on a lossy
+                path and dead where UDP is blocked. One or the other, and the
+                server has to be listening for it. Changing this also sets the
+                transport and ALPN below.
+              </template>
+              {{ i18n "transmission" }}
+              <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+          </template>
+          <a-select
+            :value="outbound.settings.network"
+            @change="network => outbound.setNaiveNetwork(network)"
+            :dropdown-class-name="themeSwitcher.currentTheme"
+          >
+            <a-select-option value="tcp">TCP (HTTP/2)</a-select-option>
+            <a-select-option value="udp">UDP (HTTP/3)</a-select-option>
+          </a-select>
+        </a-form-item>
+      </template>
+
       <!-- stream settings -->
       <template v-if="outbound.canEnableStream()">
+        <!-- Disabled for TUIC and naive, and shown rather than hidden. Neither
+             has a transport to choose: TUIC's dialer refuses any stream whose
+             network is not "tuic", and naive's is decided by its own TCP/UDP
+             picker above (tcp for h2, "naive" for h3), which sets it. Leaving it
+             live would offer six values, five of which produce an outbound that
+             cannot dial. It stays on screen because the TLS section below
+             belongs to this stream and an operator needs to see what it is
+             attached to. -->
         <a-form-item label='{{ i18n "transmission" }}'>
           <a-select
             v-model="outbound.stream.network"
             @change="streamNetworkChange"
+            :disabled="[Protocols.Tuic, Protocols.Naive].includes(outbound.protocol)"
             :dropdown-class-name="themeSwitcher.currentTheme"
           >
             <a-select-option value="tcp">TCP (RAW)</a-select-option>
@@ -900,6 +1195,16 @@
               v-if="outbound.protocol === Protocols.Hysteria"
               value="hysteria"
               >Hysteria2</a-select-option
+            >
+            <a-select-option
+              v-if="outbound.protocol === Protocols.Tuic"
+              value="tuic"
+              >TUIC (QUIC)</a-select-option
+            >
+            <a-select-option
+              v-if="outbound.protocol === Protocols.Naive"
+              value="naive"
+              >Naive (HTTP/3)</a-select-option
             >
           </a-select>
         </a-form-item>
@@ -1702,7 +2007,17 @@
             v-model="outbound.stream.security"
             button-style="solid"
           >
-            <a-radio-button value="none">{{ i18n "none" }}</a-radio-button>
+            <!-- None of the three has a cleartext mode: AnyTLS is a session
+                 layer defined over TLS, TUIC is QUIC whose handshake IS a TLS
+                 handshake, and naive is HTTP/2 or HTTP/3 over TLS (its h3 dialer
+                 refuses to run without one). Offering "none" for them would
+                 produce a config the far side cannot answer, and the failure is
+                 a timeout rather than anything naming this setting. -->
+            <a-radio-button
+              v-if="![Protocols.AnyTLS, Protocols.Tuic, Protocols.Naive].includes(outbound.protocol)"
+              value="none"
+              >{{ i18n "none" }}</a-radio-button
+            >
             <a-radio-button value="tls">TLS</a-radio-button>
             <a-radio-button v-if="outbound.canEnableReality()" value="reality"
               >Reality</a-radio-button
@@ -1909,7 +2224,7 @@
       <a-input
         addon-before='{{ i18n "pages.xray.outbound.link" }}'
         v-model.trim="outModal.link"
-        placeholder="vmess:// vless:// trojan:// ss:// hysteria2://"
+        placeholder="vmess:// vless:// trojan:// ss:// hysteria2:// anytls:// tuic:// naive://"
       >
         <a-icon slot="addonAfter" type="form" @click="convertLink"></a-icon>
       </a-input>

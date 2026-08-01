@@ -92,8 +92,22 @@
                     "pages.xray.outbound.vpnOutUp" }}' : '{{ i18n
                     "pages.xray.outbound.vpnOutDown" }}' ]]</a-tag>
             </a-tooltip>
+            <!-- anytls, tuic and naive are here for the same reason as the four
+                 above: all three carry a real streamSettings and the transport is
+                 the thing that has to match the far side, so it belongs on the
+                 row rather than only inside the edit dialog. TUIC's always reads
+                 "tuic", which is the point: it says the row is on the QUIC
+                 transport and not on some tcp stream a hand-edited config left
+                 behind. naive's is the one worth reading at a glance, because it
+                 is the only row here where the tag distinguishes two different
+                 stacks: "tcp" is HTTP/2 and "naive" is HTTP/3.
+
+                 `outbound.streamSettings &&` guards the whole block: this table
+                 renders the config VERBATIM, and a hand-written outbound with no
+                 streamSettings would otherwise throw on .network mid-render and
+                 leave the page blank behind v-cloak. -->
             <template
-                v-if="[Protocols.VMess, Protocols.VLESS, Protocols.Trojan, Protocols.Shadowsocks].includes(outbound.protocol)">
+                v-if="outbound.streamSettings && [Protocols.VMess, Protocols.VLESS, Protocols.Trojan, Protocols.Shadowsocks, Protocols.AnyTLS, Protocols.Tuic, Protocols.Naive].includes(outbound.protocol)">
                 <a-tag :style="{ margin: '0' }" color="blue">[[
                     outbound.streamSettings.network ]]</a-tag>
                 <a-tag :style="{ margin: '0' }"

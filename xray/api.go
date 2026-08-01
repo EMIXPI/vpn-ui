@@ -130,6 +130,81 @@ func (x *XrayAPI) DelInbound(tag string) error {
 	return err
 }
 
+// Proto FULL NAMES of the account messages carried by anytls/tuic/naive. These are the
+// type URLs the running core resolves through serial.GetInstance, so they must match the
+// `package` + `message` of the core's own .proto byte for byte. See forkAccount.
+const (
+	anytlsAccountType = "xray.proxy.anytls.Account"
+	tuicAccountType   = "xray.proxy.tuic.Account"
+	naiveAccountType  = "xray.proxy.naive.Account"
+)
+
+// Field numbers in xray.proxy.naive.Account. Named because they are the one part of
+// this encoder that fails SILENTLY when it drifts (a renumbered field lands in
+// unknownFields and the account authenticates with an empty value), and naming them
+// lets TestNaiveAccountFieldNumbersMatchTheCore read the core's generated tags and
+// compare, rather than a human having to notice.
+const (
+	naiveAccountPasswordField = 1
+	naiveAccountUsernameField = 2
+)
+
+type protoStringField struct {
+	number int
+	value  string
+}
+
+// forkAccount builds the same *serial.TypedMessage that serial.ToTypedMessage would,
+// for an account message the panel cannot import.
+//
+// anytls/tuic/naive live only in the PATCHED core (third_party/Xray-core), which the
+// panel does not link: go.mod pins the published github.com/xtls/xray-core and the fork
+// is compiled separately into the embedded xray binary. So there is no
+// proxy/anytls.Account type to hand to serial.ToTypedMessage the way vmess/trojan do,
+// and the message has to be encoded here.
+//
+// That is safe because a TypedMessage is only a type URL plus the message's proto3
+// bytes, and all three of these accounts are strings and nothing else. Neither half
+// fails to compile if the core moves, so it is worth knowing how each one breaks:
+//
+//   - A renamed proto package is LOUD. AddUserOperation.ApplyInbound calls
+//     User.ToMemoryUser, which resolves the type URL through the proto registry and
+//     returns "failed to parse user" for a name it does not know, so AlterInbound
+//     surfaces a gRPC error.
+//   - A RENUMBERED field is silent. proto.Unmarshal files an unrecognised field number
+//     under unknownFields and leaves the credential at its zero value, so the account
+//     is accepted with an empty password and simply never authenticates.
+//
+// Change these in lockstep with the core's .proto.
+func forkAccount(messageType string, fields ...protoStringField) *serial.TypedMessage {
+	var value []byte
+	for _, f := range fields {
+		value = appendProtoStringField(value, f.number, f.value)
+	}
+	return &serial.TypedMessage{Type: messageType, Value: value}
+}
+
+// appendProtoStringField appends one proto3 string field: a varint tag of
+// (number<<3 | 2 /* length-delimited */), a varint byte count, then the bytes. An empty
+// value is skipped, which is exactly what protoc-gen-go emits for a proto3 scalar
+// sitting at its zero value.
+func appendProtoStringField(buf []byte, number int, value string) []byte {
+	if value == "" {
+		return buf
+	}
+	buf = appendProtoVarint(buf, uint64(number)<<3|2)
+	buf = appendProtoVarint(buf, uint64(len(value)))
+	return append(buf, value...)
+}
+
+func appendProtoVarint(buf []byte, v uint64) []byte {
+	for v >= 0x80 {
+		buf = append(buf, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(buf, byte(v))
+}
+
 // AddUser adds a user to an inbound in the Xray core using the specified protocol and user data.
 func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]any) error {
 	userEmail, err := getRequiredUserString(user, "email")
@@ -236,6 +311,48 @@ func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]an
 		account = serial.ToTypedMessage(&hysteriaAccount.Account{
 			Auth: auth,
 		})
+	case "anytls":
+		password, err := getRequiredUserString(user, "password")
+		if err != nil {
+			return err
+		}
+
+		account = forkAccount(anytlsAccountType, protoStringField{1, password})
+	case "tuic":
+		userID, err := getRequiredUserString(user, "id")
+		if err != nil {
+			return err
+		}
+
+		password, err := getRequiredUserString(user, "password")
+		if err != nil {
+			return err
+		}
+
+		account = forkAccount(tuicAccountType,
+			protoStringField{1, userID},
+			protoStringField{2, password},
+		)
+	case "naive":
+		password, err := getRequiredUserString(user, "password")
+		if err != nil {
+			return err
+		}
+
+		// Optional, and the empty case is not a degenerate one: the core falls back to
+		// protocol.User.Email, which is what every account created before naive had a
+		// username field authenticates with. appendProtoStringField skips an empty
+		// value, so the wire bytes for such an account are byte-identical to what this
+		// emitted before the field existed.
+		username, err := getOptionalUserString(user, "username")
+		if err != nil {
+			return err
+		}
+
+		account = forkAccount(naiveAccountType,
+			protoStringField{naiveAccountPasswordField, password},
+			protoStringField{naiveAccountUsernameField, username},
+		)
 	default:
 		return nil
 	}

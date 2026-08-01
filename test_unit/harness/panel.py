@@ -142,8 +142,15 @@ class Panel:
 
     # ---- inbounds / clients --------------------------------------------
     def add_inbound(self, remark: str, port: int, protocol: str,
-                    settings: dict, listen: str = "") -> dict:
-        """Create an inbound. Returns the created inbound dict (has 'id')."""
+                    settings: dict, listen: str = "",
+                    stream: dict | None = None) -> dict:
+        """Create an inbound. Returns the created inbound dict (has 'id').
+
+        `stream` is the Xray streamSettings block. Every VPN/relay protocol leaves
+        it empty (they are served by their own daemon, not by a transport), but the
+        Xray-NATIVE protocols carry theirs there: it is where TLS lives, and for
+        tuic it also selects the transport ("network": "tuic"). Defaults to {} so
+        every existing caller is unchanged."""
         body = self._post("/panel/api/inbounds/add", {
             "remark": remark,
             "enable": "true",
@@ -151,7 +158,7 @@ class Panel:
             "port": str(port),
             "protocol": protocol,
             "settings": json.dumps(settings),
-            "streamSettings": "{}",
+            "streamSettings": json.dumps(stream or {}),
             "sniffing": "{}",
         })
         return body.get("obj", {})
@@ -199,7 +206,15 @@ class Panel:
         times against the client's quota; below it, 1:1.
 
         Re-saving an inbound restarts its daemon, so callers must (re)connect after
-        this, not before."""
+        this, not before.
+
+        streamSettings MUST be echoed back. update_inbound hardcodes it to "{}", and
+        the panel copies an allowlist onto the stored row unconditionally, so without
+        this the inbound loses its whole transport -- TLS included. Every VPN/tunnel
+        protocol leaves streamSettings empty, which is why that went unnoticed; on an
+        Xray-NATIVE inbound (vless/vmess/trojan/shadowsocks/hysteria/anytls/tuic/naive)
+        it silently strips TLS, and the next client gets "connection reset by peer"
+        that looks exactly like a broken protocol rather than a wiped transport."""
         ib = self.get_inbound(inbound_id)
         return self.update_inbound(
             inbound_id,
@@ -209,6 +224,7 @@ class Panel:
             json.loads(ib.get("settings") or "{}"),
             ib.get("listen", "") or "",
             extra={
+                "streamSettings": ib.get("streamSettings", "{}") or "{}",
                 "trafficMultiplierEnable": "true" if enable else "false",
                 "trafficMultiplierAfter": str(int(after_bytes)),
                 "trafficMultiplier": str(multiplier),
@@ -231,6 +247,11 @@ class Panel:
             ib.get("protocol", ""),
             settings,
             ib.get("listen", "") or "",
+            # Echo streamSettings back for the same reason set_traffic_multiplier
+            # does: update_inbound hardcodes "{}" and the panel copies it over
+            # unconditionally. Latent here (User Limit Strategy is a VPN-protocol
+            # concept and those carry no transport) but wrong to leave armed.
+            extra={"streamSettings": ib.get("streamSettings", "{}") or "{}"},
         )
 
     def add_client(self, inbound_id: int, client: dict):
@@ -280,8 +301,11 @@ class Panel:
         # (clientIdentityKey in web/service/inbound.go): the username/password VPNs
         # — l2tp/pptp/openvpn/trojan AND openconnect/sstp/ikev2 — are keyed on the
         # PASSWORD (sending the id/email mis-keys them -> "empty client ID").
+        # anytls and naive join that group: neither carries a uuid, so falling
+        # through to the id/email branch below mis-keys them the same way. tuic is
+        # deliberately absent: it DOES carry a uuid `id` and is keyed on it.
         if proto in ("l2tp", "pptp", "openvpn", "trojan",
-                     "openconnect", "sstp", "ikev2"):
+                     "openconnect", "sstp", "ikev2", "anytls", "naive"):
             client_id = target.get("password", "")
         elif proto == "shadowsocks":
             client_id = target.get("email", "")
@@ -626,9 +650,10 @@ class Panel:
         target["enable"] = True
         proto = ib.get("protocol", "")
         # clientId key per protocol (clientIdentityKey in web/service/inbound.go), same
-        # mapping as set_client_total.
+        # mapping as set_client_total, including anytls/naive, which are keyed on
+        # the password because neither carries a uuid.
         if proto in ("l2tp", "pptp", "openvpn", "trojan",
-                     "openconnect", "sstp", "ikev2"):
+                     "openconnect", "sstp", "ikev2", "anytls", "naive"):
             client_id = target.get("password", "")
         elif proto == "shadowsocks":
             client_id = target.get("email", "")

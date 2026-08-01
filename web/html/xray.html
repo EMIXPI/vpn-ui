@@ -731,6 +731,20 @@
             break;
           case Protocols.DNS:
             return [o.settings?.address + ':' + o.settings?.port];
+          // Flat settings, like VLESS above and unlike the servers[] group. A
+          // missing case here is not a missing feature, it falls through to
+          // `default` and leaves the Address column empty for every row of the
+          // protocol, which reads as an outbound that has not been configured.
+          //
+          // The servers[] fallback covers a hand-written config: TUIC's upstream
+          // accepts that shape, the panel never writes it, and a row pasted into
+          // the JSON tab still has to show its address.
+          case Protocols.AnyTLS:
+          case Protocols.Tuic:
+          case Protocols.Naive:
+            if (o.settings?.address) return [o.settings.address + ':' + o.settings.port];
+            serverObj = o.settings?.servers;
+            break;
           case Protocols.Wireguard:
             return o.settings.peers.map(peer => peer.endpoint);
           default:

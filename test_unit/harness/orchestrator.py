@@ -55,6 +55,7 @@ _PHASE_TAG = {
     "mtproto-toggle": "MT-TOGL", "mtproto-termination": "MT-TERM",
     "mtproto-adtag": "MT-ADTAG",
     "ssh": "SSH", "ssh-udp": "SSH-UDP",
+    "anytls": "ANYTLS", "tuic": "TUIC", "naive": "NAIVE",
     "bulk-ops": "BULK",
     "backup-restore": "BACKUP", "warp-socks": "WARP", "random-cfg": "RANDOM",
     "systemd": "SYSTEMD", "uninstall": "UNINSTALL",
@@ -155,7 +156,8 @@ def run_job(spec: dict, index: int, cfg: dict,
     need_clients = any(_sel(p) for p in ("openvpn", "l2tp", "pptp", "openconnect", "sstp", "ikev2", "wg-c", "awg",
                                          "gre",
                                          "mtproto", "mtproto-classic", "mtproto-secure", "mtproto-tls",
-                                         "mtproto-toggle", "ssh", "ssh-udp"))
+                                         "mtproto-toggle", "ssh", "ssh-udp",
+                                         "anytls", "tuic", "naive"))
     need_setup = (need_clients or _sel(PHASE_SETUP)
                   or _sel(PHASE_BULK) or _sel(PHASE_BACKUP)
                   or _sel(PHASE_SUBSCRIPTION))
@@ -261,7 +263,11 @@ def run_job(spec: dict, index: int, cfg: dict,
             return incus.exec(server_vm, cmd, timeout=timeout)
 
         # --- protocol suites (filtered by the --tests selection) ---
-        for proto in [p for p in ("openvpn", "l2tp", "pptp", "openconnect", "sstp", "wg-c", "awg", "gre", "ssh") if _sel(p)]:
+        for proto in [p for p in ("openvpn", "l2tp", "pptp", "openconnect", "sstp",
+                                  "wg-c", "awg", "gre", "ssh",
+                                  # Xray-native: same driver contract as the rest
+                                  # (protocols.run resolves phase + inbound by name).
+                                  "anytls", "tuic", "naive") if _sel(p)]:
             if _aborting():
                 break
             log(f":: {proto} — connect variants + checks + peer reachability")

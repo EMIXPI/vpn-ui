@@ -1459,7 +1459,7 @@
           to_inbound = dbInbound.toInbound()
           this.inbounds.push(to_inbound);
           this.dbInbounds.push(dbInbound);
-          if ([Protocols.VMESS, Protocols.VLESS, Protocols.TROJAN, Protocols.SHADOWSOCKS, Protocols.L2TP, Protocols.PPTP, Protocols.OPENVPN, Protocols.OPENCONNECT, Protocols.SSTP, Protocols.IKEV2, Protocols.WGC, Protocols.AWG, Protocols.MTPROTO, Protocols.SSH].includes(inbound.protocol)) {
+          if ([Protocols.VMESS, Protocols.VLESS, Protocols.TROJAN, Protocols.SHADOWSOCKS, Protocols.ANYTLS, Protocols.TUIC, Protocols.NAIVE, Protocols.L2TP, Protocols.PPTP, Protocols.OPENVPN, Protocols.OPENCONNECT, Protocols.SSTP, Protocols.IKEV2, Protocols.WGC, Protocols.AWG, Protocols.MTPROTO, Protocols.SSH].includes(inbound.protocol)) {
             if (dbInbound.isSS && (!to_inbound.isSSMultiUser)) {
               continue;
             }
@@ -2243,6 +2243,8 @@
         switch (protocol) {
           case Protocols.TROJAN:
           case Protocols.SHADOWSOCKS:
+          case Protocols.ANYTLS:
+          case Protocols.NAIVE:
           case Protocols.L2TP:
           case Protocols.PPTP:
           case Protocols.OPENVPN:
@@ -2250,6 +2252,9 @@
           case Protocols.SSTP:
           case Protocols.IKEV2:
             return clients.findIndex(item => item && item.password === client.password && item.email === client.email);
+          // TUIC deliberately stays on the default branch: it carries BOTH a uuid and
+          // a password, and the uuid is its identity (clientIdentityKey /
+          // getClientIdentity both key it on id).
           default: return clients.findIndex(item => item && item.id === client.id && item.email === client.email);
         }
       },

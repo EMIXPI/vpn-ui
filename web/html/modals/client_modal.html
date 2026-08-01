@@ -166,6 +166,18 @@
                     return clients.push(
                         new Inbound.HysteriaSettings.Hysteria(),
                     );
+                case Protocols.ANYTLS:
+                    return clients.push(
+                        new Inbound.AnytlsSettings.Anytls(),
+                    );
+                case Protocols.TUIC:
+                    return clients.push(
+                        new Inbound.TuicSettings.Tuic(),
+                    );
+                case Protocols.NAIVE:
+                    return clients.push(
+                        new Inbound.NaiveSettings.Naive(),
+                    );
                 default:
                     return null;
             }

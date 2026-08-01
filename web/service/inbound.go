@@ -494,6 +494,19 @@ func (s *InboundService) NormalizeGrePort(inbound *model.Inbound, id int) error 
 	return common.NewError("no free port left to key a GRE inbound on")
 }
 
+// GetClients decodes an inbound's accounts from its settings JSON.
+//
+// The discarded Unmarshal error is DELIBERATE and load-bearing. The browser's ClientBase
+// defaults tgId to the empty string while model.Client.TgID is an int64, so every inbound
+// the panel has ever written decodes with an UnmarshalTypeError on that one field. Go's
+// decoder skips the mistyped field and keeps going, so the accounts come back complete
+// with TgID=0. Checking the error here would fail EVERY inbound in the database at once.
+//
+// Fixing it at the source is worse than it looks: the client form binds
+// v-model.number="client.tgId", so defaulting to 0 instead would show a spurious 0 in the
+// Telegram box of every account that never set one, across all eight ClientBase
+// protocols. Pinned by TestUnmarshalRecoversFromBrowserTgIdString, which asserts both
+// that the error is real and that the data survives it.
 func (s *InboundService) GetClients(inbound *model.Inbound) ([]model.Client, error) {
 	settings := map[string][]model.Client{}
 	json.Unmarshal([]byte(inbound.Settings), &settings)
@@ -695,6 +708,89 @@ func (s *InboundService) checkEmailsExistExcludingInbound(clients []model.Client
 
 func (s *InboundService) checkEmailsExistForClients(clients []model.Client) (string, error) {
 	return s.checkEmailsExistExcludingInbound(clients, 0)
+}
+
+// firstAnytlsPasswordCollision returns the EMAIL of the first account here that shares
+// its password with an earlier one, or "" when they are all distinct. It names the
+// account rather than the password so the collision can be reported without putting a
+// live credential in an error message, a log line or the panel's UI.
+//
+// AnyTLS carries no username on the wire: a client sends only its password and the core
+// looks the account up by that password's hash. Two accounts sharing one are therefore
+// indistinguishable to everything downstream, and the loser's traffic is booked against
+// the winner, so the core refuses to build such an inbound at all.
+//
+// That refusal is why this is caught here instead of being left to the core. The panel
+// logs AddUser's rejection at Debug and swallows it (it only sets needRestart), so the
+// operator is told the add succeeded; the restart that follows then hands Xray a config
+// it rejects OUTRIGHT, and one unbuildable inbound takes every OTHER inbound on the box
+// down with it. Only hand-typed passwords can collide (generated ones are uuids), but
+// the cost of the one that does is the whole node.
+func firstAnytlsPasswordCollision(clients []model.Client) string {
+	seen := make(map[string]struct{}, len(clients))
+	for _, client := range clients {
+		if client.Password == "" {
+			continue
+		}
+		if _, duplicate := seen[client.Password]; duplicate {
+			return client.Email
+		}
+		seen[client.Password] = struct{}{}
+	}
+	return ""
+}
+
+// naiveAuthUsername returns the Basic-auth username the core will actually match for
+// this account: its own username when it has one, its email otherwise. The fallback is
+// what every naive account predating the username field authenticates with.
+//
+// The test is EMPTY, not blank. The same one-line rule is written four more times (the
+// core's Validator, both share-link generators, the exports), and a trim here would make
+// this the only place where a username of " " means the email, so the panel would
+// validate one credential and hand out another.
+func naiveAuthUsername(client model.Client) string {
+	if client.Username != "" {
+		return client.Username
+	}
+	return client.Email
+}
+
+// firstNaiveUsernameFault returns the EMAIL of the first account whose Basic-auth
+// username is unusable, plus what is wrong with it, or ("", "") when they are all fine.
+// It names the account rather than the username so a collision can be reported without
+// putting half a live credential in an error message or the panel's UI.
+//
+// Two faults, both of which produce an account that exists in the panel and can never
+// log in:
+//
+//   - A COLON. HTTP Basic is base64("user:pass") and the server splits on the FIRST
+//     colon, so a colon in the username silently moves the split and the password the
+//     core compares is not the one the operator typed.
+//   - A DUPLICATE. The core indexes accounts by this value, so two accounts sharing one
+//     are indistinguishable and the loser's traffic is booked against the winner.
+//     Checked against the resolved value, not the raw field: an account with username
+//     "bob" collides with a username-less account whose EMAIL is "bob" just as surely.
+//
+// Caught here rather than left to the core because the core deliberately degrades with
+// a warning instead of failing Build() (an error there makes Xray refuse the ENTIRE
+// config and takes every unrelated inbound on the box down with it), so nothing
+// downstream would ever tell the operator.
+func firstNaiveUsernameFault(clients []model.Client) (string, string) {
+	seen := make(map[string]struct{}, len(clients))
+	for _, client := range clients {
+		if strings.Contains(client.Username, ":") {
+			return client.Email, "a naive username cannot contain a colon"
+		}
+		username := naiveAuthUsername(client)
+		if username == "" {
+			continue
+		}
+		if _, duplicate := seen[username]; duplicate {
+			return client.Email, "duplicate naive username"
+		}
+		seen[username] = struct{}{}
+	}
+	return "", ""
 }
 
 // isVpnProtocol reports whether a protocol is one of the panel's built-in VPN
@@ -976,6 +1072,18 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		}
 	}
 
+	if inbound.Protocol == model.ANYTLS {
+		if dupClient := firstAnytlsPasswordCollision(clients); dupClient != "" {
+			return inbound, false, common.NewError("Duplicate AnyTLS password on client:", dupClient)
+		}
+	}
+
+	if inbound.Protocol == model.NAIVE {
+		if badClient, reason := firstNaiveUsernameFault(clients); badClient != "" {
+			return inbound, false, common.NewError(reason, " on client:", badClient)
+		}
+	}
+
 	db := database.GetDB()
 	tx := db.Begin()
 	defer func() {
@@ -1146,6 +1254,21 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	if existEmail != "" {
 		return inbound, false, duplicateEmailError(existEmail)
+	}
+
+	// No exclusion needed, unlike the email check above: this list REPLACES the stored
+	// one wholesale, so it is already the exact set of accounts the core will be asked
+	// to build.
+	if inbound.Protocol == model.ANYTLS {
+		if dupClient := firstAnytlsPasswordCollision(updatedClients); dupClient != "" {
+			return inbound, false, common.NewError("Duplicate AnyTLS password on client:", dupClient)
+		}
+	}
+
+	if inbound.Protocol == model.NAIVE {
+		if badClient, reason := firstNaiveUsernameFault(updatedClients); badClient != "" {
+			return inbound, false, common.NewError(reason, " on client:", badClient)
+		}
 	}
 
 	oldInbound, err := s.GetInbound(inbound.Id)
@@ -1497,6 +1620,32 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		}
 	}
 
+	// Measured against what the inbound ALREADY holds, not just the incoming batch:
+	// the core's account list is per-inbound, so a new client colliding with a
+	// persisted one is the same fatal config as two new ones colliding with each other.
+	if oldInbound.Protocol == model.ANYTLS {
+		existing, gerr := s.GetClients(oldInbound)
+		if gerr != nil {
+			return false, gerr
+		}
+		if dupClient := firstAnytlsPasswordCollision(append(existing, clients...)); dupClient != "" {
+			return false, common.NewError("Duplicate AnyTLS password on client:", dupClient)
+		}
+	}
+
+	// Same reasoning as the anytls check above: the core's account index is per-inbound,
+	// so a new username colliding with a persisted one is the same broken account as two
+	// new ones colliding with each other.
+	if oldInbound.Protocol == model.NAIVE {
+		existing, gerr := s.GetClients(oldInbound)
+		if gerr != nil {
+			return false, gerr
+		}
+		if badClient, reason := firstNaiveUsernameFault(append(existing, clients...)); badClient != "" {
+			return false, common.NewError(reason, " on client:", badClient)
+		}
+	}
+
 	var oldSettings map[string]any
 	err = json.Unmarshal([]byte(oldInbound.Settings), &oldSettings)
 	if err != nil {
@@ -1548,6 +1697,7 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 					"security": client.Security,
 					"flow":     client.Flow,
 					"password": client.Password,
+					"username": client.Username,
 					"cipher":   cipher,
 				})
 				if err1 == nil {
@@ -1585,13 +1735,22 @@ func clientIdentityKey(protocol model.Protocol) string {
 	// that moves mid-edit cannot be matched against the one the modal opened with.
 	case model.Trojan, model.L2TP, model.PPTP, model.OPENVPN, model.OPENCONNECT, model.SSTP, model.IKEV2:
 		return "password"
+	// Password-credential native Xray protocols. anytls authenticates on the password
+	// alone. naive now carries its own Basic-auth username, and it still must not be
+	// the identity: it is OPTIONAL (an account created before the field has none, and
+	// keying on it would make every one of them unaddressable, "empty client ID" on
+	// edit and a silent no-op on delete) and it is exactly the field an operator
+	// renames, which is the rule the block above already states.
+	case model.ANYTLS, model.NAIVE:
+		return "password"
 	case model.Shadowsocks:
 		return "email"
 	case model.Hysteria, model.Hysteria2:
 		return "auth"
 	default:
 		// vmess/vless (uuid) and the email-identity protocols (wg-c, awg, mtproto,
-		// ssh), whose settings JSON carries id=email.
+		// ssh), whose settings JSON carries id=email. tuic also lands here: it
+		// carries BOTH a uuid and a password, and the uuid is the identity.
 		return "id"
 	}
 }
@@ -1657,6 +1816,10 @@ func (s *InboundService) buildTargetClientFromSource(source model.Client, target
 	target.Password = ""
 	target.Auth = ""
 	target.Flow = ""
+	// naive's Basic-auth username is unique within an inbound, so carrying the source's
+	// over would give the copy a credential that collides on arrival. Cleared rather
+	// than minted: empty falls back to the new email, which is already unique.
+	target.Username = ""
 	// The address-pool slot belongs to the SOURCE inbound's pool. Carrying it over would
 	// hand the copy an address an account in the target inbound may already hold; the add
 	// path allocates a free one there instead.
@@ -1671,6 +1834,17 @@ func (s *InboundService) buildTargetClientFromSource(source model.Client, target
 			target.Flow = flow
 		}
 	case model.Trojan, model.Shadowsocks:
+		target.Password = s.generateRandomCredential(targetProtocol)
+	case model.ANYTLS, model.NAIVE:
+		// Password-only accounts. naive's Basic-auth username is the email, which
+		// was already set above, so nothing else has to be minted.
+		target.Password = s.generateRandomCredential(targetProtocol)
+	case model.TUIC:
+		// TUIC authenticates with a uuid AND a password and is keyed on the uuid, so
+		// both have to be minted or the copy is unusable. The uuid must keep its
+		// dashes: generateRandomCredential strips them for everything but
+		// vmess/vless, and a TUIC client parses this field as a real UUID.
+		target.ID = uuid.NewString()
 		target.Password = s.generateRandomCredential(targetProtocol)
 	case model.Hysteria, model.Hysteria2:
 		target.Auth = s.generateRandomCredential(targetProtocol)
@@ -2013,6 +2187,27 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		}
 	}
 
+	// The edited client REPLACES its old self here rather than joining the list: it is
+	// still in oldClients, and measuring against that unchanged would reject every edit
+	// as a collision with the account being edited.
+	if oldInbound.Protocol == model.ANYTLS {
+		prospective := make([]model.Client, len(oldClients))
+		copy(prospective, oldClients)
+		prospective[clientIndex] = clients[0]
+		if dupClient := firstAnytlsPasswordCollision(prospective); dupClient != "" {
+			return false, common.NewError("Duplicate AnyTLS password on client:", dupClient)
+		}
+	}
+
+	if oldInbound.Protocol == model.NAIVE {
+		prospective := make([]model.Client, len(oldClients))
+		copy(prospective, oldClients)
+		prospective[clientIndex] = clients[0]
+		if badClient, reason := firstNaiveUsernameFault(prospective); badClient != "" {
+			return false, common.NewError(reason, " on client:", badClient)
+		}
+	}
+
 	var oldSettings map[string]any
 	err = json.Unmarshal([]byte(oldInbound.Settings), &oldSettings)
 	if err != nil {
@@ -2120,6 +2315,7 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 				"flow":     clients[0].Flow,
 				"auth":     clients[0].Auth,
 				"password": clients[0].Password,
+				"username": clients[0].Username,
 				"cipher":   cipher,
 			})
 			if err1 == nil {
@@ -3378,6 +3574,7 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (bool, e
 					"security": client.Security,
 					"flow":     client.Flow,
 					"password": client.Password,
+					"username": client.Username,
 					"cipher":   cipher,
 				})
 				if err1 == nil {

@@ -32,6 +32,13 @@ const (
 	GRE         Protocol = "gre"
 	MTPROTO     Protocol = "mtproto"
 	SSH         Protocol = "ssh"
+	// Native Xray protocols like vmess/vless/trojan: the core terminates them
+	// itself, so they take no dokodemo/socks derivation, no core install and no
+	// address pool. See isVpnProtocol / hasDerivedXrayInbound in
+	// web/service/inbound.go for the three lists they must stay OUT of.
+	ANYTLS Protocol = "anytls"
+	TUIC   Protocol = "tuic"
+	NAIVE  Protocol = "naive"
 	// UI stores Hysteria v1 and v2 both as "hysteria" and uses
 	// settings.version to discriminate. Imports from outside the panel
 	// can carry the literal "hysteria2" string, so IsHysteria below
@@ -384,6 +391,19 @@ type Client struct {
 	SubID      string `json:"subId" form:"subId"`           // Subscription identifier
 	Comment    string `json:"comment" form:"comment"`       // Client comment
 	Reset      int    `json:"reset" form:"reset"`           // Reset period in days
+
+	// naive's HTTP Basic username. Empty means "use Email", which is what every naive
+	// account created before this field existed relies on: nothing backfills them, so
+	// the fallback is the compatibility guarantee, not a convenience.
+	//
+	// It is deliberately NOT the accounting identity. Email still keys client_traffics,
+	// quota, expiry, the speed limit and the IP limit, and the core still hands Email to
+	// the dispatcher; only the credential moved. Same trap as the MTProto block below:
+	// every client posted to the panel is normalized through THIS struct, so without the
+	// field here the UI's username would be silently dropped on the add path and the
+	// account would quietly keep authenticating as its email. omitempty so no other
+	// protocol's client JSON grows a byte.
+	Username string `json:"username,omitempty"`
 
 	// Slot is the account's index into its inbound's address pool: which tunnel
 	// address(es) the data plane gives it. It is stored rather than derived from the

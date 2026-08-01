@@ -10,6 +10,13 @@ const Protocols = {
     HTTP: "http",
     Wireguard: "wireguard",
     Hysteria: "hysteria",
+    // Native Xray protocols, same as everything above them: the core speaks all
+    // three, so an outbound here is a real proxy handler and not a facade the
+    // panel keeps alive. Nothing is spawned, nothing is managed, and there is no
+    // /save endpoint behind them the way ssh and the tunnels have one.
+    AnyTLS: "anytls",
+    Tuic: "tuic",
+    Naive: "naive",
     // Not an Xray protocol: Xray core ships no ssh outbound. The panel keeps the
     // SSH connection itself and fronts it with a local SOCKS5 proxy, so what
     // reaches the config is a `socks` outbound pointing at that proxy (see
@@ -75,8 +82,16 @@ function vpnProtocolFor(kind) {
 // Both sides are qualified (see VPN_OUT_KINDS.wireguard) because a heading over
 // the tunnels cannot fix this: it is gone the moment the dropdown closes, and
 // what is left is one label standing alone with no neighbour to compare it to.
+//
+// The other three are here for capitalisation only. The Protocols KEY is what
+// the picker falls back to, and "Tuic"/"Naive" are not how either project spells
+// itself; an operator matching the row against the client they already run
+// should not have to guess that they are the same thing.
 const PROTOCOL_LABELS = {
     [Protocols.Wireguard]: 'WireGuard (Xray)',
+    [Protocols.AnyTLS]: 'AnyTLS',
+    [Protocols.Tuic]: 'TUIC',
+    [Protocols.Naive]: 'NaiveProxy',
 };
 
 // What the Add Outbound picker shows for one protocol. The KEY of the Protocols
@@ -97,6 +112,19 @@ function protocolLabel(value, key) {
 function firstServerOf(json) {
     const servers = json && json.servers;
     return Array.isArray(servers) && servers.length ? servers : [{}];
+}
+
+// A tuning number the operator left BLANK, dropped from the config entirely.
+//
+// The distinction matters because every one of these fields is a Go uint32 whose
+// zero value means "use the core's default": an idleSessionTimeout of 0 is not a
+// zero-second timeout, it is 30 seconds. Emitting 0 for a blank box would look
+// like the operator asked for something and read as the default anyway, so the
+// key is omitted instead and the two states stay distinguishable in the JSON tab.
+function optionalNumber(value) {
+    if (value === '' || value === null || value === undefined) return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
 }
 
 const SSMethods = {
@@ -1176,12 +1204,107 @@ class Outbound extends CommonClass {
     set protocol(protocol) {
         this._protocol = protocol;
         this.settings = Outbound.Settings.getSettings(protocol);
-        this.stream = new StreamSettings();
+        this.stream = Outbound.defaultStreamFor(protocol);
+    }
+
+    // The stream a freshly picked protocol starts on. Everything gets the plain
+    // tcp/none default it always got; the two below get something else because
+    // for them the default is not a starting point, it is a broken outbound the
+    // operator has to know to repair.
+    //
+    // TUIC: its dialer refuses any stream whose network is not "tuic", and reads
+    // its TLS off streamSettings. Starting at tcp/none means the outbound cannot
+    // work until BOTH are changed, and neither is guessable from the form. ALPN
+    // is prefilled to h3 for the third reason in the same family: the server is
+    // pinned to h3, an empty ALPN is what every other client defaults to, and the
+    // mismatch surfaces as "tls: no application protocol" naming neither end.
+    //
+    // AnyTLS: TLS is the protocol. It runs over a normal Xray stream, so the
+    // network stays tcp and the operator can move it, but security starting at
+    // "none" would be a plaintext AnyTLS outbound, which is not a configuration
+    // anyone wants and not one the far side would accept.
+    // NAIVE: two stacks behind one protocol, and which one is dialled is decided
+    // by settings.network while the stream it is dialled over is decided here.
+    // They are set together by setNaiveNetwork below and start on the h2 pair.
+    static defaultStreamFor(protocol) {
+        if (protocol === Protocols.Tuic) {
+            const stream = new StreamSettings('tuic', 'tls');
+            stream.tls.alpn = ['h3'];
+            return stream;
+        }
+        if (protocol === Protocols.AnyTLS) return new StreamSettings('tcp', 'tls');
+        if (protocol === Protocols.Naive) {
+            const stream = new StreamSettings('tcp', 'tls');
+            stream.tls.alpn = ['h2'];
+            stream.tls.fingerprint = UTLS_FINGERPRINT.UTLS_CHROME;
+            return stream;
+        }
+        return new StreamSettings();
+    }
+
+    // Moves a naive outbound between its two stacks, both halves at once.
+    //
+    // The core reads ONE of them and the transport layer reads the other, so
+    // setting either alone produces an outbound that dials the wrong stack:
+    //
+    //   tcp -> HTTP/2 CONNECT written straight onto an ordinary TLS stream, so
+    //          streamSettings is the plain tcp one and ALPN must be h2. The
+    //          client checks the negotiated ALPN itself and refuses anything
+    //          else, which is the one failure here that names its own cause.
+    //   udp -> HTTP/3, dialled through the "naive" transport. That dialer takes
+    //          its TLS from streamSettings and REFUSES to run at all for anything
+    //          other than a naive outbound, so the network name has to be
+    //          "naive" and security has to be tls.
+    //
+    // The core now normalises a mismatched pair in both directions, so this is
+    // belt and braces rather than the only thing standing between the operator
+    // and a dead outbound. It stays because a config that only works because
+    // something downstream rewrote it is not one the JSON tab should be showing.
+    setNaiveNetwork(network) {
+        this.settings.network = network === 'udp' ? 'udp' : 'tcp';
+        this.stream.security = 'tls';
+        if (this.settings.network === 'udp') {
+            this.stream.network = 'naive';
+            // An explicit h3 is honoured as-is (the dialer only substitutes when
+            // h3 is absent), so this is exactly what goes on the wire.
+            this.stream.tls.alpn = ['h3'];
+            // The fingerprint is deliberately left ALONE here rather than
+            // cleared. uTLS rewrites a TLS-over-TCP ClientHello and is never
+            // consulted on a QUIC path, so it is inert on h3. But it is inert
+            // on tuic and hysteria too and the panel does not clear it for them
+            // either, and clearing it would throw away a deliberate choice the
+            // moment someone toggled to UDP and back.
+        } else {
+            this.stream.network = 'tcp';
+            this.stream.tls.alpn = ['h2'];
+            // Only when nothing is set, so firefox or safari survives a toggle.
+            //
+            // The whole reason h2 stays on the ordinary TLS stream instead of
+            // going through naive's own transport is to pick up Xray's uTLS. Left
+            // empty, the ClientHello is Go's, which is the single most
+            // recognisable thing naive exists to avoid: the outbound would work
+            // perfectly and be trivially classifiable.
+            if (!this.stream.tls.fingerprint) {
+                this.stream.tls.fingerprint = UTLS_FINGERPRINT.UTLS_CHROME;
+            }
+        }
     }
 
     canEnableTls() {
         if (this.protocol === Protocols.Hysteria) return true;
-        if (![Protocols.VMess, Protocols.VLESS, Protocols.Trojan, Protocols.Shadowsocks].includes(this.protocol)) return false;
+        // TUIC is QUIC, so TLS is not a choice the operator makes, it is the only
+        // way the protocol exists. The section is offered anyway because it is
+        // where SNI and ALPN live, and ALPN in particular is not optional here:
+        // the server is pinned to h3 and a client that negotiates anything else
+        // fails the handshake with "tls: no application protocol", which names
+        // neither side. See the ALPN field in the tuic block of form/outbound.
+        if (this.protocol === Protocols.Tuic) return true;
+        // naive for the same reason on the h3 side, where the stream network is
+        // "naive" and would fall out of the transport list below. Its h2 side
+        // needs the section just as much: the client reads the negotiated ALPN
+        // and refuses anything that is not h2, so ALPN has to be settable.
+        if (this.protocol === Protocols.Naive) return true;
+        if (![Protocols.VMess, Protocols.VLESS, Protocols.Trojan, Protocols.Shadowsocks, Protocols.AnyTLS].includes(this.protocol)) return false;
         return ["tcp", "ws", "http", "grpc", "httpupgrade", "xhttp"].includes(this.stream.network);
     }
 
@@ -1201,12 +1324,41 @@ class Outbound extends CommonClass {
     }
 
     canEnableReality() {
-        if (![Protocols.VLESS, Protocols.Trojan].includes(this.protocol)) return false;
+        // AnyTLS carries no transport of its own: it is a session-multiplexing
+        // layer that runs over whatever stream Xray hands it, so REALITY works
+        // for it on exactly the networks it works for VLESS and Trojan, and for
+        // the same reason. TUIC is deliberately absent: it IS its transport.
+        if (![Protocols.VLESS, Protocols.Trojan, Protocols.AnyTLS].includes(this.protocol)) return false;
         return ["tcp", "http", "grpc", "xhttp"].includes(this.stream.network);
     }
 
+    // Whether this outbound gets a streamSettings object at all. Not cosmetic:
+    // toJson() emits streamSettings only when this is true, so a protocol whose
+    // core-side dialer READS streamSettings has to be listed here or it dials
+    // with none.
+    //
+    // TUIC is listed for exactly that reason. Its dialer takes the TLS config off
+    // streamSettings and rejects any stream whose network is not "tuic", the same
+    // way the hysteria transport does, so both keys have to reach the config.
+    //
+    // NAIVE is listed for it too, and it is the one that is easy to get wrong.
+    // naive looks self-contained (it speaks its own HTTP and does its own
+    // padding), but it does NOT bring its own TLS: the h2 path writes CONNECT
+    // onto whatever stream Xray dials, and the h3 path goes through the "naive"
+    // transport, which reads TLS off streamSettings and refuses to run without
+    // it. Leaving naive out here emits no streamSettings at all, and the outbound
+    // then either speaks plaintext h2 or fails h3 outright. See setNaiveNetwork.
     canEnableStream() {
-        return [Protocols.VMess, Protocols.VLESS, Protocols.Trojan, Protocols.Shadowsocks, Protocols.Hysteria].includes(this.protocol);
+        return [
+            Protocols.VMess,
+            Protocols.VLESS,
+            Protocols.Trojan,
+            Protocols.Shadowsocks,
+            Protocols.Hysteria,
+            Protocols.AnyTLS,
+            Protocols.Tuic,
+            Protocols.Naive,
+        ].includes(this.protocol);
     }
 
     canEnableMux() {
@@ -1223,6 +1375,16 @@ class Outbound extends CommonClass {
         }
 
         // Allow Mux only for these protocols
+        //
+        // anytls, tuic and naive are deliberately absent, and not because Mux
+        // would merely be redundant on top of protocols that already multiplex.
+        // Mux takes the outbound over BEFORE the protocol handler is reached and
+        // dials the marker host v1.mux.cool:9527, which nothing resolves; the
+        // dial error is logged at Info while the panel runs at warning, so the
+        // config is valid, Xray boots, and 100% of that tag's traffic dead-ends
+        // with no log line anywhere. Being absent here also strips a `mux` object
+        // pasted into the JSON tab on serialise (see toJson), which is the only
+        // other way one can get onto these.
         return [
             Protocols.VMess,
             Protocols.VLESS,
@@ -1233,6 +1395,9 @@ class Outbound extends CommonClass {
         ].includes(this.protocol);
     }
 
+    // Whether the settings object nests its address/port under a `servers` array.
+    // anytls/tuic/naive do NOT: all three are flat, so they stay out of this list
+    // and their address/port come from hasAddressPort below.
     hasServers() {
         return [Protocols.Trojan, Protocols.Shadowsocks, Protocols.Socks, Protocols.HTTP].includes(this.protocol);
     }
@@ -1246,7 +1411,10 @@ class Outbound extends CommonClass {
             Protocols.Shadowsocks,
             Protocols.Socks,
             Protocols.HTTP,
-            Protocols.Hysteria
+            Protocols.Hysteria,
+            Protocols.AnyTLS,
+            Protocols.Tuic,
+            Protocols.Naive
         ].includes(this.protocol);
     }
 
@@ -1255,11 +1423,34 @@ class Outbound extends CommonClass {
     }
 
     static fromJson(json = {}) {
+        const out = Outbound.fromJsonInner(json);
+        // A naive outbound with NO streamSettings has to derive one, and it can
+        // only be derived after the settings are parsed because it is
+        // settings.network that decides it. There is no operator intent to
+        // preserve in this branch, which is why it is safe to write here and
+        // nowhere else: a config that DID carry a stream keeps exactly the one
+        // it came with, even a mismatched one, so the JSON tab keeps showing
+        // what is really on disk.
+        if (out.protocol === Protocols.Naive && !json.streamSettings) {
+            out.setNaiveNetwork(out.settings.network);
+        }
+        return out;
+    }
+
+    static fromJsonInner(json = {}) {
         return new Outbound(
             json.tag,
             json.protocol,
             Outbound.Settings.fromJson(json.protocol, json.settings),
-            StreamSettings.fromJson(json.streamSettings),
+            // An outbound with NO streamSettings at all gets the protocol's
+            // default rather than a bare one. Identical for every protocol that
+            // existed before (defaultStreamFor returns exactly `new
+            // StreamSettings()` for all of them), and it is what stops a TUIC
+            // outbound pasted into the JSON tab without a streamSettings block
+            // from landing on network "tcp", which its dialer refuses outright.
+            json.streamSettings
+                ? StreamSettings.fromJson(json.streamSettings)
+                : Outbound.defaultStreamFor(json.protocol),
             json.sendThrough,
             Mux.fromJson(json.mux),
         )
@@ -1351,9 +1542,126 @@ class Outbound extends CommonClass {
             case 'hysteria2':
             case Protocols.Hysteria:
                 return this.fromHysteriaLink(link);
+            // anytls goes through the generic parser and not a parser of its own
+            // because its link IS a trojan link with a different scheme: the panel
+            // that emits it fills the query string from streamShareParams, so it
+            // carries type=, security=, and everything ws / grpc / xhttp / REALITY
+            // need. A hand-written parser reading only sni and alpn would import
+            // one of those onto a plain tcp stream, which connects to nothing and
+            // looks like a correct row.
+            case Protocols.AnyTLS:
+                return this.fromParamLink(link);
+            case Protocols.Tuic:
+                return this.fromTuicLink(link);
+            // naive has no scheme of its own: naiveproxy's own --proxy flag takes
+            // the transport's scheme directly (https:// for h2, quic:// for h3),
+            // and the panels that do emit a link prefix that with "naive+". Both
+            // are accepted, and a bare naive:// alongside them, because that is
+            // what an operator types when they are copying the protocol name.
+            case Protocols.Naive:
+            case 'naive+https':
+            case 'naive+quic':
+                return this.fromNaiveLink(link);
             default:
                 return null;
         }
+    }
+
+    // The userinfo of a share link, decoded.
+    //
+    // URL keeps username and password percent-ENCODED (unlike searchParams,
+    // which decodes), so a password containing @ : / or #, all of which have to
+    // be escaped to survive the authority, comes back escaped and authenticates
+    // as the wrong string. Returns null for a link the URL parser rejects, which
+    // is how each caller reports "Wrong Link!" instead of throwing out of the
+    // import handler.
+    static parseShareLink(link) {
+        let url;
+        try {
+            url = new URL(link);
+        } catch (_) {
+            return null;
+        }
+        if (!url.hostname) return null;
+        const decode = s => {
+            try { return decodeURIComponent(s); } catch (_) { return s; }
+        };
+        // A non-special scheme keeps IPv6 brackets in hostname. They belong in a
+        // URL and not in a config field, where the address is a bare host.
+        const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
+        let remark = decode(url.hash || '');
+        remark = remark.length > 1 ? remark.substring(1) : '';
+        return {
+            url: url,
+            address: host,
+            port: url.port ? Number(url.port) : 443,
+            user: decode(url.username || ''),
+            pass: decode(url.password || ''),
+            params: url.searchParams,
+            remark: remark,
+        };
+    }
+
+    // tuic://uuid:password@host:port?congestion_control=&udp_relay_mode=&alpn=&sni=#remark
+    //
+    // Not routed through fromParamLink the way anytls is: a TUIC link carries no
+    // type= or security= because there is nothing to choose, and its parameters
+    // are named for TUIC rather than for Xray's transport layer.
+    //
+    // Both halves of the userinfo are required. TUIC v5 authenticates with a UUID
+    // AND a password, and a link carrying only one of them is not a TUIC link.
+    static fromTuicLink(link) {
+        const p = Outbound.parseShareLink(link);
+        if (!p) return null;
+        if (!p.user || !p.pass) return null;
+        const stream = new StreamSettings('tuic', 'tls');
+        const alpn = p.params.get('alpn');
+        stream.tls = new TlsStreamSettings(
+            p.params.get('sni') || p.address,
+            // h3 when the link does not say, because the server is pinned to it
+            // and an empty ALPN is a failed handshake here rather than a default.
+            alpn ? alpn.split(',').map(a => a.trim()).filter(a => a) : ['h3'],
+            // Never defaulted to 'none': that is not a uTLS fingerprint and Xray
+            // rejects the whole config with "unknown fingerprint".
+            p.params.get('fp') || '',
+        );
+        const settings = new Outbound.TuicSettings(
+            p.address,
+            p.port,
+            p.user,
+            p.pass,
+            p.params.get('congestion_control') || p.params.get('congestionControl') || 'cubic',
+            p.params.get('udp_relay_mode') || p.params.get('udpRelayMode') || 'native',
+            ['1', 'true'].includes(String(p.params.get('zero_rtt_handshake') || '').toLowerCase()),
+        );
+        return new Outbound(p.remark || ('out-tuic-' + p.port), Protocols.Tuic, settings, stream);
+    }
+
+    // naive://user:pass@host:port#remark, and the naive+https / naive+quic forms
+    // that carry the transport in the scheme. https and a bare naive mean h2 over
+    // TCP; quic means h3.
+    static fromNaiveLink(link) {
+        const p = Outbound.parseShareLink(link);
+        if (!p) return null;
+        if (!p.user) return null;
+        const scheme = link.split('://')[0].toLowerCase();
+        // The link's user half goes into EMAIL with the username left empty, and that is
+        // not a guess about which of the two it was: a link carries the credential the
+        // server matched, never both, so nothing here can tell them apart. Email is the
+        // slot that reproduces it on the wire either way, because the core falls back to
+        // the email when there is no username.
+        const settings = new Outbound.NaiveSettings(p.address, p.port, p.user, '', p.pass);
+        const out = new Outbound(
+            p.remark || ('out-naive-' + p.port),
+            Protocols.Naive,
+            settings,
+            Outbound.defaultStreamFor(Protocols.Naive),
+        );
+        // Through the setter, not by assigning settings.network: the stream has
+        // to move with it or an imported quic link dials h3 over a tcp stream.
+        out.setNaiveNetwork(scheme === 'naive+quic' ? 'udp' : 'tcp');
+        out.stream.tls.serverName = p.params.get('sni') || p.address;
+        return out;
     }
 
     // Merge a share link's `extra` object onto an xHTTPStreamSettings instance.
@@ -1534,6 +1842,14 @@ class Outbound extends CommonClass {
             case Protocols.Trojan:
                 settings = new Outbound.TrojanSettings(address, port, userData);
                 break;
+            case Protocols.AnyTLS:
+                // Decoded, unlike the two above. `userData` here is the raw
+                // authority slice, and the generator that writes an anytls link
+                // percent-encodes the password into it, so a password holding an
+                // @ : / or # arrives as %40 %3A %2F %23 and would be stored, and
+                // then sent, as those literal characters.
+                settings = new Outbound.AnyTLSSettings(address, port, decodeURIComponent(userData));
+                break;
             case Protocols.Shadowsocks:
                 let method = userData.splice(0, 1)[0];
                 settings = new Outbound.ShadowsocksSettings(address, port, userData.join(":"), method, true);
@@ -1636,7 +1952,15 @@ Outbound.Settings = class extends CommonClass {
             case Protocols.HTTP: return new Outbound.HttpSettings();
             case Protocols.Wireguard: return new Outbound.WireguardSettings();
             case Protocols.Hysteria: return new Outbound.HysteriaSettings();
+            case Protocols.AnyTLS: return new Outbound.AnyTLSSettings();
+            case Protocols.Tuic: return new Outbound.TuicSettings();
+            case Protocols.Naive: return new Outbound.NaiveSettings();
             case Protocols.SSH: return new Outbound.SshSettings();
+            // Reached only for a protocol nobody added a case for, and the null
+            // is load-bearing downstream in the worst way: canEnableMux() reads
+            // this.settings.flow unguarded, so a missing case does not render an
+            // empty form, it throws inside the render and leaves the whole panel
+            // blank behind v-cloak with nothing in the console pointing here.
             default: return null;
         }
     }
@@ -1655,7 +1979,13 @@ Outbound.Settings = class extends CommonClass {
             case Protocols.HTTP: return Outbound.HttpSettings.fromJson(json);
             case Protocols.Wireguard: return Outbound.WireguardSettings.fromJson(json);
             case Protocols.Hysteria: return Outbound.HysteriaSettings.fromJson(json);
+            case Protocols.AnyTLS: return Outbound.AnyTLSSettings.fromJson(json);
+            case Protocols.Tuic: return Outbound.TuicSettings.fromJson(json);
+            case Protocols.Naive: return Outbound.NaiveSettings.fromJson(json);
             case Protocols.SSH: return Outbound.SshSettings.fromJson(json);
+            // Same null, same consequence as in getSettings above: an outbound
+            // read back from the config with no case here reaches the form with
+            // settings === null and blanks the page on the first render.
             default: return null;
         }
     }
@@ -1979,6 +2309,254 @@ Outbound.TrojanSettings = class extends CommonClass {
         };
     }
 };
+
+// AnyTLS, TUIC and NaiveProxy all take a FLAT settings object: address and port
+// sit at the top level, not inside a `servers` array. That is what the core's
+// client configs read, so it is what these emit.
+//
+// They still read a `servers` array back, through firstServerOf. Not for the
+// panel's own output, which never produces one, but because the JSON tab accepts
+// anything and TUIC in particular has a documented servers[] form in the upstream
+// the port comes from, so an operator pasting one is a normal thing to happen.
+// ObjectUtil.isArrEmpty is the wrong guard for that and always has been: it
+// answers "is this an EMPTY array", so isArrEmpty(undefined) is FALSE and the
+// guard reads straight through to servers[0] on the flat object that has no
+// servers at all. The throw lands inside outModal.show() AFTER it has set
+// visible, so Edit on such a row opens the dialog holding the PREVIOUSLY edited
+// outbound with OK live, and confirming overwrites the real row.
+Outbound.AnyTLSSettings = class extends CommonClass {
+    constructor(
+        address = '',
+        port = 443,
+        password = '',
+        // Blank, not zero, and blank is what gets sent. See optionalNumber: the
+        // core treats 0 as "use my default", so a prefilled 0 would claim the
+        // operator chose something and behave as though they had not.
+        idleSessionCheckInterval = null,
+        idleSessionTimeout = null,
+        minIdleSession = null,
+        // Opens a fresh session per connection instead of reusing an idle one.
+        // A boolean and not a blank-means-default number: false IS the default,
+        // and there is nothing for the core to fill in.
+        disableReuse = false,
+    ) {
+        super();
+        this.address = address;
+        this.port = port;
+        this.password = password;
+        this.idleSessionCheckInterval = idleSessionCheckInterval;
+        this.idleSessionTimeout = idleSessionTimeout;
+        this.minIdleSession = minIdleSession;
+        this.disableReuse = disableReuse;
+    }
+
+    static fromJson(json = {}) {
+        const server = firstServerOf(json)[0];
+        return new Outbound.AnyTLSSettings(
+            json.address ?? server.address ?? '',
+            json.port ?? server.port ?? 443,
+            json.password ?? server.password ?? '',
+            json.idleSessionCheckInterval ?? null,
+            json.idleSessionTimeout ?? null,
+            json.minIdleSession ?? null,
+            !!json.disableReuse,
+        );
+    }
+
+    toJson() {
+        return {
+            address: this.address,
+            port: this.port,
+            password: this.password,
+            idleSessionCheckInterval: optionalNumber(this.idleSessionCheckInterval),
+            idleSessionTimeout: optionalNumber(this.idleSessionTimeout),
+            minIdleSession: optionalNumber(this.minIdleSession),
+            disableReuse: !!this.disableReuse,
+        };
+    }
+};
+
+Outbound.TuicSettings = class extends CommonClass {
+    constructor(
+        address = '',
+        port = 443,
+        id = '',
+        password = '',
+        congestionControl = 'cubic',
+        // "native" sends each UDP packet as its own QUIC datagram, "quic" wraps
+        // the UDP session in a reliable stream. Both ends must agree; native is
+        // the default on every TUIC client and is what this starts on.
+        udpRelayMode = 'native',
+        zeroRttHandshake = false,
+        heartbeat = null,
+    ) {
+        super();
+        this.address = address;
+        this.port = port;
+        this.id = id;
+        this.password = password;
+        this.congestionControl = congestionControl;
+        this.udpRelayMode = udpRelayMode;
+        this.zeroRttHandshake = zeroRttHandshake;
+        this.heartbeat = heartbeat;
+    }
+
+    // No `alpn` here on purpose. TUIC's ALPN is ordinary TLS ALPN and it is read
+    // off streamSettings.tlsSettings.alpn by the dialer, the same place SNI and
+    // the fingerprint come from, so a second copy in the settings object would be
+    // two sources for one value with nothing deciding which wins. The form binds
+    // its ALPN field straight to the stream's, prefilled with h3, so the operator
+    // still meets it in the TUIC block rather than having to know to go looking
+    // for it under TLS. See Outbound.defaultStreamFor.
+    static fromJson(json = {}) {
+        const server = firstServerOf(json)[0];
+        return new Outbound.TuicSettings(
+            json.address ?? server.address ?? '',
+            json.port ?? server.port ?? 443,
+            json.id ?? server.id ?? '',
+            json.password ?? server.password ?? '',
+            json.congestionControl || 'cubic',
+            // Accept either spelling on the way in. udpStream is the boolean the
+            // upstream config struct declares; udpRelayMode is what every TUIC
+            // client, share link and piece of documentation calls it.
+            json.udpRelayMode || (json.udpStream ? 'quic' : 'native'),
+            !!json.zeroRttHandshake,
+            json.heartbeat ?? null,
+        );
+    }
+
+    toJson() {
+        const quicRelay = this.udpRelayMode === 'quic';
+        return {
+            address: this.address,
+            port: this.port,
+            id: this.id,
+            password: this.password,
+            congestionControl: this.congestionControl,
+            // BOTH spellings, deliberately, and they are always consistent
+            // because one is derived from the other. The core ignores JSON keys
+            // it does not declare (nothing in it sets DisallowUnknownFields), so
+            // the cost of the extra key is a line in the JSON tab. The cost of
+            // guessing wrong is not symmetric: whichever name the core does not
+            // read leaves udpStream at its zero value, which is native, so an
+            // operator who deliberately selected quic would get native with the
+            // form still showing quic and no error anywhere.
+            udpRelayMode: this.udpRelayMode,
+            udpStream: quicRelay,
+            zeroRttHandshake: !!this.zeroRttHandshake,
+            heartbeat: optionalNumber(this.heartbeat),
+        };
+    }
+};
+
+Outbound.NaiveSettings = class extends CommonClass {
+    constructor(
+        address = '',
+        port = 443,
+        // BOTH halves exist because the server's account has both. naive sends one
+        // `Proxy-Authorization: Basic base64(user:password)`, and the user half is the
+        // account's username when it has one and its EMAIL when it does not, which is
+        // what every account created before naive had a username field uses.
+        //
+        // The core prefers username when both are set, so an operator dialling an older
+        // server fills in Email and leaves Username blank, exactly as before this field
+        // existed.
+        //
+        // Unlike the inbound's client list, which degrades a bad account with a warning,
+        // this config ERRORS out of Build(): carrying neither, carrying no password, or
+        // putting a colon in the username makes Xray refuse the WHOLE config, taking
+        // every unrelated inbound on the box with it. Nothing panel-side stops that yet,
+        // which is why the form says so.
+        email = '',
+        username = '',
+        password = '',
+        // Which HTTP the dialer speaks: tcp is h2 over TLS, udp is h3 over QUIC.
+        // A single value, unlike the inbound's, which accepts "tcp,udp" because
+        // it can listen for both at once. A dialer picks one, and the core reads
+        // "udp" as h3 only when tcp is absent.
+        //
+        // NOT independent of streamSettings.network: the two have to be set
+        // together or the outbound dials the wrong stack. See setNaiveNetwork.
+        network = 'tcp',
+    ) {
+        super();
+        this.address = address;
+        this.port = port;
+        this.email = email;
+        this.username = username;
+        this.password = password;
+        this.network = network;
+    }
+
+    // Which wire a `network` string actually dials, by the core's own rules.
+    //
+    // A SECOND IMPLEMENTATION of ParseNetwork in
+    // third_party/Xray-core/transport/internet/naive/config.go, and therefore a
+    // thing that can drift, in the same way clientIdentityKey and
+    // getClientIdentity can. Edit them together. That pair has a test parsing the
+    // JS to hold it; this one deliberately does not, because the blast radius is
+    // much smaller: the panel only ever WRITES a bare "tcp" or "udp", so a drift
+    // here cannot produce a bad config, only a wrong reading of a hand-written
+    // one.
+    //
+    // The drift is also one-sided. An unrecognised string falls back to h2, and
+    // h2 is what every tcp spelling resolves to anyway, so a tcp spelling added
+    // upstream and not mirrored here still lands on the right answer by accident.
+    // Only a NEW UDP SPELLING can be read wrongly: it would dial h3 upstream and
+    // resolve to tcp here, which is the "form shows a tcp stream for an HTTP/3
+    // connection" bug this function exists to fix.
+    //
+    // ParseNetwork is more permissive than the two values this form offers: it
+    // accepts h2/http2 alongside tcp and h3/http3/quic alongside udp, reads a
+    // comma-separated list, and falls back to BOTH for an empty or unrecognised
+    // string. A dialer can only open one wire, so h3 is chosen only when it is
+    // asked for ALONE and everything else resolves to h2.
+    //
+    // Normalising on the way in matters for a hand-written config. "h3" and
+    // "quic" dial h3, so leaving them unresolved would park the form on the TCP
+    // option and show a tcp stream for an HTTP/3 connection. "tcp,udp" and a typo
+    // are the other half: both dial h2, and neither matches an option in the
+    // picker, so the select would render blank and the operator could not tell
+    // which wire they were on.
+    static resolveNetwork(network) {
+        let tcp = false;
+        let udp = false;
+        String(network ?? '').toLowerCase().split(',').forEach(part => {
+            switch (part.trim()) {
+                case 'tcp': case 'h2': case 'http2': tcp = true; break;
+                case 'udp': case 'h3': case 'http3': case 'quic': udp = true; break;
+            }
+        });
+        return udp && !tcp ? 'udp' : 'tcp';
+    }
+
+    static fromJson(json = {}) {
+        const server = firstServerOf(json)[0];
+        return new Outbound.NaiveSettings(
+            json.address ?? server.address ?? '',
+            json.port ?? server.port ?? 443,
+            // Read apart, not collapsed. They used to fold into one field because the
+            // core had only `email`; a config carrying both would now lose the email,
+            // and the email is what the server books the traffic against.
+            json.email ?? server.email ?? '',
+            json.username ?? server.username ?? '',
+            json.password ?? server.password ?? '',
+            Outbound.NaiveSettings.resolveNetwork(json.network),
+        );
+    }
+
+    toJson() {
+        return {
+            address: this.address,
+            port: this.port,
+            email: this.email,
+            username: this.username,
+            password: this.password,
+            network: this.network,
+        };
+    }
+};
+
 Outbound.ShadowsocksSettings = class extends CommonClass {
     constructor(address, port, password, method, uot, UoTVersion) {
         super();

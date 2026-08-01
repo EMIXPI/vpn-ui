@@ -139,7 +139,7 @@ func (s *SubService) getInboundsBySubId(subId string) ([]*model.Inbound, error) 
 		FROM inbounds,
 			JSON_EACH(JSON_EXTRACT(inbounds.settings, '$.clients')) AS client
 		WHERE
-			protocol in ('vmess','vless','trojan','shadowsocks','hysteria','hysteria2','mtproto','ssh','wg-c','awg','gre','openvpn','l2tp','pptp','openconnect','sstp','ikev2')
+			protocol in ('vmess','vless','trojan','shadowsocks','hysteria','hysteria2','anytls','tuic','naive','mtproto','ssh','wg-c','awg','gre','openvpn','l2tp','pptp','openconnect','sstp','ikev2')
 			AND JSON_EXTRACT(client.value, '$.subId') = ? AND enable = ?
 	)`, subId, true).Find(&inbounds).Error
 	if err != nil {
@@ -192,6 +192,12 @@ func (s *SubService) getLink(inbound *model.Inbound, email string) string {
 		return s.genShadowsocksLink(inbound, email)
 	case "hysteria", "hysteria2":
 		return s.genHysteriaLink(inbound, email)
+	case "anytls":
+		return s.genAnytlsLink(inbound, email)
+	case "tuic":
+		return s.genTuicLink(inbound, email)
+	case "naive":
+		return s.genNaiveLink(inbound, email)
 	case "mtproto":
 		// tg:// is the link Telegram itself imports, but no proxy client can parse it,
 		// so the account would contribute nothing a subscription importer recognises.
@@ -521,6 +527,12 @@ func protocolLabel(p model.Protocol) string {
 		return "MTProto"
 	case model.SSH:
 		return "SSH"
+	case model.ANYTLS:
+		return "AnyTLS"
+	case model.TUIC:
+		return "TUIC"
+	case model.NAIVE:
+		return "NaiveProxy"
 	}
 	return string(p)
 }
@@ -846,6 +858,225 @@ func (s *SubService) genHysteriaLink(inbound *model.Inbound, email string) strin
 	url.RawQuery = q.Encode()
 	url.Fragment = s.genRemark(inbound, email, "")
 	return url.String()
+}
+
+// genAnytlsLink emits `anytls://<password>@host:port?<stream params>#<remark>`, the URI
+// sing-box, mihomo and the NekoBox family import.
+//
+// AnyTLS rides Xray's ordinary transport layer, so its query parameters are exactly the
+// ones genTrojanLink emits and the External Proxy fan-out behaves identically.
+//
+// A REALITY inbound still renders `security=reality` here even though mihomo refuses
+// that combination outright: the link describes what the server actually runs, and one
+// that quietly claimed plain TLS would fail in the handshake with nothing to go on.
+func (s *SubService) genAnytlsLink(inbound *model.Inbound, email string) string {
+	if inbound.Protocol != model.ANYTLS {
+		return ""
+	}
+	clients, _ := s.inboundService.GetClients(inbound)
+	clientIndex := findClientIndex(clients, email)
+	if clientIndex < 0 {
+		return ""
+	}
+	address := s.resolveInboundAddress(inbound)
+	stream := unmarshalStreamSettings(inbound.StreamSettings)
+	// url.User pre-escapes, so a hand-typed password holding a '@' or a ':' still
+	// parses. Left raw it would make url.Parse fail, and every caller here ignores
+	// that error and dereferences the nil URL.
+	userinfo := url.User(clients[clientIndex].Password).String()
+	streamNetwork, _ := stream["network"].(string)
+	params := make(map[string]string)
+	params["type"] = streamNetwork
+
+	applyShareNetworkParams(stream, streamNetwork, params)
+	if finalmask, ok := stream["finalmask"].(map[string]any); ok {
+		applyFinalMaskParams(finalmask, params)
+	}
+	security, _ := stream["security"].(string)
+	switch security {
+	case "tls":
+		applyShareTLSParams(stream, params)
+	case "reality":
+		applyShareRealityParams(stream, params)
+	default:
+		params["security"] = "none"
+	}
+
+	externalProxies, _ := stream["externalProxy"].([]any)
+	if len(externalProxies) > 0 {
+		return s.buildExternalProxyURLLinks(
+			externalProxies,
+			params,
+			security,
+			func(dest string, port int) string {
+				return fmt.Sprintf("anytls://%s@%s", userinfo, net.JoinHostPort(dest, strconv.Itoa(port)))
+			},
+			func(ep map[string]any) string {
+				return s.genRemark(inbound, email, ep["remark"].(string))
+			},
+		)
+	}
+
+	link := fmt.Sprintf("anytls://%s@%s", userinfo, net.JoinHostPort(address, strconv.Itoa(inbound.Port)))
+	return buildLinkWithParams(link, params, s.genRemark(inbound, email, ""))
+}
+
+// genTuicLink emits `tuic://<uuid>:<password>@host:port?...#<remark>`, the URI v2rayN,
+// NekoBox and the Rust tuic-client family import.
+//
+// `alpn=h3` is NOT decoration. The server pins h3, while sing-box, mihomo AND
+// tuic-client all default to an EMPTY ALPN list, so a link without it fails the
+// handshake with nothing but "tls: no application protocol" to go on.
+func (s *SubService) genTuicLink(inbound *model.Inbound, email string) string {
+	if inbound.Protocol != model.TUIC {
+		return ""
+	}
+	clients, _ := s.inboundService.GetClients(inbound)
+	clientIndex := findClientIndex(clients, email)
+	if clientIndex < 0 {
+		return ""
+	}
+	client := clients[clientIndex]
+	stream := unmarshalStreamSettings(inbound.StreamSettings)
+
+	var settings map[string]any
+	json.Unmarshal([]byte(inbound.Settings), &settings)
+
+	params := map[string]string{
+		"alpn":           "h3",
+		"udp_relay_mode": "native",
+	}
+	congestion, _ := settings["congestionControl"].(string)
+	if congestion == "" {
+		congestion = "cubic"
+	}
+	params["congestion_control"] = congestion
+	applyFixedTLSParams(stream, params)
+
+	userinfo := url.UserPassword(client.ID, client.Password).String()
+	return s.buildEndpointLinks(inbound, email, stream, params, func(dest string, port int) string {
+		return fmt.Sprintf("tuic://%s@%s", userinfo, net.JoinHostPort(dest, strconv.Itoa(port)))
+	})
+}
+
+// genNaiveLink emits `naive+https://<username>:<password>@host:port#<remark>`, the
+// `--proxy=` string naiveproxy itself takes, prefixed the way NekoBox/NekoRay import it.
+//
+// naive authenticates with a single `Proxy-Authorization: Basic` header, and the
+// username half is the account's `username` when it has one and its EMAIL when it does
+// not, matching the core's Validator. url.UserPassword escapes the '@' an email brings,
+// without which the URI has two of them and every parser splits it in the wrong place.
+//
+// The JS twin is genNaiveLink in web/assets/js/model/inbound.js and the two must agree
+// byte for byte; TestGenNaiveLinkParity pins it.
+//
+// The scheme follows the inbound's `network`: tcp is HTTP/2 over TLS, udp is HTTP/3
+// over QUIC. An inbound serving both advertises https, which every naive client speaks;
+// quic-only is the one case that has to say so.
+func (s *SubService) genNaiveLink(inbound *model.Inbound, email string) string {
+	if inbound.Protocol != model.NAIVE {
+		return ""
+	}
+	clients, _ := s.inboundService.GetClients(inbound)
+	clientIndex := findClientIndex(clients, email)
+	if clientIndex < 0 {
+		return ""
+	}
+	stream := unmarshalStreamSettings(inbound.StreamSettings)
+
+	var settings map[string]any
+	json.Unmarshal([]byte(inbound.Settings), &settings)
+	scheme := "naive+https"
+	if network, _ := settings["network"].(string); strings.TrimSpace(network) == "udp" {
+		scheme = "naive+quic"
+	}
+
+	params := make(map[string]string)
+	applyFixedTLSParams(stream, params)
+
+	username := clients[clientIndex].Username
+	if username == "" {
+		username = email
+	}
+	userinfo := url.UserPassword(username, clients[clientIndex].Password).String()
+	return s.buildEndpointLinks(inbound, email, stream, params, func(dest string, port int) string {
+		return fmt.Sprintf("%s://%s@%s", scheme, userinfo, net.JoinHostPort(dest, strconv.Itoa(port)))
+	})
+}
+
+// applyFixedTLSParams fills in `sni` for the protocols whose TLS is not optional (tuic,
+// naive). It deliberately does not emit `security=tls`: there is no other mode for these.
+//
+// There is deliberately no skip-verification parameter either (tuic's `allow_insecure`,
+// naive's `insecure`), and its absence is not an oversight. The panel can no longer
+// express it: TlsStreamSettings.Settings in web/assets/js/model/inbound.js carries only
+// `fingerprint` and `echConfigList`, and its fromJson rebuilds the object from exactly
+// those two, so `allowInsecure` is dropped from any inbound the panel loads and saves.
+// The core dropped it too: infra/conf/transport_internet.go hard-errors on it past
+// 2026-06-01 and points at pinnedPeerCertSha256 (it never reaches the core from an
+// inbound anyway, since web/service/xray.go deletes tlsSettings.settings). Digging it
+// out of a legacy DB row here would emit a parameter the browser's generator cannot
+// produce, breaking the byte-for-byte agreement between the two generators for exactly
+// the operators least equipped to explain the difference.
+//
+// The consequence worth knowing: a self-signed cert cannot be made to work from the
+// panel side. The subscriber must trust or pin it, or the inbound needs a real
+// certificate from the bundled acme.sh.
+func applyFixedTLSParams(stream map[string]any, params map[string]string) {
+	tlsSetting, _ := stream["tlsSettings"].(map[string]any)
+	if tlsSetting == nil {
+		return
+	}
+	if sniValue, ok := searchKey(tlsSetting, "serverName"); ok {
+		if sni, _ := sniValue.(string); sni != "" {
+			params["sni"] = sni
+		}
+	}
+}
+
+// buildEndpointLinks emits one link per External Proxy entry, or a single link for the
+// inbound's own address when none is configured, carrying the same query parameters on
+// each.
+//
+// This is deliberately not buildExternalProxyURLLinks. That helper rewrites `security`
+// from the entry's forceTls and strips alpn/sni/fp when an entry says "none". TUIC and
+// naive have no plaintext mode to force, so honouring forceTls there would drop the
+// mandatory alpn=h3 and hand out a link that cannot connect.
+func (s *SubService) buildEndpointLinks(
+	inbound *model.Inbound,
+	email string,
+	stream map[string]any,
+	params map[string]string,
+	makeLink func(dest string, port int) string,
+) string {
+	externalProxies, _ := stream["externalProxy"].([]any)
+	if len(externalProxies) == 0 {
+		return buildLinkWithParams(
+			makeLink(s.resolveInboundAddress(inbound), inbound.Port),
+			params,
+			s.genRemark(inbound, email, ""),
+		)
+	}
+
+	links := make([]string, 0, len(externalProxies))
+	for _, externalProxy := range externalProxies {
+		ep, ok := externalProxy.(map[string]any)
+		if !ok {
+			continue
+		}
+		dest, _ := ep["dest"].(string)
+		port, okPort := ep["port"].(float64)
+		if dest == "" || !okPort {
+			continue
+		}
+		remark, _ := ep["remark"].(string)
+		links = append(links, buildLinkWithParams(
+			makeLink(dest, int(port)),
+			params,
+			s.genRemark(inbound, email, remark),
+		))
+	}
+	return strings.Join(links, "\n")
 }
 
 func (s *SubService) resolveInboundAddress(inbound *model.Inbound) string {

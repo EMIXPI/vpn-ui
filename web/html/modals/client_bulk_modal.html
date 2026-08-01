@@ -358,6 +358,12 @@
                     return new Inbound.MtprotoSettings.MtprotoUser();
                 case Protocols.SSH:
                     return new Inbound.SshSettings.SshUser();
+                case Protocols.ANYTLS:
+                    return new Inbound.AnytlsSettings.Anytls();
+                case Protocols.TUIC:
+                    return new Inbound.TuicSettings.Tuic();
+                case Protocols.NAIVE:
+                    return new Inbound.NaiveSettings.Naive();
                 default:
                     return null;
             }

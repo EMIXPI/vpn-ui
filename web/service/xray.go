@@ -259,8 +259,16 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 				}
 
 				// clear client config for additional parameters
+				//
+				// This is an ALLOWLIST, so a credential field that is not named here
+				// never reaches the core: it is dropped between the DB and the
+				// generated config, with nothing logged. "username" is naive's
+				// Basic-auth username, and without it every naive account would keep
+				// authenticating as its email no matter what the panel showed. Only
+				// naive clients carry the key (model.Client tags it omitempty), and
+				// the core ignores unknown client fields for everything else.
 				for key := range c {
-					if key != "email" && key != "id" && key != "password" && key != "flow" && key != "method" && key != "auth" {
+					if key != "email" && key != "id" && key != "password" && key != "flow" && key != "method" && key != "auth" && key != "username" {
 						delete(c, key)
 					}
 					if flow, ok := c["flow"].(string); ok && flow == "xtls-rprx-vision-udp443" {

@@ -514,10 +514,13 @@ func (s *Server) Start() (err error) {
 	}
 	scheme := "http"
 	if certFile != "" || keyFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		certReloader, err := network.NewCertReloader(certFile, keyFile)
 		if err == nil {
 			c := &tls.Config{
-				Certificates: []tls.Certificate{cert},
+				// Looked up per handshake so a renewal is picked up in place.
+				// Restarting to reload would kill every VPN daemon the panel
+				// parents, and short-lived certificates renew every few days.
+				GetCertificate: certReloader.GetCertificate,
 			}
 			listener = network.NewAutoHttpsListener(listener)
 			listener = tls.NewListener(listener, c)

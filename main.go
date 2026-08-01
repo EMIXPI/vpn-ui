@@ -543,7 +543,7 @@ func randomizeSetting() error {
 	fmt.Printf("  IP:       %s\n", ip)
 	fmt.Printf("  URL:      %s\n", url)
 	if ip == "N/A" {
-		fmt.Println("  (could not detect public IP — substitute the server's address in the URL)")
+		fmt.Println("  (could not detect public IP, substitute the server's address in the URL)")
 	}
 
 	// Bring the panel back up on the new settings (only if we stopped it above; on a
@@ -619,7 +619,7 @@ func applyExplicitSetting(username, password string, port int, webBasePath strin
 	fmt.Printf("  IP:       %s\n", ip)
 	fmt.Printf("  URL:      %s\n", url)
 	if ip == "N/A" {
-		fmt.Println("  (could not detect public IP — substitute the server's address in the URL)")
+		fmt.Println("  (could not detect public IP, substitute the server's address in the URL)")
 	}
 
 	if panelWasActive {
@@ -653,7 +653,10 @@ func panelAccessURL(settingService *service.SettingService, port int, normPath s
 			host = h
 		}
 	}
-	return ip, fmt.Sprintf("%s://%s:%d%s", scheme, host, port, normPath)
+	// JoinHostPort, not "%s:%d": an IPv6 host has to be bracketed or the URL is
+	// malformed (https://2001:db8::1:2083/ names no port a browser can find). A
+	// certificate naming a bare IPv6 address reaches here through certHost.
+	return ip, fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, strconv.Itoa(port)), normPath)
 }
 
 // certHost returns the host a browser should use to reach a panel serving certFile:
