@@ -73,11 +73,11 @@
     days: 0,
     client: {},
     row: null,
-    // The account's stored entry on its first inbound, handed in by the page. An
-    // edit has to be posted ON TOP of it: this form shows only the account-level
-    // fields, and a client posted without its protocol's credential is refused as
-    // "empty client ID". Null on add, where the server mints the credentials.
-    stored: null,
+    // The account's stored entry on EACH inbound serving it, keyed by inbound id
+    // and handed in by the page. Per inbound, not one entry, because the identity
+    // field differs by protocol and the write is addressed to whichever inbound
+    // ends up as the anchor. Empty on add, where the server mints the credentials.
+    storedBy: {},
     onDone: null,
 
     // Only these three cannot tell two of their own inbounds apart (bare
@@ -104,12 +104,12 @@
       this.selected = e.target.checked ? this.assignable.map(i => i.inboundId) : [];
     },
 
-    show({ row = null, stored = null, assignable = [], onDone = null }) {
+    show({ row = null, storedBy = {}, assignable = [], onDone = null }) {
       this.assignable = assignable;
       this.onDone = onDone;
       this.isEdit = !!row;
       this.row = row;
-      this.stored = stored;
+      this.storedBy = storedBy || {};
       this.title = row ? '{{ i18n "pages.clients.editTitle" }}' : '{{ i18n "pages.clients.addTitle" }}';
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
       if (row) {
@@ -167,35 +167,73 @@
       if (this.protocolClash) return;
 
       const ids = this.selected.slice().sort((a, b) => a - b);
-      const first = this.assignable.find(x => x.inboundId === ids[0]);
-
-      // Stored first so every protocol field this form does not show (the
-      // credential, flow, tgId) survives the round trip untouched.
-      const client = Object.assign({}, this.stored || {}, this.client, {
-        email,
-        totalGB: (this.totalGb || 0) * 1073741824,
-        expiryTime: this.days > 0 ? Date.now() + this.days * 86400000 : 0,
-      });
-      if (!this.isEdit) Object.assign(client, this.credentialsFor(first ? first.protocol : ''));
-
-      const body = { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) };
-      // On edit the path parameter is the PROTOCOL's identity value, not the
-      // email (see applyToAccount on the Clients page). The row carries it per
-      // membership; the first membership's is the one to address.
-      const clientId = this.isEdit
-        ? ((this.row && this.row.memberships && this.row.memberships[0] && this.row.memberships[0].clientId) || email)
-        : '';
-      const url = this.isEdit
-        ? '/panel/api/inbounds/updateClient/' + encodeURIComponent(clientId)
-        : '/panel/api/inbounds/addClient';
 
       this.confirmLoading = true;
-      const msg = await HttpUtil.post(url, body);
+      const msg = this.isEdit ? await this.saveEdit(email, ids)
+                              : await this.saveNew(email, ids);
       this.confirmLoading = false;
       if (msg && msg.success) {
         this.visible = false;
         if (this.onDone) this.onDone();
       }
+    },
+
+    // The account as it will be posted, built ON TOP of how it is stored on the
+    // inbound the write is addressed to. Never on a blank object: this form shows
+    // only the account-level fields, and a client posted without the credential
+    // ITS OWN inbound keys on is refused as "empty client ID".
+    clientFor(inboundId, email) {
+      const base = (this.storedBy && this.storedBy[inboundId]) || {};
+      return Object.assign({}, base, this.client, {
+        email,
+        totalGB: (this.totalGb || 0) * 1073741824,
+        expiryTime: this.days > 0 ? Date.now() + this.days * 86400000 : 0,
+      });
+    },
+
+    // A NEW account: nothing exists yet, so the write is addressed to the first
+    // inbound it will land on, seeded with that protocol's credential, and the
+    // server mints whatever the remaining inbounds need.
+    async saveNew(email, ids) {
+      const first = this.assignable.find(x => x.inboundId === ids[0]);
+      const client = Object.assign(this.clientFor(ids[0], email),
+        this.credentialsFor(first ? first.protocol : ''));
+      return await HttpUtil.post('/panel/api/inbounds/addClient',
+        { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) });
+    },
+
+    // Changing an existing account's memberships.
+    //
+    // updateClient finds the client by (`id`, path parameter) and BOTH have to
+    // name an inbound the account is already on. Addressing it at the lowest id
+    // in the NEW set is what "empty client ID" was: on a trojan account gaining a
+    // lower-numbered vmess inbound, the server looked for a vmess client whose
+    // uuid was the trojan password, in an inbound the account had not joined yet.
+    //
+    // So the write is anchored on a CURRENT membership, preferring one the
+    // operator kept: postedMembershipIds always re-adds the addressed inbound
+    // (web/controller/inbound.go), so anchoring on an inbound being removed would
+    // silently keep it.
+    // The anchor also decides which stored entry the posted client is built from:
+    // an account on vmess and trojan has a uuid on one and a password on the
+    // other, and only the anchor's own credential can address it.
+    async saveEdit(email, ids) {
+      const memberships = (this.row && this.row.memberships) || [];
+      const anchor = memberships.find(m => ids.includes(m.inboundId)) || memberships[0];
+      if (!anchor) return { success: false };
+      const client = this.clientFor(anchor.inboundId, email);
+
+      const msg = await HttpUtil.post(
+        '/panel/api/inbounds/updateClient/' + encodeURIComponent(anchor.clientId || email),
+        { id: anchor.inboundId, inboundIds: ids, settings: JSON.stringify({ clients: [client] }) });
+      if (!msg || !msg.success) return msg;
+
+      // Every current membership was kept, so nothing is left to drop.
+      if (ids.includes(anchor.inboundId)) return msg;
+      // Otherwise the anchor is the one inbound the update could not remove, and
+      // it comes off on its own.
+      return await HttpUtil.post(
+        `/panel/api/inbounds/${anchor.inboundId}/delClientByEmail/${encodeURIComponent(email)}`);
     },
   };
 

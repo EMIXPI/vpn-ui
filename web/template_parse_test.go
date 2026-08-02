@@ -60,7 +60,12 @@ func TestEditedTemplatesParse(t *testing.T) {
 	}
 	files := []string{
 		"html/inbounds.html",
-		"html/component/aClientTable.html",
+		"html/clients.html",
+		"html/component/clientActions.html", // the shared client mixin
+		"html/component/clientActionIcons.html",
+		"html/component/bulkOpsModal.html",
+		"html/modals/client_membership_modal.html",
+		"html/modals/copy_clients_modal.html",
 		"html/index.html", // dashboard incl. the unsupported-distro warning modal
 		"html/admins.html",
 		"html/modals/admin_modal.html",

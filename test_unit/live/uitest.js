@@ -71,6 +71,40 @@ async function goto(path) {
   await wait(3000);
 }
 
+// Re-injected after every navigation: a page load wipes them, and forgetting that
+// makes a later step fail with "__openModals is not a function" rather than with
+// whatever it was meant to be testing.
+async function inject() {
+  await evalJs(`window.__openModals = () =>
+     Array.from(document.querySelectorAll('.ant-modal-wrap'))
+       .filter(w => w.style.display !== 'none')
+       .map(w => (w.querySelector('.ant-modal-title') || {}).innerText || '?');
+   window.__closeAll = () => Array.from(document.querySelectorAll('.ant-modal-wrap'))
+       .filter(w => w.style.display !== 'none')
+       .forEach(w => { const b = w.querySelector('.ant-modal-close'); if (b) b.click(); });
+   window.__rowFor = (email) => Array.from(document.querySelectorAll('.ant-table-tbody tr'))
+       .find(r => (r.innerText || '').includes(email));
+   true`);
+}
+
+// Ticks or unticks ONE inbound in the membership modal, addressed by inbound id.
+// Never by checkbox index: the modal lists every assignable inbound, not just the
+// account's, so an index picks a different inbound on any panel that has others.
+async function toggleMembership(inboundId) {
+  return await evalJs(`(() => {
+     const i = clientMembershipModal.assignable.findIndex(a => a.inboundId === ${inboundId});
+     if (i < 0) return false;
+     const boxes = document.querySelectorAll('#client-membership-modal .ant-checkbox-group .ant-checkbox-input');
+     if (!boxes[i]) return false;
+     boxes[i].click();
+     return true;
+   })()`);
+}
+
+const seededInboundIds = async () => await evalJs(
+  `clientMembershipModal.assignable.filter(a => ${JSON.stringify(REMARKS)}.includes(a.remark))
+     .map(a => a.inboundId)`);
+
 // Every API call runs inside the page so it carries the session cookie the panel
 // issued to the browser, which is the same one the UI uses.
 async function api(path, body) {
@@ -174,16 +208,7 @@ async function main() {
   // ------------------------------------------------------------ clients page
   console.log('\n=== the Clients page ===');
   await goto('/panel/clients');
-  await evalJs(`window.__openModals = () =>
-     Array.from(document.querySelectorAll('.ant-modal-wrap'))
-       .filter(w => w.style.display !== 'none')
-       .map(w => (w.querySelector('.ant-modal-title') || {}).innerText || '?');
-   window.__closeAll = () => Array.from(document.querySelectorAll('.ant-modal-wrap'))
-       .filter(w => w.style.display !== 'none')
-       .forEach(w => { const b = w.querySelector('.ant-modal-close'); if (b) b.click(); });
-   window.__rowFor = (email) => Array.from(document.querySelectorAll('.ant-table-tbody tr'))
-       .find(r => (r.innerText || '').includes(email));
-   true`);
+  await inject();
 
   await evalJs(`Array.from(document.querySelectorAll('button'))
      .find(b => (b.innerText || '').includes('Add Client')).click(); true`);
@@ -206,12 +231,9 @@ async function main() {
   // One click per tick: a-checkbox-group only learns the new value through its
   // own watcher, so two clicks in the same tick both compute from the empty set
   // and the second REPLACES the first. A human cannot hit that; a loop can.
-  for (const i of [0, 1]) {
-    await evalJs(`(() => {
-       const b = document.querySelectorAll('#client-membership-modal .ant-checkbox-group .ant-checkbox-input');
-       if (b[${i}]) b[${i}].click();
-       return true;
-     })()`);
+  const seeded = (await seededInboundIds()) || [];
+  for (const id of seeded) {
+    await toggleMembership(id);
     await wait(400);
   }
   await evalJs(`(() => {
@@ -265,21 +287,72 @@ async function main() {
   check('the enable toggle reaches every membership', toggled && toggled.enable === false,
         toggled ? 'enable=' + toggled.enable : 'missing');
 
-  // ----------------------------------------------------------- the expansion
+  // ------------------------------------------- the per-inbound controls, inline
+  const inline = await evalJs(`(() => {
+     const r = window.__rowFor(${JSON.stringify(EMAIL)});
+     if (!r) return { lines: 0, icons: 0 };
+     return {
+       lines: r.querySelectorAll('.bo-client-line').length,
+       icons: r.querySelectorAll('.bo-client-line .bo-client-actions .anticon').length,
+       expanders: document.querySelectorAll('.ant-table-row-expand-icon').length,
+     };
+   })()`);
+  check('the row shows a line per inbound serving the account',
+        inline && inline.lines >= 2, JSON.stringify(inline));
+  check('each line carries the client action icons, with no expander to open',
+        inline && inline.icons > 0 && inline.expanders === 0, JSON.stringify(inline));
+
+  // ------------------------------------------- changing which inbounds serve it
+  // This is what answered "empty client ID": the write used to be addressed to
+  // the lowest id in the NEW set, which is an inbound the account is not on yet.
+  const both = (await seededInboundIds()) || [];
+  const drop = both[0];
+
   await evalJs(`(() => {
      const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     const t = r && r.querySelector('.ant-table-row-expand-icon');
-     if (t) t.click();
+     const b = r && r.querySelector('button .anticon-cluster');
+     if (b) b.closest('button').click();
      return true;
    })()`);
-  await wait(1200);
-  const inner = await evalJs(`(() => ({
-     rows: document.querySelectorAll('.ant-table-expanded-row .ant-table-tbody tr').length,
-     icons: document.querySelectorAll('.ant-table-expanded-row .bo-client-actions .anticon').length,
-   }))()`);
-  check('expanding an account shows a row per inbound serving it',
-        inner && inner.rows >= 2, JSON.stringify(inner));
-  check('and each carries the client action icons', inner && inner.icons > 0, JSON.stringify(inner));
+  await wait(1000);
+  // Untick the inbound the account's identity came from, so the write has to move
+  // its anchor AND drop the membership it was anchored on.
+  await toggleMembership(drop);
+  await wait(500);
+  await evalJs(`(() => {
+     const b = Array.from(document.querySelectorAll('#client-membership-modal .ant-modal-footer button'))
+       .find(x => !/close|cancel/i.test(x.innerText));
+     if (b) b.click();
+     return true;
+   })()`);
+  await wait(3000);
+  const shrunk = (await accounts()).find((a) => a.email === EMAIL);
+  check('dropping an inbound leaves the account on exactly the rest',
+        shrunk && shrunk.n === 1, shrunk ? 'memberships=' + shrunk.n : 'missing');
+
+  // Put it back. That is the other direction of the same bug: ADDING an inbound
+  // whose id is lower than the one the account currently lives on.
+  await goto('/panel/clients');
+  await inject();
+  await evalJs(`(() => {
+     const r = window.__rowFor(${JSON.stringify(EMAIL)});
+     const b = r && r.querySelector('button .anticon-cluster');
+     if (b) b.closest('button').click();
+     return true;
+   })()`);
+  await wait(1000);
+  await toggleMembership(drop);
+  await wait(500);
+  await evalJs(`(() => {
+     const b = Array.from(document.querySelectorAll('#client-membership-modal .ant-modal-footer button'))
+       .find(x => !/close|cancel/i.test(x.innerText));
+     if (b) b.click();
+     return true;
+   })()`);
+  await wait(3000);
+  const regrown = (await accounts()).find((a) => a.email === EMAIL);
+  check('adding an inbound back succeeds rather than answering "empty client ID"',
+        regrown && regrown.n === 2, regrown ? 'memberships=' + regrown.n : 'missing');
 
   // --------------------------------------------------------- bulk operations
   console.log('\n=== bulk operations ===');
@@ -321,8 +394,7 @@ async function main() {
 
   // ---------------------------------------------------------------- deleting
   await goto('/panel/clients');
-  await evalJs(`window.__rowFor = (email) => Array.from(document.querySelectorAll('.ant-table-tbody tr'))
-       .find(r => (r.innerText || '').includes(email)); true`);
+  await inject();
   await evalJs(`(() => {
      const r = window.__rowFor(${JSON.stringify(EMAIL)});
      const b = r && r.querySelector('button .anticon-delete');

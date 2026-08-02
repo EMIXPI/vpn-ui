@@ -270,7 +270,7 @@ class DBInbound {
             case Protocols.MTPROTO:
                 // MTProto accounts have real tg:// links (one per enabled mode), so
                 // they use the shared QR modal. Whether a GIVEN account has any is a
-                // per-client question the caller gates on, see aClientTable.
+                // per-client question the caller gates on, see component/clientActionIcons.
                 return true;
             default:
                 return false;
