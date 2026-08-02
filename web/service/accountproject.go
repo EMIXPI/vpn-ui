@@ -396,6 +396,16 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 	updated.Secret = account.Secret
 	updated.NaiveUser = account.NaiveUser
 	updated.CreatedAt = account.CreatedAt
+	// subId is not a credential, but it is carried forward for the same reason and
+	// only when the entry does not mention it AT ALL. A caller that omits the key
+	// (any script posting a partial client) was blanking the account's subId, and
+	// the next projection then wrote the blank onto every membership: one API call
+	// on one inbound killed the subscription URL panel-wide. An entry that carries
+	// subId="" still clears it, which is what the form does when the field is
+	// emptied deliberately.
+	if _, mentioned := entry["subId"]; !mentioned {
+		updated.SubID = account.SubID
+	}
 	// Then let THIS entry set the fields its own protocol owns. An edit that
 	// rotates a credential has to reach the account, or the projection would write
 	// the stale one straight back over it on the next membership change.

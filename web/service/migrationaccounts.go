@@ -84,6 +84,11 @@ type AccountsMigrationReport struct {
 // MigrateDB, which only the `migrate` subcommand and the DB-import path reach),
 // so an inbound added by an older binary or a DB restored from backup is picked
 // up. It is idempotent, non-fatal, and cheap to re-check.
+// How many merge conflicts are listed individually before the log falls back to a
+// count. A panel with thousands of colliding entries should not have its log
+// buried, and the pattern is clear long before that.
+const accountsConflictLogLimit = 50
+
 func (s *AccountService) MigrationAccounts() {
 	db := database.GetDB()
 	if db == nil {
@@ -134,6 +139,24 @@ func (s *AccountService) MigrationAccounts() {
 	logger.Infof("MigrationAccounts - %d accounts and %d memberships backfilled (%d clients skipped, %d conflicts, %d inbounds skipped)",
 		report.AccountsCreated, report.MembershipsCreated, report.ClientsSkipped,
 		len(report.Conflicts), len(report.InboundsSkipped))
+
+	// Each conflict, not just the count. A conflict means two settings entries
+	// shared one email and disagreed, so one side's value was dropped: first-seen
+	// wins (inbounds are walked in ascending id). For a credential field that is
+	// not cosmetic, the losing side's subscribers keep a credential the projection
+	// will overwrite the moment anything writes with an inboundIds set.
+	//
+	// The full detail is also stored under accountsMigrationReport, but nothing
+	// reads it back, so the log is the only place an operator can see this at all.
+	for i, c := range report.Conflicts {
+		if i >= accountsConflictLogLimit {
+			logger.Warningf("MigrationAccounts - %d further conflicts not listed; see the stored report",
+				len(report.Conflicts)-accountsConflictLogLimit)
+			break
+		}
+		logger.Warningf("MigrationAccounts - %q: inbound %d wanted %s=%q, kept %q",
+			c.Email, c.InboundId, c.Field, c.New, c.Kept)
+	}
 }
 
 // migrationNeeded is the cheap re-run guard. It answers "do the accounts tables
