@@ -405,6 +405,7 @@
 "renewDesc" = "Tự động gia hạn sau khi hết hạn. (0 = tắt)(đơn vị: ngày)"
 
 [pages.clients]
+"ipLimitNotEnforced" = "Not counted for the selected inbounds. The VPN protocols cap devices with the inbound's own User Limit instead."
 "tabIdentity" = "Identity"
 "tabLimits" = "Limits"
 "telegramId" = "Telegram chat ID"

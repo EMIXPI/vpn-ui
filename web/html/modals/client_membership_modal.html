@@ -155,10 +155,17 @@
           </div>
           <a-switch v-model="clientMembershipModal.delayedStart"></a-switch>
         </div>
-        <div class="bo-cf-switch">
+        <!-- app.* and not a bare name: this modal is compiled by its own Vue
+             instance, where an unqualified identifier resolves to nothing and
+             throws at render time. -->
+        <div class="bo-cf-switch" v-if="app.ipLimitEnable"
+          :class="{ 'bo-cf-unused': !clientMembershipModal.ipLimitApplies }">
           <div>
             <div class="bo-cf-t">{{ i18n "pages.inbounds.IPLimit" }}</div>
-            <div class="bo-cf-d">{{ i18n "pages.clients.ipLimitDesc" }}</div>
+            <div class="bo-cf-d" v-if="clientMembershipModal.ipLimitApplies">
+              {{ i18n "pages.clients.ipLimitDesc" }}
+            </div>
+            <div class="bo-cf-d" v-else>{{ i18n "pages.clients.ipLimitNotEnforced" }}</div>
           </div>
           <a-input-number v-model="clientMembershipModal.client.limitIp" :min="0"
             :style="{ width: '96px' }"></a-input-number>
@@ -317,6 +324,24 @@
     get expiresText() {
       if (!this.days) return '{{ i18n "pages.clients.summaryNever" }}';
       return this.days + ' {{ i18n "pages.clients.summaryDays" }}';
+    },
+
+    // Whether the per-client IP limit can be enforced for THIS selection.
+    //
+    // It is counted by CheckClientIpJob, which reads Xray's access log and keys on
+    // the "email:" it logs for a user that authenticated to Xray directly. The VPN
+    // protocols do not: they are TPROXY'd into a dokodemo-door inbound that has no
+    // per-user identity, so their traffic carries no email and this limit never
+    // fires for them. Their device cap is `userLimit` on the INBOUND, which hands
+    // each account K consecutive tunnel addresses and either evicts the oldest
+    // device or refuses the new one at the cap.
+    //
+    // mtproto and ssh are relays served in-binary rather than through Xray, so
+    // they are on the same footing as the VPNs here.
+    get ipLimitApplies() {
+      const counted = ['vmess', 'vless', 'trojan', 'shadowsocks', 'tuic',
+                       'anytls', 'naive', 'hysteria', 'hysteria2'];
+      return this.selectedProtocols.some(p => counted.includes(p));
     },
 
     // The account's own credential columns, and which protocols read each one.

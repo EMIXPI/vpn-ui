@@ -405,6 +405,7 @@
 "renewDesc" = "Автоматичне поновлення після закінчення терміну дії. (0 = вимкнено)(одиниця: день)"
 
 [pages.clients]
+"ipLimitNotEnforced" = "Not counted for the selected inbounds. The VPN protocols cap devices with the inbound's own User Limit instead."
 "tabIdentity" = "Identity"
 "tabLimits" = "Limits"
 "telegramId" = "Telegram chat ID"
