@@ -413,6 +413,36 @@ async function main() {
   check('deleting removes it from every inbound', !left.some((a) => a.email === EMAIL),
         JSON.stringify(left.map((a) => a.email)));
 
+  // --------------------------------------- identity minting, per protocol
+  // Three protocol families whose identity field is NOT a uuid, each of which
+  // used to answer "empty client ID". credentialsFor is checked directly rather
+  // than through a create, because wg-c, awg, gre and mtproto cannot be created
+  // on a panel whose cores are not installed, and the mapping is the thing under
+  // test either way.
+  const creds = await evalJs(`(() => {
+     const f = (p) => clientMembershipModal.credentialsFor(p, 'probe@x');
+     return { mtproto: f('mtproto'), wgc: f('wg-c'), awg: f('awg'), gre: f('gre'),
+              hy2: f('hysteria2'), ss: f('shadowsocks'), vmess: f('vmess') };
+   })()`);
+  check('the email-identity protocols mint id = email, not a uuid',
+        creds && ['mtproto', 'wgc', 'awg', 'gre'].every(k => creds[k] && creds[k].id === 'probe@x'),
+        JSON.stringify(creds));
+  check('hysteria2 mints auth and vmess mints a uuid',
+        creds && creds.hy2 && creds.hy2.auth && creds.vmess && creds.vmess.id
+          && creds.vmess.id !== 'probe@x',
+        JSON.stringify(creds && { hy2: creds.hy2, vmess: creds.vmess }));
+
+  // storedClient serializes through toJson(). Stringifying the instance drops a
+  // class getter, and those same four protocols expose `id` as exactly that, so
+  // every write built from one arrived with no identity.
+  const keepsId = await evalJs(`(() => {
+     const row = app.clients[0];
+     if (!row || !row.memberships.length) return { none: true };
+     const s = app.storedClient(row, row.memberships[0].inboundId);
+     return { hasId: !!(s && s.id), email: s && s.email };
+   })()`);
+  check('storedClient keeps the identity field', keepsId && keepsId.hasId, JSON.stringify(keepsId));
+
   // ------------------------------------------------- inbounds has no clients
   console.log('\n=== the Inbounds page holds no clients ===');
   await goto('/panel/inbounds');

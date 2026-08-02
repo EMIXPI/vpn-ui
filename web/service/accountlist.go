@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -311,6 +312,20 @@ func accountMatches(account *model.Account, memberships []AccountMembershipView,
 // AssignableInboundsFor returns the inbounds the caller may put an account on,
 // for the page's inbound picker. Same grant the write path enforces, so the
 // picker cannot offer something the save would then refuse.
+// settingsHoldClients reports whether an inbound's settings carry a clients array
+// at all. dokodemo-door, socks, http and single-user shadowsocks legitimately do
+// not, and parseSettingsClients cannot answer this: it returns ok=true for them,
+// because "no clients array" and "unparseable" have to stay distinguishable there
+// (treating the first as the second would delete every membership).
+func settingsHoldClients(settings string) bool {
+	var root map[string]any
+	if err := json.Unmarshal([]byte(settings), &root); err != nil || root == nil {
+		return false
+	}
+	_, ok := root["clients"].([]any)
+	return ok
+}
+
 func (s *AccountService) AssignableInboundsFor(user *model.User) ([]AccountMembershipView, error) {
 	if user == nil {
 		return nil, nil
@@ -318,7 +333,7 @@ func (s *AccountService) AssignableInboundsFor(user *model.User) ([]AccountMembe
 	db := database.GetDB()
 	var inbounds []model.Inbound
 	if err := db.Model(&model.Inbound{}).
-		Select("id", "protocol", "remark", "port", "enable").
+		Select("id", "protocol", "remark", "port", "enable", "settings").
 		Order("id ASC").Find(&inbounds).Error; err != nil {
 		return nil, err
 	}
@@ -341,6 +356,12 @@ func (s *AccountService) AssignableInboundsFor(user *model.User) ([]AccountMembe
 	for i := range inbounds {
 		in := &inbounds[i]
 		if !allowed(in.Id) {
+			continue
+		}
+		// An inbound with no client list has nothing to be a member OF, and
+		// offering it only produces a save the server refuses. Same rule the
+		// client form's own checklist applies (modals/client_modal.html).
+		if !settingsHoldClients(in.Settings) {
 			continue
 		}
 		out = append(out, AccountMembershipView{

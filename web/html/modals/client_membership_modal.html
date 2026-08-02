@@ -133,30 +133,39 @@
       this.visible = true;
     },
 
-    // The credential the FIRST inbound's protocol keys on has to be present, because
-    // that inbound is created through the ordinary addClient path and an account with
-    // a blank identity cannot be addressed at all. The remaining memberships are the
-    // server's to mint (it fills any field the account lacks), so this only has to
-    // cover the one protocol.
-    credentialsFor(protocol) {
-      const uuid = RandomUtil.randomUUID();
-      const pw = RandomUtil.randomSeq(10);
+    // The identity the FIRST inbound's protocol keys on, and nothing else.
+    //
+    // Only the identity, because the server mints every other credential each
+    // membership needs (ensureCredentialsFor in web/service/accountproject.go) and
+    // it knows the inbound's cipher and auth mode, which this form does not. But
+    // the identity itself cannot be left out: AddClient refuses an entry whose
+    // clientIdentity() is empty before the accounts layer ever runs.
+    //
+    // Mirrors clientIdentityKey() in web/service/inbound.go. The "id" family is
+    // NOT one thing: a uuid for vmess/vless/tuic, a login name for ssh, and the
+    // EMAIL for the four protocols whose model exposes `get id() { return email }`.
+    credentialsFor(protocol, email) {
       switch (protocol) {
-        case 'vmess': case 'vless':
-          return { id: uuid, security: 'auto' };
-        case 'tuic':
-          return { id: uuid, password: pw };
-        case 'trojan': case 'shadowsocks': case 'anytls': case 'naive':
-          return { password: pw };
-        case 'hysteria':
-          return { auth: pw };
+        case 'vmess':
+          return { id: RandomUtil.randomUUID(), security: 'auto' };
+        case 'vless': case 'tuic':
+          return { id: RandomUtil.randomUUID() };
+        case 'trojan': case 'anytls': case 'naive':
+          return { password: RandomUtil.randomSeq(10) };
+        case 'hysteria': case 'hysteria2':
+          return { auth: RandomUtil.randomSeq(10) };
+        // Keys on the email, which the form already carries.
+        case 'shadowsocks':
+          return {};
         case 'l2tp': case 'pptp': case 'openvpn': case 'openconnect':
         case 'sstp': case 'ikev2': case 'ssh':
-          return { id: RandomUtil.randomLowerAndNum(8), password: pw };
-        case 'mtproto':
-          return { secret: RandomUtil.randomSeq(32, { type: 'hex' }) };
+          return { id: RandomUtil.randomLowerAndNum(8), password: RandomUtil.randomSeq(10) };
+        // Email IS the identity here; sending a uuid would store an id that the
+        // model's getter then contradicts on every later read.
+        case 'wg-c': case 'awg': case 'gre': case 'mtproto':
+          return { id: email };
         default:
-          return { id: uuid };
+          return { id: RandomUtil.randomUUID() };
       }
     },
 
@@ -197,7 +206,7 @@
     async saveNew(email, ids) {
       const first = this.assignable.find(x => x.inboundId === ids[0]);
       const client = Object.assign(this.clientFor(ids[0], email),
-        this.credentialsFor(first ? first.protocol : ''));
+        this.credentialsFor(first ? first.protocol : '', email));
       return await HttpUtil.post('/panel/api/inbounds/addClient',
         { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) });
     },

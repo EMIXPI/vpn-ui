@@ -487,12 +487,17 @@
       // without the field its protocol keys on is refused outright with
       // "empty client ID" (clientIdentity in web/service/inbound.go).
       //
-      // toJson returns the instance itself, so this is the same shape the client
-      // form posts, getters included.
+      // Serialized through toJson(), NOT by stringifying the instance. wg-c, awg,
+      // gre and mtproto expose `id` as a class GETTER returning the email, and a
+      // getter lives on the prototype, so JSON.stringify(instance) drops it. Those
+      // four key on "id" (clientIdentityKey), so the posted client arrived with no
+      // identity at all and every write answered "empty client ID".
       storedClient(row, inboundId) {
         const dbInbound = this.dbInbounds.find(r => r.id === inboundId);
         const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
-        return client ? JSON.parse(JSON.stringify(client)) : null;
+        if (!client) return null;
+        return JSON.parse(JSON.stringify(
+          typeof client.toJson === 'function' ? client.toJson() : client));
       },
       // One per membership, because the identity field differs by protocol: the
       // same account is a uuid on a vmess inbound and a password on a trojan one,
