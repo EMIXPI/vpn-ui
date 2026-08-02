@@ -388,7 +388,7 @@
 "exportTxt" = "Export TXT"
 "exportPdf" = "Export PDF"
 "exportNoneSelected" = "No accounts selected"
-"selectedAccounts" = "account(s) selected"
+"selectedInbounds" = "inbound(s) selected"
 "selectAllClients" = "Select all clients"
 "bulkOperations" = "Bulk Operations"
 "clearSelection" = "Clear"

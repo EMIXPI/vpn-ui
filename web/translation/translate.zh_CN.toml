@@ -252,7 +252,7 @@
 "exportTxt" = "Export TXT"
 "exportPdf" = "Export PDF"
 "exportNoneSelected" = "No accounts selected"
-"selectedAccounts" = "account(s) selected"
+"selectedInbounds" = "inbound(s) selected"
 "bulkOperations" = "Bulk Operations"
 "clearSelection" = "Clear"
 "bulkDone" = "Bulk update applied / skipped"

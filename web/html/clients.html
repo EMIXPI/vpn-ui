@@ -8,17 +8,64 @@
           <a-row :gutter="[16, 16]" :style="{ margin: 0 }">
             <a-col :span="24">
 
-              <!-- The account-centric view. The Inbounds page answers "what is
-                   serving traffic"; this one answers "who exists", which stopped
-                   being the same question once one account could be on several
-                   inbounds. Every write here goes back through the inbounds client
-                   routes with an inboundIds set, so there is one write path. -->
+              <!-- The account-centric view, and the only place clients are managed.
+                   The Inbounds page answers "what is serving traffic"; this one
+                   answers "who exists", which stopped being the same question once
+                   one account could be on several inbounds. Every write goes back
+                   through the inbounds client routes with an inboundIds set, so
+                   there is still one write path. -->
               <a-card hoverable :style="{ marginBottom: '16px' }">
                 <div :style="{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }">
                   <a-button type="primary" icon="plus" @click="openAdd()">
                     {{ i18n "pages.clients.add" }}
                   </a-button>
-                  <a-button icon="reload" @click="loadClients(true)"></a-button>
+
+                  <!-- Bulk-add and copy are per-inbound forms (they build protocol
+                       credentials), so the inbound is chosen up front rather than
+                       inside a modal that would then have to rebuild itself. -->
+                  <a-dropdown v-if="assignable.length">
+                    <a-button icon="usergroup-add">{{ i18n "pages.client.bulk" }}</a-button>
+                    <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
+                      @click="e => openAddBulkClient(Number(e.key))">
+                      <a-menu-item v-for="ib in assignable" :key="ib.inboundId">
+                        [[ ib.remark || ('#' + ib.inboundId) ]]
+                        <a-tag>[[ ib.protocol ]]</a-tag>
+                      </a-menu-item>
+                    </a-menu>
+                  </a-dropdown>
+
+                  <a-dropdown v-if="assignable.length > 1">
+                    <a-button icon="copy">{{ i18n "pages.client.copyFromInbound" }}</a-button>
+                    <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
+                      @click="e => openCopyClients(Number(e.key))">
+                      <a-menu-item v-for="ib in assignable" :key="ib.inboundId">
+                        [[ ib.remark || ('#' + ib.inboundId) ]]
+                        <a-tag>[[ ib.protocol ]]</a-tag>
+                      </a-menu-item>
+                    </a-menu>
+                  </a-dropdown>
+
+                  <a-button icon="reload" @click="reload(true)"></a-button>
+
+                  <a-dropdown>
+                    <a-button icon="ellipsis"></a-button>
+                    <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
+                      @click="e => clickPageAction(e)">
+                      <!-- Refused for a reseller: it cannot be narrowed to the
+                           accounts they own, so it would clear an admin's counters
+                           too. The depleted sweep below IS theirs: it is scoped to
+                           their own accounts and refunds each one. -->
+                      <a-menu-item key="resetClients" v-if="!RESELLER.isReseller">
+                        <a-icon type="file-done"></a-icon>
+                        {{ i18n "pages.inbounds.resetAllClientTraffics" }}
+                      </a-menu-item>
+                      <a-menu-item key="delDepletedClients" :style="{ color: 'var(--error)' }">
+                        <a-icon type="rest"></a-icon>
+                        {{ i18n "pages.inbounds.delDepletedClients" }}
+                      </a-menu-item>
+                    </a-menu>
+                  </a-dropdown>
+
                   <a-input-search
                     v-model="search"
                     placeholder='{{ i18n "pages.clients.searchPlaceholder" }}'
@@ -26,17 +73,27 @@
                     allow-clear
                     @search="onSearch"
                     @change="onSearchChange"></a-input-search>
-                  <span :style="{ flex: '1 1 auto' }"></span>
-                  <!-- Bulk bar appears only with a selection, so the toolbar is not
-                       a row of permanently greyed buttons. -->
-                  <template v-if="selectedEmails.length">
-                    <a-tag color="blue">[[ selectedEmails.length ]] {{ i18n "pages.clients.selected" }}</a-tag>
-                    <a-button size="small" @click="bulkEnable(true)">{{ i18n "enable" }}</a-button>
-                    <a-button size="small" @click="bulkEnable(false)">{{ i18n "disabled" }}</a-button>
-                    <a-button size="small" @click="openBulkExtend()">{{ i18n "pages.clients.extend" }}</a-button>
-                    <a-button size="small" type="danger" @click="bulkDelete()">{{ i18n "delete" }}</a-button>
-                  </template>
                 </div>
+
+                <!-- Appears only with a selection, so the toolbar is not a row of
+                     permanently greyed buttons. -->
+                <a-alert v-if="selectedEmails.length" type="info" :show-icon="false"
+                  :class="themeSwitcher.currentTheme"
+                  :style="{ padding: '4px 10px', marginTop: '10px' }">
+                  <template slot="message">
+                    <a-space :size="8" wrap>
+                      <span><b>[[ selectedEmails.length ]]</b> {{ i18n "pages.clients.selected" }}</span>
+                      <a-button size="small" type="primary" icon="tool"
+                        @click="openBulkOps()">{{ i18n "pages.inbounds.bulkOperations" }}</a-button>
+                      <a-button size="small" icon="file-text"
+                        @click="exportSelectedTxt()">{{ i18n "pages.inbounds.exportTxt" }}</a-button>
+                      <a-button size="small" icon="file-pdf"
+                        @click="exportSelectedPdf()">{{ i18n "pages.inbounds.exportPdf" }}</a-button>
+                      <a-button size="small" icon="close"
+                        @click="clearSelection()">{{ i18n "pages.inbounds.clearSelection" }}</a-button>
+                    </a-space>
+                  </template>
+                </a-alert>
               </a-card>
 
               <a-card hoverable>
@@ -47,6 +104,8 @@
                   :row-selection="{ selectedRowKeys: selectedEmails, onChange: onSelectChange }"
                   :pagination="pagination"
                   :scroll="{ x: 900 }"
+                  :expanded-row-keys="expandedRowKeys"
+                  v-on="{ expandedRowsChange: keys => { expandedRowKeys = keys; } }"
                   @change="onTableChange"
                   size="middle">
 
@@ -99,11 +158,41 @@
 
                   <template slot="actionCol" slot-scope="text, row">
                     <a-space>
-                      <a-button size="small" icon="edit" @click="openEdit(row)"></a-button>
+                      <a-tooltip>
+                        <template slot="title">{{ i18n "edit" }}</template>
+                        <a-button size="small" icon="edit" @click="openEdit(row)"></a-button>
+                      </a-tooltip>
+                      <a-tooltip>
+                        <template slot="title">{{ i18n "pages.clients.inbounds" }}</template>
+                        <a-button size="small" icon="cluster" @click="openMemberships(row)"></a-button>
+                      </a-tooltip>
                       <a-button size="small" :icon="row.enable ? 'pause' : 'caret-right'"
                                 @click="toggleEnable(row)"></a-button>
                       <a-button size="small" type="danger" icon="delete" @click="confirmDelete(row)"></a-button>
                     </a-space>
+                  </template>
+
+                  <!-- One block per inbound serving the account, each rendering the
+                       SAME client action table the Inbounds page used to show. The
+                       v-for alias is called `record` on purpose: aClientTable reads
+                       `record` as the inbound its row belongs to, so aliasing here
+                       is what lets the component be reused unchanged. -->
+                  <template slot="expandedRowRender" slot-scope="row">
+                    <div v-for="record in accountInbounds(row)" :key="record.id"
+                      :style="{ marginBottom: '8px' }">
+                      <div class="bo-dim" :style="{ marginBottom: '2px' }">
+                        [[ record.remark || ('#' + record.id) ]]
+                        <a-tag>[[ record.protocol ]]</a-tag>
+                        <span>:[[ record.port ]]</span>
+                      </div>
+                      <a-table :row-key="client => client.email"
+                        :columns="isMobile ? innerMobileColumns : innerColumns"
+                        :data-source="accountClientIn(row, record)"
+                        :pagination="false"
+                        size="small">
+                        {{template "component/aClientTable"}}
+                      </a-table>
+                    </div>
                   </template>
                 </a-table>
               </a-card>
@@ -111,17 +200,61 @@
           </a-row>
         </transition>
       </a-spin>
+      {{template "component/bulkOpsModal" .}}
 {{template "page/shell_end" . }}
 
 {{template "page/body_scripts" .}}
+<script src="{{ .base_path }}assets/qrcode/qrious2.min.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/uri/URI.min.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/reality_targets.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/inbound.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/dbinbound.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/jspdf/jspdf.umd.min.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/js/util/export.js?{{ .cur_ver }}"></script>
 {{template "component/aSidebar" .}}
 {{template "component/aThemeSwitch" .}}
+{{template "component/aPersianDatepicker" .}}
+{{template "component/clientActions" .}}
+{{template "modals/promptModal"}}
+{{template "modals/textModal"}}
+{{template "modals/qrcodeModal"}}
+{{template "modals/inboundInfoModal"}}
+{{template "modals/clientsModal"}}
+{{template "modals/clientsBulkModal"}}
+{{template "modals/copyClientsModal"}}
+{{template "modals/wgcConfigModal"}}
+{{template "modals/awgConfigModal"}}
+{{template "modals/greConfigModal"}}
+{{template "modals/sshConfigModal"}}
 {{template "modals/clientMembershipModal" .}}
 
 <script>
+  // No select column: selection is the OUTER account row's job here, and a
+  // per-inbound "select all" inside an expanded row would quietly reach clients
+  // this page never listed.
+  const innerColumns = [
+    { title: '{{ i18n "pages.inbounds.operate" }}', width: 200, scopedSlots: { customRender: 'actions' } },
+    { title: '{{ i18n "pages.inbounds.enable" }}', width: 30, scopedSlots: { customRender: 'enable' } },
+    { title: '{{ i18n "online" }}', width: 32, scopedSlots: { customRender: 'online' } },
+    { title: '{{ i18n "pages.inbounds.client" }}', width: 80, scopedSlots: { customRender: 'client' } },
+    { title: '{{ i18n "pages.inbounds.traffic" }}', width: 80, align: 'center', scopedSlots: { customRender: 'traffic' } },
+    { title: '{{ i18n "pages.inbounds.allTimeTraffic" }}', width: 60, align: 'center', scopedSlots: { customRender: 'allTime' } },
+    { title: '{{ i18n "pages.inbounds.expireDate" }}', width: 80, align: 'center', scopedSlots: { customRender: 'expiryTime' } },
+  ];
+
+  const innerMobileColumns = [
+    { title: '{{ i18n "pages.inbounds.operate" }}', width: 10, align: 'center', scopedSlots: { customRender: 'actionMenu' } },
+    { title: '{{ i18n "pages.inbounds.client" }}', width: 90, align: 'left', scopedSlots: { customRender: 'client' } },
+    { title: '{{ i18n "pages.inbounds.info" }}', width: 10, align: 'center', scopedSlots: { customRender: 'info' } },
+  ];
+
   const app = new Vue({
     delimiters: ['[[', ']]'],
     el: '#app',
+    // ClientActionsMixin brings every client action, the selection state and the
+    // bulk-operation run; this page only has to supply the four hooks and the
+    // state it names.
+    mixins: [MediaQueryMixin, ClientActionsMixin],
     data: {
       // themeSwitcher, pageTitle and pageClass are read by the shell in
       // page/shell_start. Omitting any of them makes the WHOLE #app render throw,
@@ -129,19 +262,50 @@
       themeSwitcher,
       pageTitle: '{{ i18n "pages.clients.title" }}',
       pageClass: '',
+      persianDatepicker,
       spinning: false,
+      // The account rows this page lists, and the raw inbounds behind them. Both
+      // are needed: the rows carry the account-level totals the server computed,
+      // the inbounds carry the per-protocol client objects every action works on.
       clients: [],
+      dbInbounds: [],
+      inbounds: [],
       assignable: [],
       search: '',
       searchTimer: null,
       selectedEmails: [],
+      expandedRowKeys: [],
+      onlineClients: [],
+      lastOnlineMap: {},
+      expireDiff: 0,
+      trafficDiff: 0,
+      remarkModel: '-ieo',
+      datepicker: 'gregorian',
+      tgBotEnable: false,
+      ipLimitEnable: false,
+      subSettings: {
+        enable: false,
+        subTitle: '',
+        subURI: '',
+        subJsonURI: '',
+        subJsonEnable: false,
+      },
+      // Seeded from the server-rendered RESELLER global so it is right on first
+      // paint, then held here: RESELLER is a snapshot taken when the page was
+      // served and is wrong the moment an account is created or deleted.
+      resellerBalance: {
+        unlimited: !!RESELLER.unlimited,
+        allowanceBytes: Number(RESELLER.allowanceBytes) || 0,
+        spentBytes: Number(RESELLER.spentBytes) || 0,
+        availableBytes: Number(RESELLER.availableBytes) || 0,
+      },
       pagination: { current: 1, pageSize: 50, total: 0, showSizeChanger: true, pageSizeOptions: ['20', '50', '100', '200'] },
       columns: [
         { title: '{{ i18n "pages.clients.email" }}', scopedSlots: { customRender: 'emailCol' }, width: 220 },
         { title: '{{ i18n "pages.clients.quota" }}', scopedSlots: { customRender: 'quotaCol' }, width: 190 },
         { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiryCol' }, width: 150 },
         { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'inboundsCol' } },
-        { title: '', scopedSlots: { customRender: 'actionCol' }, width: 130, align: 'right' },
+        { title: '', scopedSlots: { customRender: 'actionCol' }, width: 175, align: 'right' },
       ],
     },
     methods: {
@@ -157,24 +321,135 @@
       // Stored negative, in milliseconds, counting DOWN from first use.
       delayedDays(row) { return Math.round(Math.abs(row.expiryTime) / 86400000); },
 
-      async loadClients(showSpin) {
-        if (showSpin) this.spinning = true;
+      // --- the hooks ClientActionsMixin expects ---------------------------
+      loading(spinning = true) { this.spinning = spinning; },
+      // The mixin's write funnel. Unlike the Inbounds page there is no inbound
+      // CREATE to gate here, so this is the plain form.
+      async submit(url, data, modal) {
+        const msg = await HttpUtil.postWithModal(url, data, modal);
+        if (msg.success) {
+          await this.getDBInbounds();
+          await this.refreshResellerBalance();
+        }
+      },
+      // Named for the mixin's contract. On this page "refresh after a write" means
+      // both halves: the inbounds every action reads through, and the account rows
+      // the table lists.
+      async getDBInbounds() {
+        const msg = await HttpUtil.get('/panel/api/inbounds/list');
+        if (msg.success) this.setInbounds(msg.obj || []);
+        await this.loadClients();
+      },
+      // Not called getLastOnline: that name is the mixin's per-email LOOKUP, and
+      // shadowing it made every rendered row fire two requests and then format a
+      // Promise as a date.
+      async loadOnlineState() {
+        const [onlines, last] = await Promise.all([
+          HttpUtil.post('/panel/api/inbounds/onlines'),
+          HttpUtil.post('/panel/api/inbounds/lastOnline'),
+        ]);
+        if (onlines && onlines.success) this.onlineClients = onlines.obj || [];
+        if (last && last.success) this.lastOnlineMap = last.obj || {};
+      },
+      async refreshResellerBalance() {
+        if (!RESELLER.isReseller) return;
+        const msg = await HttpUtil.get('/panel/api/inbounds/resellerBalance');
+        if (!msg || !msg.success || !msg.obj) return;
+        const b = msg.obj;
+        this.resellerBalance = {
+          unlimited: !!b.unlimited,
+          allowanceBytes: Number(b.allowanceBytes) || 0,
+          spentBytes: Number(b.spentBytes) || 0,
+          availableBytes: Number(b.availableBytes) || 0,
+        };
+      },
+
+      setInbounds(rows) {
+        this.inbounds.splice(0);
+        this.dbInbounds.splice(0);
+        for (const row of rows) {
+          const dbInbound = new DBInbound(row);
+          this.inbounds.push(dbInbound.toInbound());
+          this.dbInbounds.push(dbInbound);
+        }
+      },
+      async getDefaultSettings() {
+        const msg = await HttpUtil.post('/panel/setting/defaultSettings');
+        if (!msg.success) return;
+        const settings = msg.obj || {};
+        this.expireDiff = settings.expireDiff * 86400000;
+        this.trafficDiff = settings.trafficDiff * 1073741824;
+        this.tgBotEnable = settings.tgBotEnable;
+        this.ipLimitEnable = settings.ipLimitEnable;
+        this.remarkModel = settings.remarkModel;
+        this.datepicker = settings.datepicker;
+        this.subSettings = {
+          enable: settings.subEnable,
+          subTitle: settings.subTitle,
+          subURI: settings.subURI,
+          subJsonURI: settings.subJsonURI,
+          subJsonEnable: settings.subJsonEnable,
+        };
+      },
+
+      async loadClients() {
         const q = `?page=${this.pagination.current}&size=${this.pagination.pageSize}&search=${encodeURIComponent(this.search || '')}`;
         const msg = await HttpUtil.get('/panel/api/clients/list' + q);
-        this.spinning = false;
         if (!msg || !msg.success) return;
         this.clients = (msg.obj && msg.obj.rows) || [];
         this.pagination.total = (msg.obj && msg.obj.total) || 0;
         // Drop selections that are no longer on the page, or a bulk action would
         // silently act on rows the operator can no longer see.
         const visible = new Set(this.clients.map(c => c.email));
-        this.selectedEmails = this.selectedEmails.filter(e => visible.has(e));
+        this.onSelectChange(this.selectedEmails.filter(e => visible.has(e)));
       },
       async loadAssignable() {
         const msg = await HttpUtil.get('/panel/api/clients/assignable');
         if (msg && msg.success) this.assignable = msg.obj || [];
       },
-      onSelectChange(keys) { this.selectedEmails = keys; },
+      async reload(showSpin) {
+        if (showSpin) this.spinning = true;
+        await Promise.all([this.getDBInbounds(), this.loadOnlineState(), this.loadAssignable()]);
+        this.spinning = false;
+      },
+
+      // --- the expanded row ------------------------------------------------
+      // The DBInbound objects behind an account's memberships. Read from
+      // dbInbounds rather than from the row's own membership list because every
+      // client action needs the real inbound (its settings, its clientStats), not
+      // the summary the accounts API returns.
+      accountInbounds(row) {
+        return (row.memberships || [])
+          .map(m => this.dbInbounds.find(r => r.id === m.inboundId))
+          .filter(Boolean);
+      },
+      // A one-row data source: this account's client entry inside that inbound.
+      accountClientIn(row, dbInbound) {
+        const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
+        return client ? [client] : [];
+      },
+
+      // --- selection --------------------------------------------------------
+      // The mixin resolves bulk targets from selClients, which is keyed per
+      // (inbound, email). An account row stands for every inbound serving it, so
+      // ticking one row expands into one key per membership.
+      onSelectChange(keys) {
+        this.selectedEmails = keys;
+        const next = [];
+        keys.forEach(email => {
+          const row = this.clients.find(c => c.email === email);
+          (row && row.memberships || []).forEach(m => next.push(m.inboundId + ':' + email));
+        });
+        this.selClients = next;
+      },
+      // Overrides the mixin's, which knows nothing about the row keys this table
+      // renders its checkboxes from.
+      clearSelection() {
+        this.selectedEmails = [];
+        this.selClients = [];
+        this.selInbounds = [];
+      },
+
       onTableChange(pag) {
         this.pagination.current = pag.current;
         this.pagination.pageSize = pag.pageSize;
@@ -187,12 +462,66 @@
         this.searchTimer = setTimeout(() => { this.pagination.current = 1; this.loadClients(); }, 300);
       },
 
-      openAdd() { clientMembershipModal.show({ assignable: this.assignable, onDone: () => this.loadClients() }); },
-      openEdit(row) { clientMembershipModal.show({ row, assignable: this.assignable, onDone: () => this.loadClients() }); },
+      // --- account-level actions --------------------------------------------
+      // Add is account-shaped, not protocol-shaped: pick the inbounds, and the
+      // server mints whatever credential each protocol needs. Editing one
+      // membership's protocol fields is what openEdit is for.
+      openAdd() {
+        clientMembershipModal.show({ assignable: this.assignable, onDone: () => this.getDBInbounds() });
+      },
+      openMemberships(row) {
+        clientMembershipModal.show({
+          row, stored: this.storedClient(row),
+          assignable: this.assignable, onDone: () => this.getDBInbounds(),
+        });
+      },
+      // The full client form, opened on the first inbound serving the account.
+      // That form locks the inbound it was opened from into the membership set,
+      // which is why removing a membership lives in openMemberships instead.
+      openEdit(row) {
+        const first = (row.memberships || [])[0];
+        if (!first) return;
+        const dbInbound = this.dbInbounds.find(r => r.id === first.inboundId);
+        if (!dbInbound) return;
+        // findIndexOfClient keys on the protocol's credential (password, uuid),
+        // not on the email, so it has to be handed the stored client object and
+        // not a stand-in built from the account row.
+        const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
+        if (!client) return;
+        this.openEditClient(dbInbound.id, client);
+      },
+      openCopyClients(inboundId) {
+        const dbInbound = this.dbInbounds.find(r => r.id === inboundId);
+        if (dbInbound) copyClientsModal.show(dbInbound);
+      },
+      clickPageAction(action) {
+        switch (action.key) {
+          case 'resetClients':
+            this.resetAllClientTraffics(-1);
+            break;
+          case 'delDepletedClients':
+            this.delDepletedClients(-1);
+            break;
+        }
+      },
 
       async toggleEnable(row) {
         await this.applyToAccount(row, { enable: !row.enable });
-        await this.loadClients();
+        await this.getDBInbounds();
+      },
+      // The account's entry as it is actually STORED on its first inbound. Every
+      // write has to be built on top of this, never on a fresh object assembled
+      // from the account row: the row carries no credential, and a client posted
+      // without the field its protocol keys on is refused outright with
+      // "empty client ID" (clientIdentity in web/service/inbound.go).
+      storedClient(row) {
+        const first = (row.memberships || [])[0];
+        if (!first) return null;
+        const dbInbound = this.dbInbounds.find(r => r.id === first.inboundId);
+        const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
+        // toJson returns the instance itself, so this is the same shape the client
+        // form posts, getters included.
+        return client ? JSON.parse(JSON.stringify(client)) : null;
       },
       // One account can be on several inbounds, so a change has to reach all of
       // them. updateClient carries inboundIds and re-projects, which is why this
@@ -200,7 +529,9 @@
       async applyToAccount(row, patch) {
         const ids = (row.memberships || []).map(m => m.inboundId);
         if (!ids.length) return null;
-        const client = Object.assign({
+        const stored = this.storedClient(row);
+        if (!stored) return null;
+        const client = Object.assign(stored, {
           email: row.email, enable: row.enable, totalGB: row.totalGB,
           expiryTime: row.expiryTime, limitIp: row.limitIp, subId: row.subId,
           comment: row.comment, reset: row.reset,
@@ -220,10 +551,11 @@
           content: '{{ i18n "pages.clients.deleteContent" }} ' + row.email,
           okText: '{{ i18n "delete" }}',
           cancelText: '{{ i18n "cancel" }}',
+          class: themeSwitcher.currentTheme,
           okType: 'danger',
           onOk: async () => {
             const stuck = await this.deleteAccount(row);
-            await this.loadClients();
+            await this.getDBInbounds();
             this.reportStuck(row.email, stuck);
           },
         });
@@ -252,66 +584,10 @@
           content: email + ': ' + stuck.join(', '),
         });
       },
-
-      selectedRows() { return this.clients.filter(c => this.selectedEmails.includes(c.email)); },
-      async bulkEnable(enable) {
-        this.spinning = true;
-        for (const row of this.selectedRows()) await this.applyToAccount(row, { enable });
-        this.spinning = false;
-        this.selectedEmails = [];
-        await this.loadClients();
-      },
-      bulkDelete() {
-        const rows = this.selectedRows();
-        this.$confirm({
-          title: '{{ i18n "pages.clients.bulkDeleteTitle" }}',
-          content: rows.length + ' {{ i18n "pages.clients.bulkDeleteContent" }}',
-          okText: '{{ i18n "delete" }}',
-          cancelText: '{{ i18n "cancel" }}',
-          okType: 'danger',
-          onOk: async () => {
-            this.spinning = true;
-            const failures = [];
-            for (const row of rows) {
-              const stuck = await this.deleteAccount(row);
-              if (stuck.length) failures.push(row.email + ' (' + stuck.join(', ') + ')');
-            }
-            this.spinning = false;
-            if (failures.length) this.reportStuck('', failures);
-            this.selectedEmails = [];
-            await this.loadClients();
-          },
-        });
-      },
-      openBulkExtend() {
-        const self = this;
-        let days = 30;
-        this.$confirm({
-          title: '{{ i18n "pages.clients.extendTitle" }}',
-          content: (h) => h('a-input-number', {
-            props: { min: 1, max: 3650, value: days },
-            on: { change: v => { days = v; } },
-          }),
-          okText: '{{ i18n "confirm" }}',
-          cancelText: '{{ i18n "cancel" }}',
-          onOk: async () => {
-            self.spinning = true;
-            for (const row of self.selectedRows()) {
-              // Extend from now when already expired or unset, otherwise from the
-              // existing deadline, so extending twice does not lose the first.
-              const base = row.expiryTime > Date.now() ? row.expiryTime : Date.now();
-              await self.applyToAccount(row, { expiryTime: base + days * 86400000 });
-            }
-            self.spinning = false;
-            self.selectedEmails = [];
-            await self.loadClients();
-          },
-        });
-      },
     },
     async mounted() {
-      await this.loadAssignable();
-      await this.loadClients(true);
+      await this.getDefaultSettings();
+      await this.reload(true);
     },
   });
 </script>

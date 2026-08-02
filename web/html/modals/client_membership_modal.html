@@ -1,6 +1,6 @@
 {{define "modals/clientMembershipModal"}}
 <a-modal id="client-membership-modal" v-model="clientMembershipModal.visible"
-  :title="clientMembershipModal.title" @ok="clientMembershipModal.ok"
+  :title="clientMembershipModal.title" @ok="() => clientMembershipModal.ok()"
   :confirm-loading="clientMembershipModal.confirmLoading" :closable="true" :mask-closable="false"
   :ok-text="clientMembershipModal.okText" cancel-text='{{ i18n "close" }}'
   :class="themeSwitcher.currentTheme">
@@ -35,7 +35,7 @@
     <a-checkbox
       :checked="clientMembershipModal.allChecked"
       :indeterminate="clientMembershipModal.someChecked"
-      @change="clientMembershipModal.toggleAll">
+      @change="e => clientMembershipModal.toggleAll(e)">
       {{ i18n "pages.clients.selectAll" }}
     </a-checkbox>
   </div>
@@ -73,6 +73,11 @@
     days: 0,
     client: {},
     row: null,
+    // The account's stored entry on its first inbound, handed in by the page. An
+    // edit has to be posted ON TOP of it: this form shows only the account-level
+    // fields, and a client posted without its protocol's credential is refused as
+    // "empty client ID". Null on add, where the server mints the credentials.
+    stored: null,
     onDone: null,
 
     // Only these three cannot tell two of their own inbounds apart (bare
@@ -99,11 +104,12 @@
       this.selected = e.target.checked ? this.assignable.map(i => i.inboundId) : [];
     },
 
-    show({ row = null, assignable = [], onDone = null }) {
+    show({ row = null, stored = null, assignable = [], onDone = null }) {
       this.assignable = assignable;
       this.onDone = onDone;
       this.isEdit = !!row;
       this.row = row;
+      this.stored = stored;
       this.title = row ? '{{ i18n "pages.clients.editTitle" }}' : '{{ i18n "pages.clients.addTitle" }}';
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
       if (row) {
@@ -163,7 +169,9 @@
       const ids = this.selected.slice().sort((a, b) => a - b);
       const first = this.assignable.find(x => x.inboundId === ids[0]);
 
-      const client = Object.assign({}, this.client, {
+      // Stored first so every protocol field this form does not show (the
+      // credential, flow, tgId) survives the round trip untouched.
+      const client = Object.assign({}, this.stored || {}, this.client, {
         email,
         totalGB: (this.totalGb || 0) * 1073741824,
         expiryTime: this.days > 0 ? Date.now() + this.days * 86400000 : 0,
@@ -190,5 +198,14 @@
       }
     },
   };
+
+  const clientMembershipModalApp = new Vue({
+    delimiters: ['[[', ']]'],
+    el: '#client-membership-modal',
+    data: {
+      clientMembershipModal,
+      themeSwitcher,
+    },
+  });
 </script>
 {{end}}
