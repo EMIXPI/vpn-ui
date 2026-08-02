@@ -959,7 +959,17 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 	}
 	// Put the account on every requested inbound and re-project, so all of them
 	// carry it before any daemon config is regenerated below.
-	if _, merr := a.applyClientMemberships(c, postedClientEmail(data), membershipIds, membershipsExplicit); merr != nil {
+	//
+	// A BULK add posts many clients in one request, and postedClientEmail answers
+	// "" for all of them on purpose: there is no single account for a membership
+	// set to be about. That left the batch mirrored nowhere - every client landed
+	// in settings.clients and client_traffics, and NONE of them appeared on the
+	// Clients page, which lists the accounts layer. It self-healed on the next
+	// single-client write to the same inbound, which is what made it look like a
+	// refresh problem. The mirror is per-inbound, so one call covers the batch.
+	if len(postedClientEmails(data)) > 1 {
+		a.syncInboundAccounts(data.Id)
+	} else if _, merr := a.applyClientMemberships(c, postedClientEmail(data), membershipIds, membershipsExplicit); merr != nil {
 		logger.Warning("applying client memberships: ", merr)
 	}
 
@@ -2170,9 +2180,12 @@ func distinctInboundIds(targets []service.BulkClientTarget) []int {
 // syncInboundAccounts brings the accounts layer back in step with ONE inbound's
 // settings.clients, which is the truth every write path actually persists.
 //
-// Needed wherever an inbound's client list changes OUTSIDE addClient/updateClient
-// (those mirror through applyClientMemberships), and there are three such paths:
+// Needed wherever an inbound's client list changes without one account for
+// applyClientMemberships to be about, and there are four such paths:
 //
+//   - a BULK add. It posts many clients in one request, so postedClientEmail
+//     answers "" and the membership work is skipped; without this the whole batch
+//     existed in settings.clients and on no page that lists accounts.
 //   - the DELETE paths. A deleted account kept its account row and every
 //     membership: the tables drifted from the data plane, InboundIdsForEmail
 //     reported inbounds the account was no longer on, and `vpn-ui revert-accounts`
@@ -2288,18 +2301,31 @@ func (a *InboundController) reconcileForInbounds(inboundIds []int, needRestart b
 // Empty when the body does not carry exactly one client, which every one of those
 // routes does; more than one would mean a single charge paid for several accounts.
 func postedClientEmail(data *model.Inbound) string {
+	emails := postedClientEmails(data)
+	if len(emails) != 1 {
+		return ""
+	}
+	return emails[0]
+}
+
+// postedClientEmails reads every account name a client-mutating body carries. Only
+// the bulk add posts more than one, and it is the reason this exists: the
+// membership work is about ONE account and is skipped for a batch, but the mirror
+// into the accounts layer is about the INBOUND and still has to run.
+func postedClientEmails(data *model.Inbound) []string {
 	var settings struct {
 		Clients []struct {
 			Email string `json:"email"`
 		} `json:"clients"`
 	}
 	if err := json.Unmarshal([]byte(data.Settings), &settings); err != nil {
-		return ""
+		return nil
 	}
-	if len(settings.Clients) != 1 {
-		return ""
+	out := make([]string, 0, len(settings.Clients))
+	for _, c := range settings.Clients {
+		out = append(out, c.Email)
 	}
-	return settings.Clients[0].Email
+	return out
 }
 
 // clientEmailOnInbound resolves a route's :clientId back to the account email that
