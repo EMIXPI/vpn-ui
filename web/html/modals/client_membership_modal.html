@@ -3,106 +3,206 @@
   :title="clientMembershipModal.title" @ok="() => clientMembershipModal.ok()"
   :confirm-loading="clientMembershipModal.confirmLoading" :closable="true" :mask-closable="false"
   :ok-text="clientMembershipModal.okText" cancel-text='{{ i18n "close" }}'
-  :class="themeSwitcher.currentTheme">
+  :width="720" :class="themeSwitcher.currentTheme" wrap-class-name="bo-client-modal">
 
-  <a-form layout="horizontal" :label-col="{ span: 8 }" :wrapper-col="{ span: 14 }">
-    <a-form-item label='{{ i18n "pages.clients.email" }}'>
-      <a-input v-model.trim="clientMembershipModal.client.email"
-               :disabled="clientMembershipModal.isEdit"></a-input>
-    </a-form-item>
-    <a-form-item label='{{ i18n "pages.clients.quota" }}'>
-      <a-input-number v-model="clientMembershipModal.totalGb" :min="0" :style="{ width: '100%' }"></a-input-number>
-      <span class="bo-dim">{{ i18n "pages.clients.zeroUnlimited" }}</span>
-    </a-form-item>
-    <a-form-item label='{{ i18n "pages.clients.expiryDays" }}'>
-      <a-input-number v-model="clientMembershipModal.days" :min="0" :style="{ width: '100%' }"></a-input-number>
-      <span class="bo-dim">{{ i18n "pages.clients.zeroNoExpiry" }}</span>
-    </a-form-item>
-    <a-form-item label='{{ i18n "pages.clients.ipLimit" }}'>
-      <a-input-number v-model="clientMembershipModal.client.limitIp" :min="0" :style="{ width: '100%' }"></a-input-number>
-    </a-form-item>
-    <a-form-item label='{{ i18n "pages.clients.comment" }}'>
-      <a-input v-model="clientMembershipModal.client.comment"></a-input>
-    </a-form-item>
-    <a-form-item label='{{ i18n "subId" }}'>
-      <a-input v-model.trim="clientMembershipModal.client.subId">
-        <a-tooltip slot="addonAfter">
-          <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
-          <a-icon type="reload" :style="{ cursor: 'pointer' }"
-            @click="clientMembershipModal.regenerate('subId')"></a-icon>
-        </a-tooltip>
-      </a-input>
-      <span class="bo-dim">{{ i18n "pages.clients.subIdHint" }}</span>
-    </a-form-item>
-  </a-form>
+  <div class="bo-cf">
+    <!-- The rail is the account at a glance, and it stays put while the operator
+         moves between sections. On ADD it has nothing stored to report, so it
+         previews what is being typed instead of sitting there empty. -->
+    <div class="bo-cf-rail">
+      <div class="bo-cf-summary">
+        <div class="bo-cf-who">
+          [[ clientMembershipModal.client.email || '{{ i18n "pages.clients.summaryNew" }}' ]]
+        </div>
+        <div class="bo-cf-sub">
+          <template v-if="clientMembershipModal.isEdit">
+            [[ clientMembershipModal.client.comment
+               || (clientMembershipModal.selected.length + ' {{ i18n "pages.clients.summaryInbounds" }}') ]]
+          </template>
+          <template v-else>{{ i18n "pages.clients.summaryNewHint" }}</template>
+        </div>
 
-  <!-- Field-first, not protocol-first.
-       An account holds ONE uuid, ONE password and so on (the columns on the
-       accounts table), shared by every inbound serving it. A form organised by
-       protocol would have to show the same password under three headings and
-       pretend they were separable. This shows the fields as they are actually
-       stored, and says which protocols read each one.
-       Rendered outside a-form-item for the same width reason as the picker. -->
-  <a-divider>{{ i18n "pages.clients.credentials" }}</a-divider>
-  <div class="bo-dim" :style="{ marginBottom: '10px' }">{{ i18n "pages.clients.credentialsHint" }}</div>
-  <div v-for="f in clientMembershipModal.credentialFields" :key="f.key"
-    :style="{ marginBottom: '10px', opacity: clientMembershipModal.fieldUsed(f) ? 1 : 0.45 }">
-    <div :style="{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }">
-      <span :style="{ fontWeight: 500 }">[[ f.label ]]</span>
-      <a-tag v-if="clientMembershipModal.fieldRequired(f)" color="blue">
-        [[ clientMembershipModal.usersOf(f).join(', ') ]]
-      </a-tag>
-      <span v-else class="bo-dim">{{ i18n "pages.clients.unusedHere" }}</span>
-    </div>
-    <a-input v-model.trim="clientMembershipModal.client[f.key]"
-      :placeholder="f.protocols.join(', ')">
-      <a-tooltip slot="addonAfter">
-        <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
-        <a-icon type="reload" :style="{ cursor: 'pointer' }"
-          @click="clientMembershipModal.regenerate(f.key)"></a-icon>
-      </a-tooltip>
-    </a-input>
-  </div>
+        <a-progress v-if="clientMembershipModal.quotaBytes > 0"
+          :percent="clientMembershipModal.usedPercent" :show-info="false" size="small"
+          :status="clientMembershipModal.usedPercent >= 100 ? 'exception' : 'normal'"></a-progress>
 
-  <!-- A 2022-blake3 cipher refuses anything but base64 of its exact key length,
-       while every other protocol takes any string. So when one is selected the
-       shared password is generated in the strict shape, which satisfies both. -->
-  <a-alert v-if="clientMembershipModal.strictSsBytes" type="info" show-icon
-    :style="{ marginTop: '4px' }"
-    message='{{ i18n "pages.clients.ssStrictPassword" }}'></a-alert>
-
-  <!-- The inbound picker sits OUTSIDE a-form-item on purpose. This modal is antd's
-       default 520px with label-col 8, so a full-width control inside a form item is
-       squeezed into the 14-span wrapper and the list becomes unreadable. Same
-       treatment the external-proxy rows get in form/client.html. -->
-  <a-divider>{{ i18n "pages.clients.inbounds" }}</a-divider>
-  <div :style="{ marginBottom: '8px' }">
-    <a-checkbox
-      :checked="clientMembershipModal.allChecked"
-      :indeterminate="clientMembershipModal.someChecked"
-      @change="e => clientMembershipModal.toggleAll(e)">
-      {{ i18n "pages.clients.selectAll" }}
-    </a-checkbox>
-  </div>
-  <div :style="{ maxHeight: '180px', overflowY: 'auto' }">
-    <a-checkbox-group v-model="clientMembershipModal.selected" :style="{ width: '100%' }">
-      <div v-for="ib in clientMembershipModal.assignable" :key="ib.inboundId">
-        <a-checkbox :value="ib.inboundId">
-          [[ ib.remark || ('#' + ib.inboundId) ]]
-          <a-tag>[[ ib.protocol ]]</a-tag>
-          <span class="bo-dim">:[[ ib.port ]]</span>
-        </a-checkbox>
+        <div class="bo-cf-kv">
+          <span>{{ i18n "pages.clients.summaryUsed" }}</span>
+          <b>[[ clientMembershipModal.usedText ]]</b>
+        </div>
+        <div class="bo-cf-kv">
+          <span>{{ i18n "pages.clients.summaryLeft" }}</span>
+          <b>[[ clientMembershipModal.leftText ]]</b>
+        </div>
+        <div class="bo-cf-kv">
+          <span>{{ i18n "pages.clients.summaryExpires" }}</span>
+          <b>[[ clientMembershipModal.expiresText ]]</b>
+        </div>
+        <div class="bo-cf-kv">
+          <span>{{ i18n "pages.clients.summaryDevices" }}</span>
+          <b>[[ clientMembershipModal.client.limitIp > 0 ? clientMembershipModal.client.limitIp : '-' ]]</b>
+        </div>
       </div>
-    </a-checkbox-group>
-  </div>
 
-  <!-- Refused by the server, so saying so here saves a round trip that comes back
-       as an opaque failure. l2tp, pptp and ikev2 authenticate through a shared
-       daemon that does not name the inbound, so an account on two of the same kind
-       is always served by whichever has the lower id. -->
-  <a-alert v-if="clientMembershipModal.protocolClash" type="error" show-icon
-    :style="{ marginTop: '12px' }"
-    message='{{ i18n "pages.clients.sameProtocolRefused" }}'></a-alert>
+      <div class="bo-cf-tabs" role="tablist">
+        <button v-for="t in clientMembershipModal.tabs" :key="t.key"
+          class="bo-cf-tab" type="button" role="tab"
+          :aria-selected="clientMembershipModal.tab === t.key"
+          @click="clientMembershipModal.tab = t.key">
+          <a-icon :type="t.icon"></a-icon>
+          <span>[[ t.label ]]</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="bo-cf-pane">
+      <!-- Identity -->
+      <template v-if="clientMembershipModal.tab === 'identity'">
+        <div class="bo-cf-field">
+          <label>{{ i18n "pages.inbounds.email" }}</label>
+          <a-input v-model.trim="clientMembershipModal.client.email"
+                   :disabled="clientMembershipModal.isEdit"></a-input>
+          <div class="bo-cf-hint" v-if="clientMembershipModal.isEdit">{{ i18n "pages.clients.emailLocked" }}</div>
+        </div>
+        <a-row :gutter="12">
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.clients.telegramId" }}</label>
+              <a-input-number v-model="clientMembershipModal.client.tgId" :min="0"
+                placeholder='{{ i18n "pages.clients.telegramNotLinked" }}'
+                :style="{ width: '100%' }"></a-input-number>
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "subscription.subId" }}</label>
+              <a-input v-model.trim="clientMembershipModal.client.subId">
+                <a-tooltip slot="addonAfter">
+                  <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
+                  <a-icon type="reload" @click="clientMembershipModal.regenerate('subId')"></a-icon>
+                </a-tooltip>
+              </a-input>
+            </div>
+          </a-col>
+        </a-row>
+        <div class="bo-cf-field">
+          <label>{{ i18n "comment" }}</label>
+          <a-input v-model="clientMembershipModal.client.comment"></a-input>
+        </div>
+        <div class="bo-cf-switch">
+          <div>
+            <div class="bo-cf-t">{{ i18n "pages.inbounds.enable" }}</div>
+            <div class="bo-cf-d">{{ i18n "pages.clients.enabledDesc" }}</div>
+          </div>
+          <a-switch v-model="clientMembershipModal.client.enable"></a-switch>
+        </div>
+      </template>
+
+      <!-- Credentials: field-first, because the account stores ONE of each and
+           several protocols share them. -->
+      <template v-if="clientMembershipModal.tab === 'credentials'">
+        <a-alert type="info" show-icon :style="{ marginBottom: '14px' }"
+          message='{{ i18n "pages.clients.credentialsHint" }}'></a-alert>
+        <div class="bo-cf-field" v-for="f in clientMembershipModal.credentialFields" :key="f.key"
+          :class="{ 'bo-cf-unused': !clientMembershipModal.fieldUsed(f) }">
+          <label>
+            [[ f.label ]]
+            <a-tag v-if="clientMembershipModal.fieldUsed(f)" color="green">
+              [[ clientMembershipModal.usersOf(f).join(' \u00b7 ') ]]
+            </a-tag>
+            <a-tag v-else>{{ i18n "pages.clients.unusedHere" }}</a-tag>
+          </label>
+          <a-input v-model.trim="clientMembershipModal.client[f.key]"
+            :placeholder="f.protocols.join(', ')" class="bo-cf-mono">
+            <a-tooltip slot="addonAfter">
+              <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
+              <a-icon type="reload" @click="clientMembershipModal.regenerate(f.key)"></a-icon>
+            </a-tooltip>
+          </a-input>
+        </div>
+        <a-alert v-if="clientMembershipModal.strictSsBytes" type="info" show-icon
+          :style="{ marginTop: '4px' }"
+          message='{{ i18n "pages.clients.ssStrictPassword" }}'></a-alert>
+        <a-alert v-if="clientMembershipModal.isEdit" type="warning" show-icon
+          :style="{ marginTop: '8px' }"
+          message='{{ i18n "pages.clients.credentialWarn" }}'></a-alert>
+      </template>
+
+      <!-- Limits -->
+      <template v-if="clientMembershipModal.tab === 'limits'">
+        <a-row :gutter="12">
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.inbounds.totalFlow" }}</label>
+              <a-input-number v-model="clientMembershipModal.totalGb" :min="0"
+                :style="{ width: '100%' }"></a-input-number>
+              <div class="bo-cf-hint">{{ i18n "pages.clients.zeroUnlimited" }}</div>
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.client.expireDays" }}</label>
+              <a-input-number v-model="clientMembershipModal.days" :min="0"
+                :style="{ width: '100%' }"></a-input-number>
+              <div class="bo-cf-hint">{{ i18n "pages.clients.zeroNoExpiry" }}</div>
+            </div>
+          </a-col>
+        </a-row>
+        <div class="bo-cf-switch">
+          <div>
+            <div class="bo-cf-t">{{ i18n "pages.client.delayedStart" }}</div>
+            <div class="bo-cf-d">{{ i18n "pages.clients.delayedStartDesc" }}</div>
+          </div>
+          <a-switch v-model="clientMembershipModal.delayedStart"></a-switch>
+        </div>
+        <div class="bo-cf-switch">
+          <div>
+            <div class="bo-cf-t">{{ i18n "pages.inbounds.IPLimit" }}</div>
+            <div class="bo-cf-d">{{ i18n "pages.clients.ipLimitDesc" }}</div>
+          </div>
+          <a-input-number v-model="clientMembershipModal.client.limitIp" :min="0"
+            :style="{ width: '96px' }"></a-input-number>
+        </div>
+        <div class="bo-cf-switch">
+          <div>
+            <div class="bo-cf-t">{{ i18n "pages.clients.renewEvery" }}</div>
+            <div class="bo-cf-d">{{ i18n "pages.clients.renewDesc" }}</div>
+          </div>
+          <a-input-number v-model="clientMembershipModal.client.reset" :min="0"
+            :style="{ width: '96px' }"></a-input-number>
+        </div>
+      </template>
+
+      <!-- Inbounds -->
+      <template v-if="clientMembershipModal.tab === 'inbounds'">
+        <div :style="{ marginBottom: '8px' }">
+          <a-checkbox
+            :checked="clientMembershipModal.allChecked"
+            :indeterminate="clientMembershipModal.someChecked"
+            @change="e => clientMembershipModal.toggleAll(e)">
+            {{ i18n "pages.clients.selectAll" }}
+          </a-checkbox>
+        </div>
+        <a-checkbox-group v-model="clientMembershipModal.selected" :style="{ width: '100%' }">
+          <div class="bo-cf-ib" v-for="ib in clientMembershipModal.assignable" :key="ib.inboundId"
+            :class="{ on: clientMembershipModal.selected.includes(ib.inboundId) }">
+            <a-checkbox :value="ib.inboundId">
+              [[ ib.remark || ('#' + ib.inboundId) ]]
+              <a-tag>[[ ib.protocol ]]</a-tag>
+              <span class="bo-dim">:[[ ib.port ]]</span>
+            </a-checkbox>
+          </div>
+        </a-checkbox-group>
+        <!-- Refused by the server, so saying so here saves a round trip that comes
+             back as an opaque failure. l2tp, pptp and ikev2 authenticate through a
+             shared daemon that does not name the inbound, so an account on two of
+             the same kind is always served by whichever has the lower id. -->
+        <a-alert v-if="clientMembershipModal.protocolClash" type="error" show-icon
+          :style="{ marginTop: '12px' }"
+          message='{{ i18n "pages.clients.sameProtocolRefused" }}'></a-alert>
+      </template>
+    </div>
+  </div>
 </a-modal>
 
 <script>
@@ -118,6 +218,16 @@
     days: 0,
     client: {},
     row: null,
+    tab: 'identity',
+    // A negative expiryTime means "N days from first use" and the clock has not
+    // started, which is what this switch writes.
+    delayedStart: false,
+    tabs: [
+      { key: 'identity',    icon: 'user',     label: '{{ i18n "pages.clients.tabIdentity" }}' },
+      { key: 'credentials', icon: 'key',      label: '{{ i18n "pages.clients.credentials" }}' },
+      { key: 'limits',      icon: 'dashboard', label: '{{ i18n "pages.clients.tabLimits" }}' },
+      { key: 'inbounds',    icon: 'cluster',  label: '{{ i18n "pages.clients.inbounds" }}' },
+    ],
     // The account's stored entry on EACH inbound serving it, keyed by inbound id
     // and handed in by the page. Per inbound, not one entry, because the identity
     // field differs by protocol and the write is addressed to whichever inbound
@@ -157,11 +267,14 @@
       this.storedBy = storedBy || {};
       this.title = row ? '{{ i18n "pages.clients.editTitle" }}' : '{{ i18n "pages.clients.addTitle" }}';
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
+      this.tab = 'identity';
       if (row) {
         this.client = {
           email: row.email, enable: row.enable, limitIp: row.limitIp,
           comment: row.comment, subId: row.subId, reset: row.reset,
+          tgId: row.tgId || 0,
         };
+        this.delayedStart = row.expiryTime < 0;
         // The account's credentials as they are stored TODAY, read off its
         // memberships: whichever entry carries a field, carries the account's
         // value for it, because the projection writes the same account onto all
@@ -176,13 +289,34 @@
           : (row.expiryTime < 0 ? Math.round(Math.abs(row.expiryTime) / 86400000) : 0);
         this.selected = (row.memberships || []).map(m => m.inboundId);
       } else {
-        this.client = { email: '', enable: true, limitIp: 0, comment: '', subId: '', reset: 0 };
+        this.client = { email: '', enable: true, limitIp: 0, comment: '', subId: '', reset: 0, tgId: 0 };
         this.totalGb = 0;
         this.days = 0;
+        this.delayedStart = false;
         this.selected = [];
         this.seedCredentials();
       }
       this.visible = true;
+    },
+
+    // --- the summary rail -------------------------------------------------
+    // On an edit these are the account's real figures; on an add they preview
+    // what is being typed, which is the only way the rail earns its space before
+    // the account exists.
+    get quotaBytes() { return (this.totalGb || 0) * 1073741824; },
+    get usedBytes() { return this.row ? ((this.row.up || 0) + (this.row.down || 0)) : 0; },
+    get usedPercent() {
+      if (!this.quotaBytes) return 0;
+      return Math.min(100, Math.round((this.usedBytes / this.quotaBytes) * 100));
+    },
+    get usedText() { return SizeFormatter.sizeFormat(this.usedBytes); },
+    get leftText() {
+      if (!this.quotaBytes) return '{{ i18n "pages.clients.summaryUnlimited" }}';
+      return SizeFormatter.sizeFormat(Math.max(0, this.quotaBytes - this.usedBytes));
+    },
+    get expiresText() {
+      if (!this.days) return '{{ i18n "pages.clients.summaryNever" }}';
+      return this.days + ' {{ i18n "pages.clients.summaryDays" }}';
     },
 
     // The account's own credential columns, and which protocols read each one.
@@ -354,8 +488,13 @@
         comment: c.comment || '',
         subId: c.subId || '',
         reset: Number(c.reset) || 0,
+        tgId: Number(c.tgId) || 0,
         totalGB: (this.totalGb || 0) * 1073741824,
-        expiryTime: this.days > 0 ? Date.now() + this.days * 86400000 : 0,
+        // A NEGATIVE expiry is not a date. It is "this many days from first use",
+        // and the server starts the clock on the first connection.
+        expiryTime: !this.days ? 0
+          : this.delayedStart ? -(this.days * 86400000)
+          : Date.now() + this.days * 86400000,
         // Read by the accounts layer, ignored by every daemon. `id` cannot carry
         // the VPN login name here because this entry may be a vmess one, where it
         // already means the uuid.

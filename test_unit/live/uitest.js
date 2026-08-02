@@ -90,7 +90,12 @@ async function inject() {
 // Ticks or unticks ONE inbound in the membership modal, addressed by inbound id.
 // Never by checkbox index: the modal lists every assignable inbound, not just the
 // account's, so an index picks a different inbound on any panel that has others.
+//
+// The picker lives on its own tab and the form opens on Identity, so the tab has
+// to be selected before its checkboxes exist in the DOM at all.
 async function toggleMembership(inboundId) {
+  await evalJs(`clientMembershipModal.tab = 'inbounds'; true`);
+  await wait(250);
   return await evalJs(`(() => {
      const i = clientMembershipModal.assignable.findIndex(a => a.inboundId === ${inboundId});
      if (i < 0) return false;
@@ -215,11 +220,43 @@ async function main() {
   await wait(900);
   let open = await evalJs('window.__openModals()');
   check('Add Client opens its modal', Array.isArray(open) && open.length > 0, JSON.stringify(open));
+
+  // The form is sectioned, so every section has to be reachable and each has to
+  // render something. A tab that selects but shows nothing is the failure mode a
+  // screenshot would miss.
+  const sections = await evalJs(`(async () => {
+     const out = {};
+     for (const t of clientMembershipModal.tabs) {
+       clientMembershipModal.tab = t.key;
+       await new Promise(r => setTimeout(r, 220));
+       const pane = document.querySelector('#client-membership-modal .bo-cf-pane');
+       out[t.key] = pane ? pane.innerText.trim().length : 0;
+     }
+     clientMembershipModal.tab = 'identity';
+     return out;
+   })()`);
+  check('every section renders content',
+        sections && Object.values(sections).every(n => n > 20), JSON.stringify(sections));
+
+  // The rail is the reason this layout was chosen: it has to say something before
+  // the account exists, not sit empty until after the first save.
+  await wait(300);
+  const rail = await evalJs(`(() => {
+     const r = document.querySelector('#client-membership-modal .bo-cf-summary');
+     return r ? r.innerText.replace(/\s+/g, ' ').trim() : '';
+   })()`);
+  check('the summary rail says something on a NEW client',
+        typeof rail === 'string' && rail.length > 10, JSON.stringify(rail));
+
+  await evalJs(`clientMembershipModal.tab = 'inbounds'; true`);
+  await wait(300);
   const boxes = await evalJs(
     `document.querySelectorAll('#client-membership-modal .ant-checkbox-group .ant-checkbox-input').length`);
-  check('the modal lists the assignable inbounds', boxes > 0, 'checkboxes=' + boxes);
+  check('the Inbounds section lists the assignable inbounds', boxes > 0, 'checkboxes=' + boxes);
 
   // --------------------------------------------------- create, through the UI
+  await evalJs(`clientMembershipModal.tab = 'identity'; true`);
+  await wait(250);
   await evalJs(`(() => {
      const inp = document.querySelector('#client-membership-modal input.ant-input');
      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;

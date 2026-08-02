@@ -51,15 +51,18 @@ type AccountMembershipView struct {
 
 // AccountRow is one line of the Clients table.
 type AccountRow struct {
-	Id          int                     `json:"id"`
-	Email       string                  `json:"email"`
-	Enable      bool                    `json:"enable"`
-	SubID       string                  `json:"subId"`
-	Comment     string                  `json:"comment"`
-	TotalGB     int64                   `json:"totalGB"`    // bytes, despite the name
-	ExpiryTime  int64                   `json:"expiryTime"` // ms; negative = delayed start
-	Reset       int                     `json:"reset"`
-	LimitIP     int                     `json:"limitIp"`
+	Id         int    `json:"id"`
+	Email      string `json:"email"`
+	Enable     bool   `json:"enable"`
+	SubID      string `json:"subId"`
+	Comment    string `json:"comment"`
+	TotalGB    int64  `json:"totalGB"`    // bytes, despite the name
+	ExpiryTime int64  `json:"expiryTime"` // ms; negative = delayed start
+	Reset      int    `json:"reset"`
+	LimitIP    int    `json:"limitIp"`
+	// TgID is the Telegram chat the bot notifies. Reported so the Clients form can
+	// edit it without a second read; 0 means the account is not linked.
+	TgID        int64                   `json:"tgId"`
 	Up          int64                   `json:"up"`
 	Down        int64                   `json:"down"`
 	Memberships []AccountMembershipView `json:"memberships"`
@@ -152,7 +155,7 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search s
 			Id: account.Id, Email: account.Email, Enable: account.Enable,
 			SubID: account.SubID, Comment: account.Comment,
 			TotalGB: account.TotalGB, ExpiryTime: account.ExpiryTime,
-			Reset: account.Reset, LimitIP: account.LimitIP,
+			Reset: account.Reset, LimitIP: account.LimitIP, TgID: account.TgID,
 			Memberships: mine, OwnedByReseller: owner[key],
 		}
 		// client_traffics is one row per account panel-wide, and it is what the
