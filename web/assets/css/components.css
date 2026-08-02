@@ -1218,6 +1218,24 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 .bo-cf-unused { opacity:.5; }
 .bo-cf-mono input { font-family:var(--font-mono, ui-monospace, monospace); font-size:12.5px; }
 
+/* An input with a trailing icon button, matching the addonAfter that a-input
+   gets for free. a-input-number and a-date-picker have no addon slot, so the
+   pairing is built here rather than faked with absolute positioning. */
+.bo-cf-withicon { display:flex; align-items:stretch; }
+.bo-cf-withicon > *:first-child { flex:1 1 auto; min-width:0; }
+.bo-cf-withicon > *:first-child .ant-input-number,
+.bo-cf-withicon > *:first-child .ant-input {
+  border-start-end-radius:0; border-end-end-radius:0;
+}
+.bo-cf-iconbtn {
+  flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center;
+  width:34px; font:inherit; cursor:pointer; color:var(--text-2);
+  background:var(--surface-2); border:1px solid var(--border); border-inline-start:0;
+  border-start-end-radius:2px; border-end-end-radius:2px;
+}
+.bo-cf-iconbtn:hover { color:var(--accent); }
+.bo-cf-iconbtn:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+
 .bo-cf-switch {
   display:flex; align-items:center; justify-content:space-between; gap:14px;
   padding:11px 0; border-bottom:1px solid var(--border);

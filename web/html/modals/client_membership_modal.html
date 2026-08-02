@@ -39,8 +39,8 @@
           <b>[[ clientMembershipModal.expiresText ]]</b>
         </div>
         <div class="bo-cf-kv">
-          <span>{{ i18n "pages.clients.summaryDevices" }}</span>
-          <b>[[ clientMembershipModal.client.limitIp > 0 ? clientMembershipModal.client.limitIp : '-' ]]</b>
+          <span>{{ i18n "pages.clients.inbounds" }}</span>
+          <b>[[ clientMembershipModal.selected.length ]]</b>
         </div>
       </div>
 
@@ -56,12 +56,19 @@
     </div>
 
     <div class="bo-cf-pane">
-      <!-- Identity -->
+      <!-- Identity: who the account is AND what it is allowed. The two were
+           split across two tabs and did not need to be: an operator setting up a
+           customer sets the quota in the same breath as the name. -->
       <template v-if="clientMembershipModal.tab === 'identity'">
         <div class="bo-cf-field">
           <label>{{ i18n "pages.inbounds.email" }}</label>
           <a-input v-model.trim="clientMembershipModal.client.email"
-                   :disabled="clientMembershipModal.isEdit"></a-input>
+                   :disabled="clientMembershipModal.isEdit">
+            <a-tooltip slot="addonAfter" v-if="!clientMembershipModal.isEdit">
+              <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
+              <a-icon type="reload" @click="clientMembershipModal.regenerate('email')"></a-icon>
+            </a-tooltip>
+          </a-input>
           <div class="bo-cf-hint" v-if="clientMembershipModal.isEdit">{{ i18n "pages.clients.emailLocked" }}</div>
         </div>
         <a-row :gutter="12">
@@ -89,47 +96,7 @@
           <label>{{ i18n "comment" }}</label>
           <a-input v-model="clientMembershipModal.client.comment"></a-input>
         </div>
-        <div class="bo-cf-switch">
-          <div>
-            <div class="bo-cf-t">{{ i18n "pages.inbounds.enable" }}</div>
-            <div class="bo-cf-d">{{ i18n "pages.clients.enabledDesc" }}</div>
-          </div>
-          <a-switch v-model="clientMembershipModal.client.enable"></a-switch>
-        </div>
-      </template>
 
-      <!-- Credentials: field-first, because the account stores ONE of each and
-           several protocols share them. -->
-      <template v-if="clientMembershipModal.tab === 'credentials'">
-        <a-alert type="info" show-icon :style="{ marginBottom: '14px' }"
-          message='{{ i18n "pages.clients.credentialsHint" }}'></a-alert>
-        <div class="bo-cf-field" v-for="f in clientMembershipModal.credentialFields" :key="f.key"
-          :class="{ 'bo-cf-unused': !clientMembershipModal.fieldUsed(f) }">
-          <label>
-            [[ f.label ]]
-            <a-tag v-if="clientMembershipModal.fieldUsed(f)" color="green">
-              [[ clientMembershipModal.usersOf(f).join(' \u00b7 ') ]]
-            </a-tag>
-            <a-tag v-else>{{ i18n "pages.clients.unusedHere" }}</a-tag>
-          </label>
-          <a-input v-model.trim="clientMembershipModal.client[f.key]"
-            :placeholder="f.protocols.join(', ')" class="bo-cf-mono">
-            <a-tooltip slot="addonAfter">
-              <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
-              <a-icon type="reload" @click="clientMembershipModal.regenerate(f.key)"></a-icon>
-            </a-tooltip>
-          </a-input>
-        </div>
-        <a-alert v-if="clientMembershipModal.strictSsBytes" type="info" show-icon
-          :style="{ marginTop: '4px' }"
-          message='{{ i18n "pages.clients.ssStrictPassword" }}'></a-alert>
-        <a-alert v-if="clientMembershipModal.isEdit" type="warning" show-icon
-          :style="{ marginTop: '8px' }"
-          message='{{ i18n "pages.clients.credentialWarn" }}'></a-alert>
-      </template>
-
-      <!-- Limits -->
-      <template v-if="clientMembershipModal.tab === 'limits'">
         <a-row :gutter="12">
           <a-col :span="12">
             <div class="bo-cf-field">
@@ -142,33 +109,44 @@
           <a-col :span="12">
             <div class="bo-cf-field">
               <label>{{ i18n "pages.client.expireDays" }}</label>
-              <a-input-number v-model="clientMembershipModal.days" :min="0"
-                :style="{ width: '100%' }"></a-input-number>
+              <!-- Two ways into ONE stored value. A duration is what an operator
+                   selling a 30-day plan actually knows; a date is what someone
+                   matching an existing invoice knows. The calendar switches
+                   between them and the day count is recomputed from the date. -->
+              <div class="bo-cf-withicon">
+                <a-input-number v-if="!clientMembershipModal.pickDate"
+                  v-model="clientMembershipModal.days" :min="0"
+                  :style="{ width: '100%' }"></a-input-number>
+                <a-date-picker v-else
+                  :show-time="{ format: 'HH:mm' }"
+                  format="YYYY-MM-DD HH:mm"
+                  :dropdown-class-name="themeSwitcher.currentTheme"
+                  :value="clientMembershipModal.expiryMoment"
+                  @change="d => clientMembershipModal.setExpiryDate(d)"
+                  :style="{ width: '100%' }"></a-date-picker>
+                <a-tooltip>
+                  <template slot="title">
+                    [[ clientMembershipModal.pickDate
+                       ? '{{ i18n "pages.clients.useDuration" }}'
+                       : '{{ i18n "pages.clients.usePickDate" }}' ]]
+                  </template>
+                  <button type="button" class="bo-cf-iconbtn"
+                    @click="clientMembershipModal.pickDate = !clientMembershipModal.pickDate">
+                    <a-icon :type="clientMembershipModal.pickDate ? 'field-time' : 'calendar'"></a-icon>
+                  </button>
+                </a-tooltip>
+              </div>
               <div class="bo-cf-hint">{{ i18n "pages.clients.zeroNoExpiry" }}</div>
             </div>
           </a-col>
         </a-row>
+
         <div class="bo-cf-switch">
           <div>
             <div class="bo-cf-t">{{ i18n "pages.client.delayedStart" }}</div>
             <div class="bo-cf-d">{{ i18n "pages.clients.delayedStartDesc" }}</div>
           </div>
           <a-switch v-model="clientMembershipModal.delayedStart"></a-switch>
-        </div>
-        <!-- app.* and not a bare name: this modal is compiled by its own Vue
-             instance, where an unqualified identifier resolves to nothing and
-             throws at render time. -->
-        <div class="bo-cf-switch" v-if="app.ipLimitEnable"
-          :class="{ 'bo-cf-unused': !clientMembershipModal.ipLimitApplies }">
-          <div>
-            <div class="bo-cf-t">{{ i18n "pages.inbounds.IPLimit" }}</div>
-            <div class="bo-cf-d" v-if="clientMembershipModal.ipLimitApplies">
-              {{ i18n "pages.clients.ipLimitDesc" }}
-            </div>
-            <div class="bo-cf-d" v-else>{{ i18n "pages.clients.ipLimitNotEnforced" }}</div>
-          </div>
-          <a-input-number v-model="clientMembershipModal.client.limitIp" :min="0"
-            :style="{ width: '96px' }"></a-input-number>
         </div>
         <div class="bo-cf-switch">
           <div>
@@ -177,6 +155,13 @@
           </div>
           <a-input-number v-model="clientMembershipModal.client.reset" :min="0"
             :style="{ width: '96px' }"></a-input-number>
+        </div>
+        <div class="bo-cf-switch">
+          <div>
+            <div class="bo-cf-t">{{ i18n "pages.inbounds.enable" }}</div>
+            <div class="bo-cf-d">{{ i18n "pages.clients.enabledDesc" }}</div>
+          </div>
+          <a-switch v-model="clientMembershipModal.client.enable"></a-switch>
         </div>
       </template>
 
@@ -208,6 +193,35 @@
           :style="{ marginTop: '12px' }"
           message='{{ i18n "pages.clients.sameProtocolRefused" }}'></a-alert>
       </template>
+      <!-- Credentials: field-first, because the account stores ONE of each and
+           several protocols share them. -->
+      <template v-if="clientMembershipModal.tab === 'credentials'">
+        <a-alert type="info" show-icon :style="{ marginBottom: '14px' }"
+          message='{{ i18n "pages.clients.credentialsHint" }}'></a-alert>
+        <div class="bo-cf-field" v-for="f in clientMembershipModal.credentialFields" :key="f.key"
+          :class="{ 'bo-cf-unused': !clientMembershipModal.fieldUsed(f) }">
+          <label>
+            [[ f.label ]]
+            <a-tag v-if="clientMembershipModal.fieldUsed(f)" color="green">
+              [[ clientMembershipModal.usersOf(f).join(' \u00b7 ') ]]
+            </a-tag>
+            <a-tag v-else>{{ i18n "pages.clients.unusedHere" }}</a-tag>
+          </label>
+          <a-input v-model.trim="clientMembershipModal.client[f.key]"
+            :placeholder="f.protocols.join(', ')" class="bo-cf-mono">
+            <a-tooltip slot="addonAfter">
+              <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
+              <a-icon type="reload" @click="clientMembershipModal.regenerate(f.key)"></a-icon>
+            </a-tooltip>
+          </a-input>
+        </div>
+        <a-alert v-if="clientMembershipModal.strictSsBytes" type="info" show-icon
+          :style="{ marginTop: '4px' }"
+          message='{{ i18n "pages.clients.ssStrictPassword" }}'></a-alert>
+        <a-alert v-if="clientMembershipModal.isEdit" type="warning" show-icon
+          :style="{ marginTop: '8px' }"
+          message='{{ i18n "pages.clients.credentialWarn" }}'></a-alert>
+      </template>
     </div>
   </div>
 </a-modal>
@@ -229,12 +243,16 @@
     // A negative expiryTime means "N days from first use" and the clock has not
     // started, which is what this switch writes.
     delayedStart: false,
+    // Identity first because it is what an operator fills in; inbounds next
+    // because the answer decides which credentials matter; credentials last
+    // because the server mints every one of them and most operators never look.
     tabs: [
-      { key: 'identity',    icon: 'user',     label: '{{ i18n "pages.clients.tabIdentity" }}' },
-      { key: 'credentials', icon: 'key',      label: '{{ i18n "pages.clients.credentials" }}' },
-      { key: 'limits',      icon: 'dashboard', label: '{{ i18n "pages.clients.tabLimits" }}' },
-      { key: 'inbounds',    icon: 'cluster',  label: '{{ i18n "pages.clients.inbounds" }}' },
+      { key: 'identity',    icon: 'user',    label: '{{ i18n "pages.clients.tabIdentity" }}' },
+      { key: 'inbounds',    icon: 'cluster', label: '{{ i18n "pages.clients.inbounds" }}' },
+      { key: 'credentials', icon: 'key',     label: '{{ i18n "pages.clients.credentials" }}' },
     ],
+    // Entering the deadline as a date rather than a day count.
+    pickDate: false,
     // The account's stored entry on EACH inbound serving it, keyed by inbound id
     // and handed in by the page. Per inbound, not one entry, because the identity
     // field differs by protocol and the write is addressed to whichever inbound
@@ -275,6 +293,7 @@
       this.title = row ? '{{ i18n "pages.clients.editTitle" }}' : '{{ i18n "pages.clients.addTitle" }}';
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
       this.tab = 'identity';
+      this.pickDate = false;
       if (row) {
         this.client = {
           email: row.email, enable: row.enable, limitIp: row.limitIp,
@@ -296,7 +315,8 @@
           : (row.expiryTime < 0 ? Math.round(Math.abs(row.expiryTime) / 86400000) : 0);
         this.selected = (row.memberships || []).map(m => m.inboundId);
       } else {
-        this.client = { email: '', enable: true, limitIp: 0, comment: '', subId: '', reset: 0, tgId: 0 };
+        this.client = { email: this.mint('email'), enable: true, limitIp: 0,
+                        comment: '', subId: '', reset: 0, tgId: 0 };
         this.totalGb = 0;
         this.days = 0;
         this.delayedStart = false;
@@ -321,27 +341,22 @@
       if (!this.quotaBytes) return '{{ i18n "pages.clients.summaryUnlimited" }}';
       return SizeFormatter.sizeFormat(Math.max(0, this.quotaBytes - this.usedBytes));
     },
+    // The deadline as a moment, for the picker. A NEGATIVE expiry is a delayed
+    // start and has no date yet, so the picker shows nothing rather than 1970.
+    get expiryMoment() {
+      if (!this.days || this.delayedStart) return null;
+      return moment(Date.now() + this.days * 86400000);
+    },
+    // Picking a date sets the same day count the number input edits, so the two
+    // inputs stay one value however the operator switches between them.
+    setExpiryDate(d) {
+      if (!d) { this.days = 0; return; }
+      const ms = d.valueOf() - Date.now();
+      this.days = Math.max(0, Math.ceil(ms / 86400000));
+    },
     get expiresText() {
       if (!this.days) return '{{ i18n "pages.clients.summaryNever" }}';
       return this.days + ' {{ i18n "pages.clients.summaryDays" }}';
-    },
-
-    // Whether the per-client IP limit can be enforced for THIS selection.
-    //
-    // It is counted by CheckClientIpJob, which reads Xray's access log and keys on
-    // the "email:" it logs for a user that authenticated to Xray directly. The VPN
-    // protocols do not: they are TPROXY'd into a dokodemo-door inbound that has no
-    // per-user identity, so their traffic carries no email and this limit never
-    // fires for them. Their device cap is `userLimit` on the INBOUND, which hands
-    // each account K consecutive tunnel addresses and either evicts the oldest
-    // device or refuses the new one at the cap.
-    //
-    // mtproto and ssh are relays served in-binary rather than through Xray, so
-    // they are on the same footing as the VPNs here.
-    get ipLimitApplies() {
-      const counted = ['vmess', 'vless', 'trojan', 'shadowsocks', 'tuic',
-                       'anytls', 'naive', 'hysteria', 'hysteria2'];
-      return this.selectedProtocols.some(p => counted.includes(p));
     },
 
     // The account's own credential columns, and which protocols read each one.
@@ -425,6 +440,9 @@
         case 'secret': return RandomUtil.randomSeq(32, { type: 'hex' });
         case 'naiveUsername': return '';
         case 'subId': return RandomUtil.randomLowerAndNum(16);
+        // Named like the accounts an operator creates in bulk, so a hand-made one
+        // and a generated one sit together in the list rather than standing out.
+        case 'email': return 'user-' + RandomUtil.randomLowerAndNum(8);
         default: return '';
       }
     },
@@ -509,6 +527,9 @@
       const base = Object.assign({}, (this.storedBy && this.storedBy[inboundId]) || {}, {
         email,
         enable: c.enable !== false,
+        // Carried through, never edited here: the device cap belongs to the
+        // inbound (userLimit), and this form must not silently zero a value some
+        // other page set.
         limitIp: Number(c.limitIp) || 0,
         comment: c.comment || '',
         subId: c.subId || '',
