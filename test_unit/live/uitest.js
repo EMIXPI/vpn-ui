@@ -287,20 +287,41 @@ async function main() {
   check('the enable toggle reaches every membership', toggled && toggled.enable === false,
         toggled ? 'enable=' + toggled.enable : 'missing');
 
-  // ------------------------------------------- the per-inbound controls, inline
-  const inline = await evalJs(`(() => {
+  // ------------------------------------------------- the per-inbound expansion
+  // An account can be on several inbounds, each with its own protocol, its own
+  // credential and its own traffic, so each gets its own block rather than being
+  // folded into the row.
+  await evalJs(`(() => {
      const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     if (!r) return { lines: 0, icons: 0 };
-     return {
-       lines: r.querySelectorAll('.bo-client-line').length,
-       icons: r.querySelectorAll('.bo-client-line .bo-client-actions .anticon').length,
-       expanders: document.querySelectorAll('.ant-table-row-expand-icon').length,
-     };
+     const t = r && r.querySelector('.ant-table-row-expand-icon');
+     if (t) t.click();
+     return true;
    })()`);
-  check('the row shows a line per inbound serving the account',
-        inline && inline.lines >= 2, JSON.stringify(inline));
-  check('each line carries the client action icons, with no expander to open',
-        inline && inline.icons > 0 && inline.expanders === 0, JSON.stringify(inline));
+  await wait(1400);
+  const inner = await evalJs(`(() => ({
+     rows: document.querySelectorAll('.ant-table-expanded-row .ant-table-tbody tr').length,
+     icons: document.querySelectorAll('.ant-table-expanded-row .bo-client-actions .anticon').length,
+   }))()`);
+  check('expanding an account shows a block per inbound serving it',
+        inner && inner.rows >= 2, JSON.stringify(inner));
+  check('and each block carries that inbound\'s client action icons',
+        inner && inner.icons > 0, JSON.stringify(inner));
+
+  // The account-level subscription icon: one URL covering every membership.
+  const sub = await evalJs(`(async () => {
+     const row = app.clients.find(c => c.email === ${JSON.stringify(EMAIL)});
+     if (!row) return { noRow: true };
+     const before = row.subId;
+     app.showAccountSub(row);
+     await new Promise(r => setTimeout(r, 600));
+     return { rowSubId: before, modalSubId: qrModal.subId,
+              visible: qrModal.visible, perInboundLinks: qrModal.qrcodes.length };
+   })()`);
+  check('the subscription icon opens the ACCOUNT subscription, not one inbound\'s',
+        sub && sub.visible === true && sub.modalSubId === sub.rowSubId
+          && sub.perInboundLinks === 0, JSON.stringify(sub));
+  await evalJs(`qrModal.close(); true`);
+  await wait(500);
 
   // ------------------------------------------- changing which inbounds serve it
   // This is what answered "empty client ID": the write used to be addressed to

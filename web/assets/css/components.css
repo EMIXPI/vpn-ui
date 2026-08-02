@@ -938,19 +938,6 @@ body.dark .bo-theme-toggle .bo-i-moon { display:block; }
 .bo-client-actions .anticon,
 .bo-client-actions svg { flex:0 0 auto; }
 
-/* One membership of an account, on the Clients page: the inbound's name, its
-   protocol, what it has moved, then that inbound's client controls. These sit
-   inline in a table cell rather than behind an expander, so unlike the row above
-   they DO wrap: an account on five inbounds would otherwise force the whole
-   table into a horizontal scroll to reach the icons. */
-.bo-client-line {
-  display:flex; align-items:center; flex-wrap:wrap;
-  gap:6px; padding:3px 0;
-}
-.bo-client-line + .bo-client-line { border-top:1px solid var(--line-weak, rgba(128,128,128,.18)); }
-.bo-client-line .bo-client-actions { margin-inline-start:auto; }
-.bo-client-line .ant-tag { margin-inline-end:0; }
-
 /* ================================================================== *
  * distro marks
  *

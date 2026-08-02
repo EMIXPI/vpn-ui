@@ -104,6 +104,8 @@
                   :row-selection="{ selectedRowKeys: selectedEmails, onChange: onSelectChange }"
                   :pagination="pagination"
                   :scroll="{ x: 1180 }"
+                  :expanded-row-keys="expandedRowKeys"
+                  v-on="{ expandedRowsChange: keys => { expandedRowKeys = keys; } }"
                   @change="onTableChange"
                   size="middle">
 
@@ -143,29 +145,15 @@
                     <a-tag v-else :color="expired(row) ? 'red' : 'green'">[[ formatExpiry(row) ]]</a-tag>
                   </template>
 
-                  <!-- One line per inbound serving the account, each with that
-                       inbound's own client controls. It used to take an expander
-                       to reach them, which hid the only place a per-protocol
-                       config, QR or share link could be got at. -->
                   <template slot="inboundsCol" slot-scope="text, row">
                     <span v-if="!row.memberships || !row.memberships.length" class="bo-dim">
                       {{ i18n "pages.clients.noInbounds" }}
                     </span>
-                    <div v-for="record in accountInbounds(row)" :key="record.id"
-                      class="bo-client-line">
-                      <a-tag :color="record.enable ? '' : 'red'">
-                        [[ record.remark || ('#' + record.id) ]]
-                      </a-tag>
-                      <a-tag>[[ record.protocol ]]</a-tag>
-                      <span class="bo-dim">:[[ record.port ]]</span>
-                      <span class="bo-dim">[[ sizeFormat(getSumStats(record, row.email)) ]]</span>
-                      <!-- The icons read `record` and `client` by name, so the
-                           one-element list from accountClientIn is aliased here
-                           rather than threaded through a prop. -->
-                      <template v-for="client in accountClientIn(row, record)">
-                        {{template "component/clientActionIcons"}}
-                      </template>
-                    </div>
+                    <a-tag v-for="m in row.memberships" :key="m.inboundId"
+                           :color="m.enable ? '' : 'red'"
+                           :title="m.protocol + ' :' + m.port">
+                      [[ m.remark || (m.protocol + ':' + m.port) ]]
+                    </a-tag>
                   </template>
 
                   <template slot="actionCol" slot-scope="text, row">
@@ -178,12 +166,45 @@
                         <template slot="title">{{ i18n "pages.clients.inbounds" }}</template>
                         <a-button size="small" icon="cluster" @click="openMemberships(row)"></a-button>
                       </a-tooltip>
+                      <!-- The account's subscription, which already covers every
+                           inbound serving it: one subId is projected onto all of
+                           them. Hidden rather than disabled when there is none,
+                           because a disabled antd control fires no mouse events
+                           and its tooltip would never open. -->
+                      <a-tooltip v-if="subSettings.enable && row.subId">
+                        <template slot="title">{{ i18n "pages.settings.subSettings" }}</template>
+                        <a-button size="small" icon="link" @click="showAccountSub(row)"></a-button>
+                      </a-tooltip>
                       <a-button size="small" :icon="row.enable ? 'pause' : 'caret-right'"
                                 @click="toggleEnable(row)"></a-button>
                       <a-button size="small" type="danger" icon="delete" @click="confirmDelete(row)"></a-button>
                     </a-space>
                   </template>
 
+                  <!-- One block per inbound serving the account. An account can be
+                       on several, and each one has its own protocol, its own
+                       credential and its own traffic, so they are shown apart
+                       rather than folded into the row. The v-for alias is called
+                       `record` on purpose: aClientTable reads `record` as the
+                       inbound its row belongs to, so aliasing here is what lets
+                       the component be reused unchanged. -->
+                  <template slot="expandedRowRender" slot-scope="row">
+                    <div v-for="record in accountInbounds(row)" :key="record.id"
+                      :style="{ marginBottom: '8px' }">
+                      <div class="bo-dim" :style="{ marginBottom: '2px' }">
+                        [[ record.remark || ('#' + record.id) ]]
+                        <a-tag>[[ record.protocol ]]</a-tag>
+                        <span>:[[ record.port ]]</span>
+                      </div>
+                      <a-table :row-key="client => client.email"
+                        :columns="isMobile ? innerMobileColumns : innerColumns"
+                        :data-source="accountClientIn(row, record)"
+                        :pagination="false"
+                        size="small">
+                        {{template "component/aClientTable"}}
+                      </a-table>
+                    </div>
+                  </template>
                 </a-table>
               </a-card>
             </a-col>
@@ -219,6 +240,25 @@
 {{template "modals/clientMembershipModal" .}}
 
 <script>
+  // No select column: selection is the OUTER account row's job here, and a
+  // per-inbound "select all" inside an expanded row would quietly reach clients
+  // this page never listed.
+  const innerColumns = [
+    { title: '{{ i18n "pages.inbounds.operate" }}', width: 200, scopedSlots: { customRender: 'actions' } },
+    { title: '{{ i18n "pages.inbounds.enable" }}', width: 30, scopedSlots: { customRender: 'enable' } },
+    { title: '{{ i18n "online" }}', width: 32, scopedSlots: { customRender: 'online' } },
+    { title: '{{ i18n "pages.inbounds.client" }}', width: 80, scopedSlots: { customRender: 'client' } },
+    { title: '{{ i18n "pages.inbounds.traffic" }}', width: 80, align: 'center', scopedSlots: { customRender: 'traffic' } },
+    { title: '{{ i18n "pages.inbounds.allTimeTraffic" }}', width: 60, align: 'center', scopedSlots: { customRender: 'allTime' } },
+    { title: '{{ i18n "pages.inbounds.expireDate" }}', width: 80, align: 'center', scopedSlots: { customRender: 'expiryTime' } },
+  ];
+
+  const innerMobileColumns = [
+    { title: '{{ i18n "pages.inbounds.operate" }}', width: 10, align: 'center', scopedSlots: { customRender: 'actionMenu' } },
+    { title: '{{ i18n "pages.inbounds.client" }}', width: 90, align: 'left', scopedSlots: { customRender: 'client' } },
+    { title: '{{ i18n "pages.inbounds.info" }}', width: 10, align: 'center', scopedSlots: { customRender: 'info' } },
+  ];
+
   const app = new Vue({
     delimiters: ['[[', ']]'],
     el: '#app',
@@ -245,6 +285,7 @@
       search: '',
       searchTimer: null,
       selectedEmails: [],
+      expandedRowKeys: [],
       onlineClients: [],
       lastOnlineMap: {},
       expireDiff: 0,
@@ -274,10 +315,8 @@
         { title: '{{ i18n "pages.clients.email" }}', scopedSlots: { customRender: 'emailCol' }, width: 220 },
         { title: '{{ i18n "pages.clients.quota" }}', scopedSlots: { customRender: 'quotaCol' }, width: 190 },
         { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiryCol' }, width: 150 },
-        // Wide on purpose: this column holds a line per inbound, each ending in
-        // that inbound's action icons, so it needs room the other four do not.
-        { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'inboundsCol' }, width: 460 },
-        { title: '', scopedSlots: { customRender: 'actionCol' }, width: 175, align: 'right' },
+        { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'inboundsCol' } },
+        { title: '', scopedSlots: { customRender: 'actionCol' }, width: 210, align: 'right' },
       ],
     },
     methods: {
@@ -461,6 +500,12 @@
         const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
         if (!client) return;
         this.openEditClient(dbInbound.id, client);
+      },
+      // One URL for the whole account. Passing the row itself would hand the modal
+      // an object with no subId when the account has none, which is exactly the
+      // case the icon is hidden for.
+      showAccountSub(row) {
+        qrModal.showSub(row.email, { subId: row.subId });
       },
       openCopyClients(inboundId) {
         const dbInbound = this.dbInbounds.find(r => r.id === inboundId);

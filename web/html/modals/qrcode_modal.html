@@ -140,6 +140,20 @@
       }
       this.visible = true;
     },
+    // The ACCOUNT's subscription, rather than one inbound's share links.
+    //
+    // One account has ONE subId, which the projection writes onto every inbound
+    // serving it, so a single URL already covers all of them and is not tied to
+    // any one. qrcodes is left empty on purpose: a per-inbound link here would
+    // have to pick an inbound, and picking one would misrepresent the rest.
+    showSub: function (title, client) {
+      this.title = title;
+      this.client = client;
+      this.subId = (client && client.subId) || '';
+      this.qrcodes = [];
+      if (qrModalApp) qrModalApp.statusFetched = false;
+      this.visible = true;
+    },
     close: function () {
       this.visible = false;
     },
