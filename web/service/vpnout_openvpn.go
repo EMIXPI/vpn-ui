@@ -245,19 +245,20 @@ func ovpnOutBinary() (string, error) {
 		return p, nil
 	}
 	// A host openvpn is a perfectly good fallback and is usually a dynamically linked build
-	// with MORE features than the bundle (compression, plugins), so it is preferred over
-	// failing. This is also the only path on an architecture that ships no bundle.
+	// with MORE features than the bundle (plugins, dco), so it is preferred over failing.
+	// This is also the only path on an architecture that ships no bundle.
 	if commandExists("openvpn") {
 		return daemonBin("openvpn"), nil
 	}
 	return "", fmt.Errorf("no openvpn binary: this build ships no bundle for this architecture and none is installed on the host")
 }
 
-// The bundle is built --disable-lzo --disable-lz4 --disable-plugins --disable-dco
-// (build/backend/build.sh), so it CANNOT speak to a server that insists on compression. A
-// distro openvpn usually can, which is exactly why this is probed from the binary rather than
-// assumed, the same way openvpn.go probes ciphers and DCO. `openvpn --version` advertises its
-// compiled-in options in brackets: "[SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] ...".
+// The bundle is built --enable-lzo --enable-lz4 (build/backend/build.sh), so it can speak to a
+// server that insists on compression. This stays a probe rather than a constant because the
+// binary is not always the bundled one: DaemonPath falls back to a host openvpn on an
+// architecture that ships no bundle, and a distro build may well have been compiled without
+// either library. Same shape as openvpn.go probing ciphers and DCO. `openvpn --version`
+// advertises its compiled-in options in brackets: "[SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] ...".
 var (
 	ovpnOutCompProbe sync.Once
 	ovpnOutHasLzo    bool
@@ -609,15 +610,16 @@ func (ovpnOutDriver) Validate(cfg VpnOutboundConfig) error {
 			strings.TrimSpace(st.Username) == "" && strings.TrimSpace(st.Password) == "" {
 			return fmt.Errorf("this profile authenticates with a username and password, but none were given")
 		}
-		// The bundled binary carries no compression library, and a server that insists on one
-		// cannot be talked to at all. Caught here rather than left to fail at connect time,
-		// where it surfaces as an unrecognized-option line buried in the log.
+		// The bundled binary has both libraries, but a HOST openvpn (used where this build
+		// ships no bundle) may not, and a server that insists on compression cannot be talked
+		// to at all without it. Caught here rather than left to fail at connect time, where it
+		// surfaces as an unrecognized-option line buried in the log.
 		if need := ovpnOutCompressionNeed(profile); need != "" {
 			lzo, lz4 := ovpnOutCompressionSupport(bin)
 			if (need == "lzo" && !lzo) || (need == "lz4" && !lz4) {
-				return fmt.Errorf("this profile needs %s compression, which this openvpn build does not have "+
-					"(the bundled one is built --disable-lzo --disable-lz4). Ask the provider for a profile "+
-					"without compression, or install a distro openvpn that has it", strings.ToUpper(need))
+				return fmt.Errorf("this profile needs %s compression, which this openvpn build does not have. "+
+					"Ask the provider for a profile without compression, or install a distro openvpn that has it",
+					strings.ToUpper(need))
 			}
 		}
 	}
@@ -884,10 +886,10 @@ func ovpnOutLogTell(log string) string {
 		case strings.Contains(ln, "Unrecognized option") &&
 			(strings.Contains(ln, "comp-lzo") || strings.Contains(ln, "compress")):
 			// This one IS usually a pushed option, and it is fatal to the data path: the
-			// server compresses and this build cannot decompress.
-			tell = "the server pushed compression, which this openvpn build does not have " +
-				"(the bundled one is built --disable-lzo --disable-lz4); ask the provider to turn it off " +
-				"or install a distro openvpn that has it"
+			// server compresses and this build cannot decompress. The bundled binary has
+			// both libraries, so reaching this means a host openvpn built without them.
+			tell = "the server pushed compression, which this openvpn build does not have; " +
+				"ask the provider to turn it off or install a distro openvpn that has it"
 		case strings.Contains(ln, "Options error") && !pushed:
 			tell = "the client refused its own config (Options error), see the log below"
 		case strings.Contains(ln, "VERIFY ERROR") || strings.Contains(ln, "certificate verify failed"):

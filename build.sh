@@ -116,6 +116,19 @@ else
     for a in "${BUNDLE_ARTIFACTS[@]}"; do
         [[ -f "backend/bin/$ARCH/$a" ]] || { bundle_stale=1; info "bundle artifact missing: $a"; }
     done
+    # Presence is not enough for openvpn: a bundle built before compression was
+    # turned on has the file but cannot dial a server that insists on comp-lzo,
+    # and an existence-only check would keep that binary forever. --version exits
+    # non-zero by design, hence the `|| true`.
+    if [[ -x "backend/bin/$ARCH/openvpn" && "$ARCH" == "$(go env GOARCH)" ]]; then
+        ovpn_ver="$("backend/bin/$ARCH/openvpn" --version 2>&1 || true)"
+        for feat in "[LZO]" "[LZ4]"; do
+            if [[ "$ovpn_ver" != *"$feat"* ]]; then
+                bundle_stale=1
+                info "bundled openvpn was built without $feat"
+            fi
+        done
+    fi
 fi
 if (( bundle_stale )); then
     step "VPN daemon bundle"

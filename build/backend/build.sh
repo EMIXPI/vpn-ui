@@ -52,7 +52,8 @@ build_arch() {
     # firewalled (common with firewalld on the build host).
     docker run --rm ${DOCKER_NET:-} --platform "$platform" -v "$outdir:/out" alpine:3.20 sh -euxc '
         apk add --no-cache build-base linux-headers pkgconf git wget file \
-            openssl-dev openssl-libs-static libcap-ng-dev libcap-ng-static
+            openssl-dev openssl-libs-static libcap-ng-dev libcap-ng-static \
+            lzo-dev lz4-dev lz4-static
 
         # --- xl2tpd (static) ---
         git clone --depth 1 https://github.com/xelerance/xl2tpd /src/xl2tpd
@@ -68,12 +69,18 @@ build_arch() {
         wget -q "https://swupdate.openvpn.org/community/releases/openvpn-${OVPN_VER}.tar.gz"
         tar xf "openvpn-${OVPN_VER}.tar.gz"
         cd "openvpn-${OVPN_VER}"
-        # Minimal build (no lzo/lz4/plugins/dco); keep management (panel uses the
-        # mgmt socket). Force static archives for the deps configure would take
-        # dynamically. libtool strips a plain -static, so pass -all-static at make.
-        ./configure --disable-lzo --disable-lz4 --disable-plugins --disable-dco --disable-unit-tests \
+        # No plugins/dco, but lzo AND lz4 are in: a provider profile that says
+        # `comp-lzo` or `compress lz4` cannot be dialled at all by a binary built
+        # without them, and plenty of them still do. Costs ~24KB.
+        # Keep management (panel uses the mgmt socket). Force static archives for
+        # the deps configure would otherwise take dynamically: pkg-config reports
+        # the SHARED lzo/lz4, and -all-static then has nothing to link.
+        # libtool strips a plain -static, so pass -all-static at make.
+        ./configure --enable-lzo --enable-lz4 --disable-plugins --disable-dco --disable-unit-tests \
             OPENSSL_LIBS="-l:libssl.a -l:libcrypto.a" \
-            LIBCAPNG_CFLAGS=" " LIBCAPNG_LIBS="-l:libcap-ng.a"
+            LIBCAPNG_CFLAGS=" " LIBCAPNG_LIBS="-l:libcap-ng.a" \
+            LZO_CFLAGS=" " LZO_LIBS="-l:liblzo2.a" \
+            LZ4_CFLAGS=" " LZ4_LIBS="-l:liblz4.a"
         make -j"$(nproc)" LDFLAGS="-all-static -s"
         cp src/openvpn/openvpn /out/openvpn
 
@@ -106,6 +113,18 @@ build_arch() {
         make -j"$(nproc)" pptp LDFLAGS="-static"
         cp pptp /out/pptp
         strip /out/pptp || true
+
+        # configure DOWNGRADES a missing lzo/lz4 to a warning and builds anyway, so
+        # the only proof the libraries made it in is the version banner the panel
+        # itself probes (ovpnOutCompressionSupport in web/service/vpnout_openvpn.go).
+        # --version exits non-zero by design, hence the `|| true`.
+        ovpn_ver="$(/out/openvpn --version 2>&1 || true)"
+        for feat in "[LZO]" "[LZ4]"; do
+            case "$ovpn_ver" in
+                *"$feat"*) ;;
+                *) echo "ERROR: openvpn built without $feat" >&2; exit 1 ;;
+            esac
+        done
 
         # Confirm all outputs are static
         for b in /out/xl2tpd /out/xl2tpd-control /out/openvpn /out/pptpd /out/pptpctrl /out/pptp; do
