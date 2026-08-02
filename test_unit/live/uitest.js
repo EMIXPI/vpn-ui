@@ -435,13 +435,25 @@ async function main() {
   // storedClient serializes through toJson(). Stringifying the instance drops a
   // class getter, and those same four protocols expose `id` as exactly that, so
   // every write built from one arrived with no identity.
+  // Asserted through getClientIdentity, not by looking for "id": which field IS
+  // the identity depends on the protocol (email for shadowsocks, password for
+  // trojan and the credential VPNs), and hardcoding one makes the check wrong for
+  // every account whose first membership is a different family.
   const keepsId = await evalJs(`(() => {
-     const row = app.clients[0];
-     if (!row || !row.memberships.length) return { none: true };
-     const s = app.storedClient(row, row.memberships[0].inboundId);
-     return { hasId: !!(s && s.id), email: s && s.email };
+     const bad = [];
+     for (const row of app.clients) {
+       for (const m of (row.memberships || [])) {
+         const stored = app.storedClient(row, m.inboundId);
+         if (!stored) continue;
+         if (!getClientIdentity(m.protocol, stored)) {
+           bad.push(row.email + '@' + m.protocol);
+         }
+       }
+     }
+     return { checked: app.clients.length, bad };
    })()`);
-  check('storedClient keeps the identity field', keepsId && keepsId.hasId, JSON.stringify(keepsId));
+  check('storedClient keeps each membership\'s identity field',
+        keepsId && keepsId.bad && keepsId.bad.length === 0, JSON.stringify(keepsId));
 
   // ------------------------------------------------- inbounds has no clients
   console.log('\n=== the Inbounds page holds no clients ===');

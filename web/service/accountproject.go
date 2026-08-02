@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"time"
@@ -519,6 +521,39 @@ func (s *AccountService) pruneOrphanAccounts(tx *gorm.DB) error {
 	return db.Where("id NOT IN ?", live).Delete(&model.Account{}).Error
 }
 
+// shadowsocksUserKey mints a per-user password valid for the inbound's cipher.
+//
+// Only the 2022-blake3 family constrains it; every legacy method takes any string,
+// so those keep the dashless uuid the other password protocols use.
+//
+// An account on two shadowsocks inbounds of DIFFERENT 2022 key lengths still
+// cannot be served by both, because one account holds one password. That is the
+// same single-column limit the credential VPNs have and is not fixed here.
+func shadowsocksUserKey(inbound *model.Inbound) string {
+	method := ""
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err == nil {
+		method, _ = settings["method"].(string)
+	}
+	size := 0
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "2022-blake3-aes-128-gcm":
+		size = 16
+	case "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305":
+		size = 32
+	}
+	if size == 0 {
+		return strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand does not fail in practice; a uuid pair is still 32 bytes of
+		// unpredictable material rather than something guessable.
+		copy(buf, []byte(strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")))
+	}
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
 // ApplyMemberships puts an account on exactly inboundIds and re-projects, so
 // settings.clients on every one of them agrees with the account. Returns the
 // inbound ids whose settings actually changed, for the caller's reconcile fan-out.
@@ -657,7 +692,7 @@ func (s *AccountService) SetMemberships(tx *gorm.DB, accountId int, inboundIds [
 		// has a uuid and no VPN username, so joining an l2tp inbound would project
 		// an empty id and produce an account that is listed, looks fine, and can
 		// never authenticate. Mint what is missing before the projection runs.
-		if err := s.ensureCredentialsFor(tx, accountId, inbound.Protocol); err != nil {
+		if err := s.ensureCredentialsFor(tx, accountId, &inbound); err != nil {
 			return err
 		}
 
@@ -692,11 +727,12 @@ func (s *AccountService) SetMemberships(tx *gorm.DB, accountId int, inboundIds [
 // split: one uuid serves every vmess/vless membership and one password every
 // trojan membership, so a second membership of the same family reuses the
 // credential the customer already has installed.
-func (s *AccountService) ensureCredentialsFor(tx *gorm.DB, accountId int, protocol model.Protocol) error {
+func (s *AccountService) ensureCredentialsFor(tx *gorm.DB, accountId int, inbound *model.Inbound) error {
 	var account model.Account
 	if err := tx.Where("id = ?", accountId).First(&account).Error; err != nil {
 		return err
 	}
+	protocol := inbound.Protocol
 
 	changed := false
 	need := func(dst *string, mint func() string) {
@@ -714,8 +750,16 @@ func (s *AccountService) ensureCredentialsFor(tx *gorm.DB, accountId int, protoc
 		need(&account.Security, func() string { return "auto" })
 	case model.VLESS:
 		need(&account.UUID, dashed)
-	case model.Trojan, model.Shadowsocks, model.ANYTLS, model.NAIVE:
+	case model.Trojan, model.ANYTLS, model.NAIVE:
 		need(&account.Password, dashless)
+	case model.Shadowsocks:
+		// A 2022-blake3 cipher does not take an arbitrary string: the user PSK must
+		// be base64 of EXACTLY the cipher's key length, and a dashless uuid (32 hex
+		// characters, 24 bytes decoded) is refused. The account was created, listed
+		// and looked fine, and could never connect. The client form has always
+		// minted this correctly (RandomUtil.randomShadowsocksPassword); the
+		// membership path had not.
+		need(&account.Password, func() string { return shadowsocksUserKey(inbound) })
 	case model.TUIC:
 		// Authenticates with a uuid AND a password, and the uuid must keep its
 		// dashes: a TUIC client parses this field as a real UUID.
