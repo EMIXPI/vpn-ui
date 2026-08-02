@@ -248,6 +248,35 @@ async function main() {
   check('the summary rail says something on a NEW client',
         typeof rail === 'string' && rail.length > 10, JSON.stringify(rail));
 
+  // The deadline can be entered as a date instead of a day count. The picker used
+  // to be held open through `:open` + `@openChange`, and this template is compiled
+  // from the DOM, where the listener name is lowercased and never matches what
+  // a-date-picker emits: it opened, covered the modal footer, and could not be
+  // closed by Ok, by picking, or by clicking away. So closing is the check.
+  const calendar = await evalJs(`(async () => {
+     const m = clientMembershipModal;
+     const shown = () => {
+       const p = document.querySelector('.ant-calendar-picker-container');
+       return !!p && getComputedStyle(p).display !== 'none';
+     };
+     document.querySelector('#client-membership-modal .bo-cf-iconbtn').click();
+     await new Promise(r => setTimeout(r, 900));
+     const opened = shown();
+     const cells = Array.from(document.querySelectorAll('.ant-calendar-tbody .ant-calendar-date'))
+       .filter(c => !c.closest('.ant-calendar-disabled-cell'));
+     if (!cells.length) return { opened, why: 'no pickable day' };
+     cells[Math.min(cells.length - 1, 3)].click();
+     await new Promise(r => setTimeout(r, 900));
+     const out = { opened, closedAfterPick: !shown(), days: m.days };
+     m.pickDate = false;
+     m.days = 0;
+     await new Promise(r => setTimeout(r, 300));
+     return out;
+   })()`);
+  check('the duration calendar opens, sets a day count, and closes again',
+        calendar && calendar.opened && calendar.closedAfterPick && calendar.days > 0,
+        JSON.stringify(calendar));
+
   await evalJs(`clientMembershipModal.tab = 'inbounds'; true`);
   await wait(300);
   const boxes = await evalJs(
@@ -493,13 +522,23 @@ async function main() {
         bulkOpen && bulkOpen.ok && bulkOpen.target === REMARKS[0]
           && bulkOpen.protocol === 'vmess', JSON.stringify(bulkOpen));
 
+  // Polled rather than slept on: innerText is layout-dependent, so a pane sampled
+  // during the modal's fade-in measures 0 and the check fails at random.
   const bulkSections = await evalJs(`(async () => {
+     const pane = () => document.querySelector('#client-bulk-modal .bo-cf-pane');
+     const settled = async () => {
+       for (let i = 0; i < 30; i++) {
+         const p = pane();
+         if (p && p.innerText.trim().length > 20) return p.innerText.trim().length;
+         await new Promise(r => setTimeout(r, 120));
+       }
+       const p = pane();
+       return p ? p.innerText.trim().length : -1;
+     };
      const out = {};
      for (const t of clientsBulkModal.tabs) {
        clientsBulkModal.tab = t.key;
-       await new Promise(r => setTimeout(r, 220));
-       const pane = document.querySelector('#client-bulk-modal .bo-cf-pane');
-       out[t.key] = pane ? pane.innerText.trim().length : 0;
+       out[t.key] = await settled();
      }
      clientsBulkModal.tab = 'identity';
      return out;

@@ -152,13 +152,15 @@
                 <a-input-number v-if="!clientsBulkModal.pickDate"
                   v-model="clientsBulkModal.days" :min="0"
                   :style="{ width: '100%' }"></a-input-number>
+                <!-- Uncontrolled open state, for the reason spelled out in
+                     modals/clientMembershipModal: `@openChange` is unreachable in a
+                     template compiled from the DOM, so a controlled calendar could
+                     never be closed and it covers the footer. -->
                 <a-date-picker v-else
-                  :show-time="{ format: 'HH:mm' }"
-                  format="YYYY-MM-DD HH:mm"
+                  format="YYYY-MM-DD"
                   :dropdown-class-name="themeSwitcher.currentTheme"
                   :value="clientsBulkModal.expiryMoment"
-                  :open="clientsBulkModal.dateOpen"
-                  @openChange="o => clientsBulkModal.dateOpen = o"
+                  :disabled-date="d => clientsBulkModal.isPastDate(d)"
                   @change="d => clientsBulkModal.setExpiryDate(d)"
                   :style="{ width: '100%' }"></a-date-picker>
                 <a-tooltip>
@@ -311,9 +313,8 @@
     // started, which is what this switch writes.
     delayedStart: false,
     pickDate: false,
-    // Held open explicitly: the calendar swaps the number input for a picker, so
-    // the click that reveals the picker never reaches it.
-    dateOpen: false,
+    // Where toggleDatePicker looks for the picker it just revealed.
+    pickerRoot: '#client-bulk-modal',
     reset: 0,
     security: 'auto',
     flow: '',
@@ -403,12 +404,19 @@
     },
     toggleDatePicker() {
       this.pickDate = !this.pickDate;
-      this.dateOpen = this.pickDate;
-      if (this.pickDate) Vue.nextTick(() => { this.dateOpen = true; });
+      if (!this.pickDate) return;
+      Vue.nextTick(() => {
+        const input = document.querySelector(this.pickerRoot + ' .ant-calendar-picker input');
+        if (input) input.click();
+      });
+    },
+    // Today rounds to zero days, which this form stores as "never expires".
+    isPastDate(d) {
+      return !!d && d.clone().endOf('day').valueOf() <= Date.now();
     },
     setExpiryDate(d) {
       if (!d) { this.days = 0; return; }
-      this.days = Math.max(0, Math.ceil((d.valueOf() - Date.now()) / 86400000));
+      this.days = Math.max(0, d.clone().startOf('day').diff(moment().startOf('day'), 'days'));
     },
 
     ok() {
@@ -469,7 +477,6 @@
       this.days = 0;
       this.delayedStart = false;
       this.pickDate = false;
-      this.dateOpen = false;
       this.reset = 0;
       this.security = 'auto';
       this.flow = '';
