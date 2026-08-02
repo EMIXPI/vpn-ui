@@ -455,10 +455,26 @@
           title: '{{ i18n "pages.client.bulk"}} ' + dbInbound.remark,
           okText: '{{ i18n "pages.client.bulk"}}',
           dbInbound: dbInbound,
+          // Every email in use anywhere, so the form can say which generated names
+          // are already taken. One of them fails the whole POST server-side
+          // (AddInboundClient rejects the request, not the offending client), so
+          // the batch is worth checking before it is sent.
+          existing: this.emailsInUse(),
           confirm: async (clients, dbInboundId) => {
             await this.addClient(clients, dbInboundId, clientsBulkModal);
           },
         });
+      },
+      // A map rather than a Set: it is read from a template expression, and Vue 2
+      // does not make a Set's contents reactive.
+      emailsInUse() {
+        const seen = {};
+        (this.dbInbounds || []).forEach(dbInbound => {
+          (this.getInboundClients(dbInbound) || []).forEach(client => {
+            if (client && client.email) seen[client.email] = true;
+          });
+        });
+        return seen;
       },
       openEditClient(dbInboundId, client) {
         dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);

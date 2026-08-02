@@ -450,6 +450,129 @@ async function main() {
         bulked && bulked.totalGB === 3 * 1073741824,
         bulked ? 'totalGB=' + bulked.totalGB : 'missing');
 
+  // ---------------------------------------------------------------- bulk add
+  // The bulk form is the single-client form done many times over, and shares its
+  // shell. Everything below is there because a Vue error inside this modal leaves
+  // a valid, empty pane behind and nothing else in the suite opens it.
+  console.log('\n=== bulk add ===');
+  await goto('/panel/clients');
+  await inject();
+
+  // The inbound is picked BEFORE the form opens, so the menu that picks it is part
+  // of the path: the form cannot build protocol credentials without one. An
+  // a-dropdown opens on hover, not on click, so this is a mouseenter.
+  const bulkMenu = await evalJs(`(async () => {
+     const btn = Array.from(document.querySelectorAll('button'))
+       .find(b => /add bulk/i.test(b.innerText || ''));
+     if (!btn) return { why: 'no Add Bulk button' };
+     const trigger = btn.closest('.ant-dropdown-trigger') || btn;
+     trigger.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+     await new Promise(r => setTimeout(r, 1000));
+     const items = Array.from(document.querySelectorAll('.ant-dropdown-menu-item'))
+       .map(i => (i.innerText || '').trim()).filter(Boolean);
+     trigger.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+     await new Promise(r => setTimeout(r, 500));
+     return { items, assignable: app.assignable.length };
+   })()`);
+  check('the Add Bulk menu offers every assignable inbound',
+        bulkMenu && (bulkMenu.items || []).length === bulkMenu.assignable
+          && bulkMenu.items.some((t) => t.includes(REMARKS[0])), JSON.stringify(bulkMenu));
+
+  // Opened the way the menu item opens it. Clicking through the overlay itself is
+  // left to the check above: an antd overlay is detached from the trigger and
+  // driving it by synthetic click is brittle in a way this form is not.
+  const bulkOpen = await evalJs(`(async () => {
+     const ib = app.assignable.find(a => a.remark === ${JSON.stringify(REMARKS[0])});
+     if (!ib) return { ok: false, why: 'no seeded inbound' };
+     app.openAddBulkClient(ib.inboundId);
+     await new Promise(r => setTimeout(r, 900));
+     return { ok: clientsBulkModal.visible, target: clientsBulkModal.targetName,
+              protocol: clientsBulkModal.dbInbound.protocol };
+   })()`);
+  check('Add Bulk opens its form on the chosen inbound',
+        bulkOpen && bulkOpen.ok && bulkOpen.target === REMARKS[0]
+          && bulkOpen.protocol === 'vmess', JSON.stringify(bulkOpen));
+
+  const bulkSections = await evalJs(`(async () => {
+     const out = {};
+     for (const t of clientsBulkModal.tabs) {
+       clientsBulkModal.tab = t.key;
+       await new Promise(r => setTimeout(r, 220));
+       const pane = document.querySelector('#client-bulk-modal .bo-cf-pane');
+       out[t.key] = pane ? pane.innerText.trim().length : 0;
+     }
+     clientsBulkModal.tab = 'identity';
+     return out;
+   })()`);
+  check('every bulk section renders content',
+        bulkSections && Object.values(bulkSections).every((n) => n > 20), JSON.stringify(bulkSections));
+
+  // Method 4 is the only one that names accounts entirely from what was typed, so
+  // it is the only one whose preview can be exact - and the only one that can
+  // collide with an account that already exists.
+  const preview = await evalJs(`(() => {
+     const m = clientsBulkModal;
+     m.emailMethod = 4;
+     m.emailPrefix = 'uitest-bulk-';
+     m.emailPostfix = '';
+     m.firstNum = 1;
+     m.lastNum = 3;
+     return { count: m.count, clashes: m.clashCount, shape: m.shapeText,
+              names: m.previewNames.map(n => n.stem + n.text) };
+   })()`);
+  check('the preview lists exactly the names the batch would create',
+        preview && preview.count === 3 && preview.clashes === 0
+          && JSON.stringify(preview.names)
+             === JSON.stringify(['uitest-bulk-1', 'uitest-bulk-2', 'uitest-bulk-3']),
+        JSON.stringify(preview));
+
+  await wait(300);
+  const bulkRail = await evalJs(`(() => {
+     const r = document.querySelector('#client-bulk-modal .bo-cf-summary');
+     return r ? r.innerText.replace(/\\s+/g, ' ').trim() : '';
+   })()`);
+  check('the bulk rail previews the batch before it exists',
+        typeof bulkRail === 'string' && /\b3\b/.test(bulkRail)
+          && bulkRail.includes(REMARKS[0]), JSON.stringify(bulkRail));
+
+  await evalJs(`(() => {
+     const b = Array.from(document.querySelectorAll('#client-bulk-modal .ant-modal-footer button'))
+       .find(x => !/close|cancel/i.test(x.innerText));
+     if (b) b.click();
+     return true;
+   })()`);
+  await wait(3500);
+  const afterBulk = (await accounts()).map((a) => a.email);
+  const wantBulk = ['uitest-bulk-1', 'uitest-bulk-2', 'uitest-bulk-3'];
+  check('a bulk add creates one account per previewed name',
+        wantBulk.every((e) => afterBulk.includes(e)), JSON.stringify(afterBulk));
+
+  // One email already in use fails the WHOLE request server-side, so the form has
+  // to refuse the batch itself rather than send it and report an opaque failure.
+  const clash = await evalJs(`(async () => {
+     const ib = app.assignable.find(a => a.remark === ${JSON.stringify(REMARKS[0])});
+     if (!ib) return { why: 'no seeded inbound' };
+     app.openAddBulkClient(ib.inboundId);
+     await new Promise(r => setTimeout(r, 800));
+     const m = clientsBulkModal;
+     m.emailMethod = 4;
+     m.emailPrefix = 'uitest-bulk-';
+     m.firstNum = 1;
+     m.lastNum = 3;
+     await new Promise(r => setTimeout(r, 300));
+     const clashes = m.clashCount;
+     const b = Array.from(document.querySelectorAll('#client-bulk-modal .ant-modal-footer button'))
+       .find(x => !/close|cancel/i.test(x.innerText));
+     if (b) b.click();
+     await new Promise(r => setTimeout(r, 1500));
+     return { clashes, stillOpen: m.visible, tab: m.tab };
+   })()`);
+  check('a batch whose names are taken is refused with the reason on screen',
+        clash && clash.clashes === 3 && clash.stillOpen === true && clash.tab === 'preview',
+        JSON.stringify(clash));
+  await evalJs('window.__closeAll()');
+  await wait(600);
+
   // ---------------------------------------------------------------- deleting
   await goto('/panel/clients');
   await inject();

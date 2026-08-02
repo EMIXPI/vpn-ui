@@ -86,6 +86,11 @@
 .bo-dot--warn { background:var(--warn); }
 .bo-dot--error { background:var(--error); }
 
+/* Secondary text sitting beside primary text: a port after a remark, a traffic
+   figure under an email. Used across the Clients page and the client forms to
+   mean "here if you want it, not what you are reading". */
+.bo-dim { color:var(--text-3); font-size:12px; }
+
 /* ================================================================== *
  * shell: rail nav
  * ================================================================== */
@@ -1254,6 +1259,35 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 .bo-cf-ib.on { border-color:var(--accent); background:var(--accent-weak); }
 .bo-cf-ib .ant-checkbox-wrapper { width:100%; }
+
+/* The bulk form reuses the shell above, and adds three things to it.
+
+   A rail value that is a name rather than a figure (the target inbound) can be
+   arbitrarily long, so it is truncated instead of pushing its own label out of
+   the rail. */
+.bo-cf-ell { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* The shape of the generated emails, under the count. Monospace so the eight
+   x's standing in for the random stem line up with the real thing. */
+.bo-cf-shape {
+  font-family:var(--font-mono, ui-monospace, monospace);
+  font-size:11px; word-break:break-all;
+}
+
+/* One row per account the batch would create. */
+.bo-cf-list { border:1px solid var(--border); border-radius:7px; overflow:hidden; }
+.bo-cf-row {
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:6px 10px; border-bottom:1px solid var(--border);
+  font-family:var(--font-mono, ui-monospace, monospace);
+  font-size:12.5px; color:var(--text); word-break:break-all;
+}
+.bo-cf-row:last-child { border-bottom:0; }
+.bo-cf-row.clash { background:var(--error-weak); color:var(--error); }
+.bo-cf-row .ant-tag { margin-inline-end:0; flex:0 0 auto; }
+/* The minted half of a name, and the row counts beside it: present, but not
+   what the operator is here to read. */
+.bo-cf-stem { color:var(--text-3); }
 
 /* The rail stacks above the pane once there is no room beside it. */
 @media (max-width:640px) {
