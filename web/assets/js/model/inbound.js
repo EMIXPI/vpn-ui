@@ -55,6 +55,12 @@ function getClientIdentity(protocol, client) {
         case Protocols.SHADOWSOCKS:
             return client.email;
         case Protocols.HYSTERIA:
+        // 'hysteria2' has no Protocols constant because the inbound form cannot
+        // create one, but the server knows it (model.Hysteria2) and an inbound
+        // made through the API shows up on every page that lists them. Left to the
+        // default it would be keyed on `id`, which a hysteria account does not
+        // have, and every write against it would answer "empty client ID".
+        case 'hysteria2':
             return client.auth;
         // Spelled out rather than left to the default below: a TUIC account carries
         // BOTH a uuid and a password, so which of the two addresses it has to be a

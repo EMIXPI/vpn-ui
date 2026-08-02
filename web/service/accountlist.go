@@ -31,6 +31,13 @@ type AccountMembershipView struct {
 	Port      int    `json:"port"`
 	Enable    bool   `json:"enable"`
 	Slot      *int   `json:"slot"`
+	// Method is the shadowsocks cipher, and empty for every other protocol. It is
+	// reported because a 2022-blake3 cipher refuses a user password that is not
+	// base64 of its exact key length, so a form offering ONE password for an
+	// account spanning several protocols has to generate it in the strict shape
+	// whenever one of these is in the set. Every other protocol takes any string,
+	// so the strict shape satisfies all of them at once.
+	Method string `json:"method,omitempty"`
 	// ClientId is the value THIS protocol addresses the account by, which is the
 	// path parameter /updateClient/:clientId and /delClient/:clientId take.
 	//
@@ -317,6 +324,16 @@ func accountMatches(account *model.Account, memberships []AccountMembershipView,
 // not, and parseSettingsClients cannot answer this: it returns ok=true for them,
 // because "no clients array" and "unparseable" have to stay distinguishable there
 // (treating the first as the second would delete every membership).
+// inboundMethod reads settings.method, which only shadowsocks carries.
+func inboundMethod(settings string) string {
+	var root map[string]any
+	if err := json.Unmarshal([]byte(settings), &root); err != nil || root == nil {
+		return ""
+	}
+	m, _ := root["method"].(string)
+	return m
+}
+
 func settingsHoldClients(settings string) bool {
 	var root map[string]any
 	if err := json.Unmarshal([]byte(settings), &root); err != nil || root == nil {
@@ -367,6 +384,7 @@ func (s *AccountService) AssignableInboundsFor(user *model.User) ([]AccountMembe
 		out = append(out, AccountMembershipView{
 			InboundId: in.Id, Protocol: string(in.Protocol),
 			Remark: in.Remark, Port: in.Port, Enable: in.Enable,
+			Method: inboundMethod(in.Settings),
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].InboundId < out[j].InboundId })

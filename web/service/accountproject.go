@@ -432,6 +432,33 @@ func overwriteAccountCredential(account *model.Account, entry map[string]any, pr
 			*dst = v
 		}
 	}
+	// Fields the ADDRESSED protocol does not use, lifted only when the caller
+	// actually sent them.
+	//
+	// The Clients page edits an account, not one inbound's copy of it, so its form
+	// carries every credential column the account has and posts them all to
+	// whichever inbound the write is addressed to. Without this, only the addressed
+	// protocol's fields survived and every other field the operator typed was
+	// replaced by a server-minted random.
+	//
+	// An absent key changes nothing, so the inbound-shaped writes that predate this
+	// behave exactly as before: they simply do not carry these keys.
+	//
+	// vpnUsername has its own key because it cannot share one: an entry's "id" is
+	// the uuid for vmess and the login name for l2tp, and one entry cannot mean
+	// both at once.
+	set(&account.VpnUsername, str("vpnUsername"))
+	set(&account.Auth, str("auth"))
+	set(&account.Secret, str("secret"))
+	set(&account.NaiveUser, str("naiveUsername"))
+	if protocol != model.L2TP && protocol != model.PPTP && protocol != model.OPENVPN &&
+		protocol != model.OPENCONNECT && protocol != model.SSTP && protocol != model.IKEV2 &&
+		protocol != model.SSH {
+		// Same reasoning for the password: for these protocols "password" IS the
+		// addressed field and the switch below already handles it.
+		set(&account.Password, str("password"))
+	}
+
 	switch protocol {
 	case model.VMESS:
 		set(&account.UUID, str("id"))

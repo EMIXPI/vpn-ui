@@ -24,7 +24,52 @@
     <a-form-item label='{{ i18n "pages.clients.comment" }}'>
       <a-input v-model="clientMembershipModal.client.comment"></a-input>
     </a-form-item>
+    <a-form-item label='{{ i18n "subId" }}'>
+      <a-input v-model.trim="clientMembershipModal.client.subId">
+        <a-tooltip slot="addonAfter">
+          <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
+          <a-icon type="reload" :style="{ cursor: 'pointer' }"
+            @click="clientMembershipModal.regenerate('subId')"></a-icon>
+        </a-tooltip>
+      </a-input>
+      <span class="bo-dim">{{ i18n "pages.clients.subIdHint" }}</span>
+    </a-form-item>
   </a-form>
+
+  <!-- Field-first, not protocol-first.
+       An account holds ONE uuid, ONE password and so on (the columns on the
+       accounts table), shared by every inbound serving it. A form organised by
+       protocol would have to show the same password under three headings and
+       pretend they were separable. This shows the fields as they are actually
+       stored, and says which protocols read each one.
+       Rendered outside a-form-item for the same width reason as the picker. -->
+  <a-divider>{{ i18n "pages.clients.credentials" }}</a-divider>
+  <div class="bo-dim" :style="{ marginBottom: '10px' }">{{ i18n "pages.clients.credentialsHint" }}</div>
+  <div v-for="f in clientMembershipModal.credentialFields" :key="f.key"
+    :style="{ marginBottom: '10px', opacity: clientMembershipModal.fieldUsed(f) ? 1 : 0.45 }">
+    <div :style="{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }">
+      <span :style="{ fontWeight: 500 }">[[ f.label ]]</span>
+      <a-tag v-if="clientMembershipModal.fieldRequired(f)" color="blue">
+        [[ clientMembershipModal.usersOf(f).join(', ') ]]
+      </a-tag>
+      <span v-else class="bo-dim">{{ i18n "pages.clients.unusedHere" }}</span>
+    </div>
+    <a-input v-model.trim="clientMembershipModal.client[f.key]"
+      :placeholder="f.protocols.join(', ')">
+      <a-tooltip slot="addonAfter">
+        <template slot="title">{{ i18n "pages.clients.regenerate" }}</template>
+        <a-icon type="reload" :style="{ cursor: 'pointer' }"
+          @click="clientMembershipModal.regenerate(f.key)"></a-icon>
+      </a-tooltip>
+    </a-input>
+  </div>
+
+  <!-- A 2022-blake3 cipher refuses anything but base64 of its exact key length,
+       while every other protocol takes any string. So when one is selected the
+       shared password is generated in the strict shape, which satisfies both. -->
+  <a-alert v-if="clientMembershipModal.strictSsBytes" type="info" show-icon
+    :style="{ marginTop: '4px' }"
+    message='{{ i18n "pages.clients.ssStrictPassword" }}'></a-alert>
 
   <!-- The inbound picker sits OUTSIDE a-form-item on purpose. This modal is antd's
        default 520px with label-col 8, so a full-width control inside a form item is
@@ -117,6 +162,12 @@
           email: row.email, enable: row.enable, limitIp: row.limitIp,
           comment: row.comment, subId: row.subId, reset: row.reset,
         };
+        // The account's credentials as they are stored TODAY, read off its
+        // memberships: whichever entry carries a field, carries the account's
+        // value for it, because the projection writes the same account onto all
+        // of them. Nothing is generated here - an edit must show the operator
+        // what the customer currently has installed.
+        this.loadCredentialsFrom(row);
         this.totalGb = row.totalGB ? Math.round(row.totalGB / 1073741824) : 0;
         // A negative expiry means "N days from first use" and has not started, so it
         // is shown as that many days rather than as a date in 1970.
@@ -129,44 +180,127 @@
         this.totalGb = 0;
         this.days = 0;
         this.selected = [];
+        this.seedCredentials();
       }
       this.visible = true;
     },
 
-    // The identity the FIRST inbound's protocol keys on, and nothing else.
+    // The account's own credential columns, and which protocols read each one.
     //
-    // Only the identity, because the server mints every other credential each
-    // membership needs (ensureCredentialsFor in web/service/accountproject.go) and
-    // it knows the inbound's cipher and auth mode, which this form does not. But
-    // the identity itself cannot be left out: AddClient refuses an entry whose
-    // clientIdentity() is empty before the accounts layer ever runs.
+    // This list IS the schema (see model.Account): uuid, password, vpn_username,
+    // auth, secret, naive_username. Not a per-protocol view of them, because
+    // there is no per-protocol storage - trojan, shadowsocks, anytls and all
+    // seven credential VPNs genuinely share one password column.
     //
-    // Mirrors clientIdentityKey() in web/service/inbound.go. The "id" family is
-    // NOT one thing: a uuid for vmess/vless/tuic, a login name for ssh, and the
-    // EMAIL for the four protocols whose model exposes `get id() { return email }`.
-    credentialsFor(protocol, email) {
-      switch (protocol) {
-        case 'vmess':
-          return { id: RandomUtil.randomUUID(), security: 'auto' };
-        case 'vless': case 'tuic':
-          return { id: RandomUtil.randomUUID() };
-        case 'trojan': case 'anytls': case 'naive':
-          return { password: RandomUtil.randomSeq(10) };
-        case 'hysteria': case 'hysteria2':
-          return { auth: RandomUtil.randomSeq(10) };
-        // Keys on the email, which the form already carries.
-        case 'shadowsocks':
-          return {};
-        case 'l2tp': case 'pptp': case 'openvpn': case 'openconnect':
-        case 'sstp': case 'ikev2': case 'ssh':
-          return { id: RandomUtil.randomLowerAndNum(8), password: RandomUtil.randomSeq(10) };
-        // Email IS the identity here; sending a uuid would store an id that the
-        // model's getter then contradicts on every later read.
-        case 'wg-c': case 'awg': case 'gre': case 'mtproto':
-          return { id: email };
-        default:
-          return { id: RandomUtil.randomUUID() };
+    // `identity` marks the field a protocol is ADDRESSED by (clientIdentityKey in
+    // web/service/inbound.go): the write is refused outright if that one is blank.
+    // wg-c, awg, gre and mtproto are addressed by "id", which for them IS the
+    // email, so they need nothing here and appear on no row.
+    credentialFields: [
+      { key: 'id', label: '{{ i18n "pages.clients.uuid" }}',
+        protocols: ['vmess', 'vless', 'tuic'], identity: ['vmess', 'vless', 'tuic'] },
+      { key: 'password', label: '{{ i18n "password" }}',
+        protocols: ['trojan', 'shadowsocks', 'anytls', 'naive', 'tuic', 'l2tp', 'pptp',
+                    'openvpn', 'openconnect', 'sstp', 'ikev2', 'ssh'],
+        identity: ['trojan', 'anytls', 'naive', 'l2tp', 'pptp', 'openvpn',
+                   'openconnect', 'sstp', 'ikev2'] },
+      { key: 'vpnUsername', label: '{{ i18n "pages.clients.vpnUsername" }}',
+        protocols: ['l2tp', 'pptp', 'openvpn', 'openconnect', 'sstp', 'ikev2', 'ssh'],
+        identity: ['ssh'] },
+      { key: 'auth', label: '{{ i18n "pages.clients.auth" }}',
+        protocols: ['hysteria', 'hysteria2'], identity: ['hysteria', 'hysteria2'] },
+      { key: 'secret', label: '{{ i18n "pages.clients.secret" }}',
+        protocols: ['mtproto'], identity: [] },
+      { key: 'naiveUsername', label: '{{ i18n "pages.clients.naiveUsername" }}',
+        protocols: ['naive'], identity: [] },
+    ],
+
+    // The protocols currently ticked, deduplicated.
+    get selectedProtocols() {
+      const seen = {};
+      this.selected.forEach(id => {
+        const ib = this.assignable.find(x => x.inboundId === id);
+        if (ib) seen[ib.protocol] = true;
+      });
+      return Object.keys(seen);
+    },
+    usersOf(field) {
+      return this.selectedProtocols.filter(p => field.protocols.includes(p));
+    },
+    fieldUsed(field) { return this.usersOf(field).length > 0; },
+    // Required means "some ticked protocol is ADDRESSED by this field". A field a
+    // ticked protocol merely uses (the l2tp password beside its username) still
+    // has to be filled, but the server mints it, so only the identity blocks save.
+    fieldRequired(field) {
+      return this.selectedProtocols.some(p => field.identity.includes(p));
+    },
+    // The key length a ticked shadowsocks-2022 inbound demands, or 0.
+    //
+    // Only this family constrains the shared password: it must be base64 of
+    // exactly 16 or 32 bytes. Everything else takes any string, so generating in
+    // the strict shape when one is present satisfies all of them at once, which
+    // is the only way one column can serve both.
+    get strictSsBytes() {
+      for (const id of this.selected) {
+        const ib = this.assignable.find(x => x.inboundId === id);
+        if (!ib || ib.protocol !== 'shadowsocks') continue;
+        const method = (ib.method || '').toLowerCase().trim();
+        if (method === '2022-blake3-aes-128-gcm') return 16;
+        if (method === '2022-blake3-aes-256-gcm' || method === '2022-blake3-chacha20-poly1305') return 32;
       }
+      return 0;
+    },
+
+    mint(key) {
+      switch (key) {
+        case 'id': return RandomUtil.randomUUID();
+        case 'password': {
+          const n = this.strictSsBytes;
+          if (!n) return RandomUtil.randomSeq(10);
+          const buf = new Uint8Array(n);
+          window.crypto.getRandomValues(buf);
+          return btoa(String.fromCharCode(...buf));
+        }
+        case 'vpnUsername': return RandomUtil.randomLowerAndNum(8);
+        case 'auth': return RandomUtil.randomSeq(10);
+        case 'secret': return RandomUtil.randomSeq(32, { type: 'hex' });
+        case 'naiveUsername': return '';
+        case 'subId': return RandomUtil.randomLowerAndNum(16);
+        default: return '';
+      }
+    },
+    regenerate(key) { this.$set ? this.$set(this.client, key, this.mint(key)) : (this.client[key] = this.mint(key)); },
+
+    // Lift the account's current credentials out of its stored entries. Each
+    // protocol's entry carries only its own fields, so the whole set is assembled
+    // by walking every membership: the vmess entry supplies the uuid, the l2tp one
+    // the login name, and both name the same shared password.
+    loadCredentialsFrom(row) {
+      const c = this.client;
+      for (const m of (row.memberships || [])) {
+        const e = (this.storedBy && this.storedBy[m.inboundId]) || {};
+        const vpnLike = ['l2tp', 'pptp', 'openvpn', 'openconnect', 'sstp', 'ikev2', 'ssh']
+          .includes(m.protocol);
+        const emailId = ['wg-c', 'awg', 'gre', 'mtproto'].includes(m.protocol);
+        if (e.id && vpnLike) c.vpnUsername = c.vpnUsername || e.id;
+        else if (e.id && !emailId) c.id = c.id || e.id;
+        if (e.password) c.password = c.password || e.password;
+        if (e.auth) c.auth = c.auth || e.auth;
+        if (e.secret) c.secret = c.secret || e.secret;
+        if (e.username) c.naiveUsername = c.naiveUsername || e.username;
+        if (e.security) c.security = c.security || e.security;
+      }
+    },
+
+    // Fill every credential a new account could need, so the common case is one
+    // click. Nothing is overwritten: an edit keeps what the customer already has
+    // installed, and a blank is only ever filled in.
+    seedCredentials() {
+      for (const f of this.credentialFields) {
+        if (f.key === 'naiveUsername') continue;
+        if (!this.client[f.key]) this.client[f.key] = this.mint(f.key);
+      }
+      if (!this.client.subId) this.client.subId = this.mint('subId');
     },
 
     async ok() {
@@ -176,6 +310,21 @@
       if (this.protocolClash) return;
 
       const ids = this.selected.slice().sort((a, b) => a - b);
+      // Ticking a protocol whose identity field the account does not hold yet - a
+      // vmess inbound on an account that has only ever been trojan - leaves that
+      // field blank. Fill it rather than refuse: the server would mint one anyway
+      // (ensureCredentialsFor), and a value minted here is at least visible in the
+      // form the next time the account is opened.
+      //
+      // Deliberately NOT a dialog. This object is not a Vue instance, so it has no
+      // $message, and the fallback that reached for window.alert() blocked the
+      // whole renderer: in a headless browser nothing ever dismisses it and the
+      // page stops responding entirely.
+      for (const f of this.credentialFields) {
+        if (this.fieldRequired(f) && !(this.client[f.key] || '').trim()) {
+          this.client[f.key] = this.mint(f.key);
+        }
+      }
 
       this.confirmLoading = true;
       const msg = this.isEdit ? await this.saveEdit(email, ids)
@@ -187,42 +336,70 @@
       }
     },
 
-    // The account as it will be posted, built ON TOP of how it is stored on the
-    // inbound the write is addressed to. Never on a blank object: this form shows
-    // only the account-level fields, and a client posted without the credential
-    // ITS OWN inbound keys on is refused as "empty client ID".
-    clientFor(inboundId, email) {
-      const base = (this.storedBy && this.storedBy[inboundId]) || {};
-      return Object.assign({}, base, this.client, {
+    // The entry to post, in the shape the ADDRESSED inbound's protocol expects.
+    //
+    // The form is field-first (one uuid, one password, one VPN username on the
+    // account), but a client ENTRY is protocol-shaped: its "id" is the uuid on
+    // vmess, the login name on l2tp and the email on wg-c. So the account's fields
+    // are mapped onto whichever protocol the write is addressed to, and the whole
+    // set is carried alongside for the accounts layer to lift
+    // (overwriteAccountCredential), which is what makes a value typed here reach
+    // an inbound of a completely different family in the same request.
+    entryFor(protocol, email, inboundId) {
+      const c = this.client;
+      const base = Object.assign({}, (this.storedBy && this.storedBy[inboundId]) || {}, {
         email,
+        enable: c.enable !== false,
+        limitIp: Number(c.limitIp) || 0,
+        comment: c.comment || '',
+        subId: c.subId || '',
+        reset: Number(c.reset) || 0,
         totalGB: (this.totalGb || 0) * 1073741824,
         expiryTime: this.days > 0 ? Date.now() + this.days * 86400000 : 0,
+        // Read by the accounts layer, ignored by every daemon. `id` cannot carry
+        // the VPN login name here because this entry may be a vmess one, where it
+        // already means the uuid.
+        vpnUsername: c.vpnUsername || '',
+        auth: c.auth || '',
+        secret: c.secret || '',
+        naiveUsername: c.naiveUsername || '',
       });
+      switch (protocol) {
+        case 'vmess':
+          return Object.assign(base, { id: c.id, security: c.security || 'auto' });
+        case 'vless':
+          return Object.assign(base, { id: c.id });
+        case 'tuic':
+          return Object.assign(base, { id: c.id, password: c.password });
+        case 'trojan': case 'shadowsocks': case 'anytls':
+          return Object.assign(base, { password: c.password });
+        case 'naive':
+          return Object.assign(base, { password: c.password, username: c.naiveUsername || '' });
+        case 'hysteria': case 'hysteria2':
+          return Object.assign(base, { auth: c.auth });
+        case 'l2tp': case 'pptp': case 'openvpn': case 'openconnect':
+        case 'sstp': case 'ikev2': case 'ssh':
+          return Object.assign(base, { id: c.vpnUsername, password: c.password });
+        // Identity IS the email for these, so "id" carries it rather than a uuid.
+        case 'wg-c': case 'awg': case 'gre':
+          return Object.assign(base, { id: email });
+        case 'mtproto':
+          return Object.assign(base, { id: email, secret: c.secret });
+        default:
+          return Object.assign(base, { id: c.id });
+      }
     },
 
-    // A NEW account: nothing exists yet, so the write is addressed to the first
-    // inbound it will land on, seeded with that protocol's credential, and the
-    // server mints whatever the remaining inbounds need.
+    // A NEW account, addressed to the first inbound it will land on. The other
+    // memberships are the server's to fill, and the credential columns it fills
+    // them from are the ones this entry just carried.
     async saveNew(email, ids) {
       const first = this.assignable.find(x => x.inboundId === ids[0]);
-      const client = Object.assign(this.clientFor(ids[0], email),
-        this.credentialsFor(first ? first.protocol : '', email));
+      const client = this.entryFor(first ? first.protocol : '', email, ids[0]);
       return await HttpUtil.post('/panel/api/inbounds/addClient',
         { id: ids[0], inboundIds: ids, settings: JSON.stringify({ clients: [client] }) });
     },
 
-    // Changing an existing account's memberships.
-    //
-    // updateClient finds the client by (`id`, path parameter) and BOTH have to
-    // name an inbound the account is already on. Addressing it at the lowest id
-    // in the NEW set is what "empty client ID" was: on a trojan account gaining a
-    // lower-numbered vmess inbound, the server looked for a vmess client whose
-    // uuid was the trojan password, in an inbound the account had not joined yet.
-    //
-    // So the write is anchored on a CURRENT membership, preferring one the
-    // operator kept: postedMembershipIds always re-adds the addressed inbound
-    // (web/controller/inbound.go), so anchoring on an inbound being removed would
-    // silently keep it.
     // The anchor also decides which stored entry the posted client is built from:
     // an account on vmess and trojan has a uuid on one and a password on the
     // other, and only the anchor's own credential can address it.
@@ -230,7 +407,9 @@
       const memberships = (this.row && this.row.memberships) || [];
       const anchor = memberships.find(m => ids.includes(m.inboundId)) || memberships[0];
       if (!anchor) return { success: false };
-      const client = this.clientFor(anchor.inboundId, email);
+      const anchorIb = this.assignable.find(x => x.inboundId === anchor.inboundId);
+      const client = this.entryFor(anchorIb ? anchorIb.protocol : anchor.protocol,
+                                   email, anchor.inboundId);
 
       const msg = await HttpUtil.post(
         '/panel/api/inbounds/updateClient/' + encodeURIComponent(anchor.clientId || email),

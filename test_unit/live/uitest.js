@@ -434,41 +434,72 @@ async function main() {
   check('deleting removes it from every inbound', !left.some((a) => a.email === EMAIL),
         JSON.stringify(left.map((a) => a.email)));
 
-  // --------------------------------------- identity minting, per protocol
-  // Three protocol families whose identity field is NOT a uuid, each of which
-  // used to answer "empty client ID". credentialsFor is checked directly rather
-  // than through a create, because wg-c, awg, gre and mtproto cannot be created
-  // on a panel whose cores are not installed, and the mapping is the thing under
-  // test either way.
-  const creds = await evalJs(`(() => {
-     const f = (p) => clientMembershipModal.credentialsFor(p, 'probe@x');
-     return { mtproto: f('mtproto'), wgc: f('wg-c'), awg: f('awg'), gre: f('gre'),
-              hy2: f('hysteria2'), ss: f('shadowsocks'), vmess: f('vmess') };
+  // ------------------------------------------ the field-first form's mapping
+  // The form holds ONE set of credentials, the way the account stores them, and
+  // maps them onto whichever protocol a write is addressed to. Every protocol
+  // must come out with a non-empty identity, and it must be the RIGHT field:
+  // the uuid for vmess, the password for trojan, the login name for ssh, the
+  // email for the four that are addressed by it.
+  const mapped = await evalJs(`(() => {
+     const m = clientMembershipModal;
+     m.client = { email: 'probe@x', enable: true,
+                  id: '11111111-1111-1111-1111-111111111111', password: 'pw',
+                  vpnUsername: 'vuser', auth: 'au', secret: 'se', naiveUsername: 'nu' };
+     const out = {};
+     for (const p of ['vmess','vless','tuic','trojan','shadowsocks','anytls','naive',
+                      'hysteria2','l2tp','pptp','openvpn','ikev2','ssh',
+                      'wg-c','awg','gre','mtproto']) {
+       out[p] = getClientIdentity(p, m.entryFor(p, 'probe@x', 0));
+     }
+     return out;
    })()`);
-  check('the email-identity protocols mint id = email, not a uuid',
-        creds && ['mtproto', 'wgc', 'awg', 'gre'].every(k => creds[k] && creds[k].id === 'probe@x'),
-        JSON.stringify(creds));
-  check('hysteria2 mints auth and vmess mints a uuid',
-        creds && creds.hy2 && creds.hy2.auth && creds.vmess && creds.vmess.id
-          && creds.vmess.id !== 'probe@x',
-        JSON.stringify(creds && { hy2: creds.hy2, vmess: creds.vmess }));
+  const wantIdentity = {
+    vmess: '11111111-1111-1111-1111-111111111111',
+    vless: '11111111-1111-1111-1111-111111111111',
+    tuic: '11111111-1111-1111-1111-111111111111',
+    trojan: 'pw', anytls: 'pw', naive: 'pw', l2tp: 'pw', pptp: 'pw',
+    openvpn: 'pw', ikev2: 'pw',
+    shadowsocks: 'probe@x',
+    hysteria2: 'au',
+    ssh: 'vuser',
+    'wg-c': 'probe@x', awg: 'probe@x', gre: 'probe@x', mtproto: 'probe@x',
+  };
+  const wrong = Object.keys(wantIdentity).filter(p => !mapped || mapped[p] !== wantIdentity[p]);
+  check('every protocol gets its own identity field out of the one credential set',
+        wrong.length === 0, 'wrong: ' + JSON.stringify(wrong.map(p => [p, mapped && mapped[p]])));
+
+  // A 2022-blake3 cipher refuses anything but base64 of its exact key length, and
+  // the account has ONE password column, so the generator has to produce the
+  // strict shape whenever such an inbound is in the set. Every other protocol
+  // takes any string, which is what lets one value serve both.
+  const ssKey = await evalJs(`(() => {
+     const m = clientMembershipModal;
+     const saved = m.assignable, savedSel = m.selected;
+     m.assignable = [{ inboundId: 901, protocol: 'shadowsocks', method: '2022-blake3-aes-256-gcm' },
+                     { inboundId: 902, protocol: 'shadowsocks', method: '2022-blake3-aes-128-gcm' },
+                     { inboundId: 903, protocol: 'trojan' }];
+     const probe = (sel) => { m.selected = sel; return { bytes: m.strictSsBytes, pw: m.mint('password') }; };
+     const r = { s256: probe([901]), s128: probe([902]), plain: probe([903]) };
+     m.assignable = saved; m.selected = savedSel;
+     return r;
+   })()`);
+  const decodes = (v) => { try { return atob(v).length; } catch (e) { return -1; } };
+  check('the shared password is generated to fit a shadowsocks-2022 cipher',
+        ssKey && ssKey.s256.bytes === 32 && ssKey.s128.bytes === 16
+          && decodes(ssKey.s256.pw) === 32 && decodes(ssKey.s128.pw) === 16
+          && ssKey.plain.bytes === 0,
+        JSON.stringify(ssKey));
 
   // storedClient serializes through toJson(). Stringifying the instance drops a
-  // class getter, and those same four protocols expose `id` as exactly that, so
+  // class getter, and wg-c, awg, gre and mtproto expose `id` as exactly that, so
   // every write built from one arrived with no identity.
-  // Asserted through getClientIdentity, not by looking for "id": which field IS
-  // the identity depends on the protocol (email for shadowsocks, password for
-  // trojan and the credential VPNs), and hardcoding one makes the check wrong for
-  // every account whose first membership is a different family.
   const keepsId = await evalJs(`(() => {
      const bad = [];
      for (const row of app.clients) {
        for (const m of (row.memberships || [])) {
          const stored = app.storedClient(row, m.inboundId);
          if (!stored) continue;
-         if (!getClientIdentity(m.protocol, stored)) {
-           bad.push(row.email + '@' + m.protocol);
-         }
+         if (!getClientIdentity(m.protocol, stored)) bad.push(row.email + '@' + m.protocol);
        }
      }
      return { checked: app.clients.length, bad };
