@@ -147,8 +147,20 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search s
 			Reset: account.Reset, LimitIP: account.LimitIP,
 			Memberships: mine, OwnedByReseller: owner[key],
 		}
+		// client_traffics is one row per account panel-wide, and it is what the
+		// enforcement paths actually read, so it wins over the account row for the
+		// three fields both carry.
+		//
+		// Not belt-and-braces: several paths write settings.clients and
+		// client_traffics without going through the accounts layer at all, the
+		// depletion sweep in disableInvalidClients most of all. Reading enable off
+		// the account row showed a depleted account as still on, days after the
+		// data plane had cut it off.
 		if t := usage[key]; t != nil {
 			row.Up, row.Down = t.Up, t.Down
+			row.Enable = t.Enable
+			row.TotalGB = t.Total
+			row.ExpiryTime = t.ExpiryTime
 		}
 		rows = append(rows, row)
 	}

@@ -642,6 +642,7 @@ func (a *InboundController) addInbound(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
+	a.syncInboundAccounts(inbound.Id)
 	jsonMsgObj(c, I18nWeb(c, "pages.inbounds.toasts.inboundCreateSuccess"), inbound, nil)
 	if inbound.Protocol == model.L2TP {
 		a.onL2tpChanged()
@@ -709,7 +710,7 @@ func (a *InboundController) delInbound(c *gin.Context) {
 	needRestart, err := a.inboundService.DelInbound(id)
 	if err == nil {
 		// The inbound is gone, so every membership pointing at it must go too.
-		a.syncAccountsAfterDelete(id)
+		a.syncInboundAccounts(id)
 	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -816,6 +817,7 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
+	a.syncInboundAccounts(inbound.Id)
 	jsonMsgObj(c, I18nWeb(c, "pages.inbounds.toasts.inboundUpdateSuccess"), inbound, nil)
 	if inbound.Protocol == model.L2TP {
 		a.onL2tpChanged()
@@ -1048,7 +1050,7 @@ func (a *InboundController) delInboundClient(c *gin.Context) {
 	used, usedKnown := a.usageBeforeDelete(email)
 	needRestart, err := a.inboundService.DelInboundClient(id, clientId)
 	if err == nil {
-		a.syncAccountsAfterDelete(id)
+		a.syncInboundAccounts(id)
 	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -1306,6 +1308,13 @@ func (a *InboundController) bulkUpdateClients(c *gin.Context) {
 	if aerr := resellerService.ApplyBulkCharges(ticket); aerr != nil {
 		logger.Warning("applying priced quota and expiry after a reseller bulk operation: ", aerr)
 	}
+	// The applier writes settings.clients and client_traffics directly, so without
+	// this the accounts layer kept the OLD quota, expiry and enable bit. The Clients
+	// page reads those three off the account row, so a bulk top-up applied to the
+	// data plane and then showed the previous figure.
+	for _, id := range distinctInboundIds(req.Targets) {
+		a.syncInboundAccounts(id)
+	}
 	jsonObj(c, result, nil)
 
 	xrayRestart := false
@@ -1453,6 +1462,7 @@ func (a *InboundController) resetAllClientTraffics(c *gin.Context) {
 	} else {
 		a.xrayService.SetToNeedRestart()
 	}
+	a.syncInboundAccountsAll(id)
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.resetAllClientTrafficSuccess"), nil)
 	a.onL2tpClientChanged()
 	a.onPptpClientChanged()
@@ -1556,6 +1566,7 @@ func (a *InboundController) delDepletedClients(c *gin.Context) {
 			u, known := usage[strings.ToLower(strings.TrimSpace(email))]
 			a.refundDeletedClient(email, u, known)
 		}
+		a.syncInboundAccountsAll(id)
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.delDepletedClientsSuccess"), nil)
 		return
 	}
@@ -1565,6 +1576,7 @@ func (a *InboundController) delDepletedClients(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
+	a.syncInboundAccountsAll(id)
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.delDepletedClientsSuccess"), nil)
 }
 
@@ -2058,7 +2070,7 @@ func (a *InboundController) delInboundClientByEmail(c *gin.Context) {
 	used, usedKnown := a.usageBeforeDelete(email)
 	needRestart, err := a.inboundService.DelInboundClientByEmail(inboundId, email)
 	if err == nil {
-		a.syncAccountsAfterDelete(inboundId)
+		a.syncInboundAccounts(inboundId)
 	}
 	if err != nil {
 		jsonMsg(c, "Failed to delete client by email", err)
@@ -2122,23 +2134,63 @@ func postedMembershipIds(c *gin.Context, targetId int) ([]int, bool) {
 	return out, true
 }
 
-// syncAccountsAfterDelete brings the accounts layer back in step after a client or
-// an inbound is removed.
+// syncInboundAccountsAll reconciles one inbound, or every inbound when the route
+// was given the -1 that both client sweeps use for "panel-wide".
+func (a *InboundController) syncInboundAccountsAll(inboundId int) {
+	if inboundId >= 0 {
+		a.syncInboundAccounts(inboundId)
+		return
+	}
+	inbounds, err := a.inboundService.GetAllInbounds()
+	if err != nil {
+		logger.Warning("listing inbounds to sync the accounts layer: ", err)
+		return
+	}
+	for _, inbound := range inbounds {
+		a.syncInboundAccounts(inbound.Id)
+	}
+}
+
+// distinctInboundIds reduces a bulk target list to the inbounds it touches, in the
+// order they first appear, so a batch of fifty accounts on three inbounds costs
+// three reconciliations rather than fifty.
+func distinctInboundIds(targets []service.BulkClientTarget) []int {
+	seen := make(map[int]bool, len(targets))
+	out := make([]int, 0, len(targets))
+	for _, t := range targets {
+		if t.InboundId == 0 || seen[t.InboundId] {
+			continue
+		}
+		seen[t.InboundId] = true
+		out = append(out, t.InboundId)
+	}
+	return out
+}
+
+// syncInboundAccounts brings the accounts layer back in step with ONE inbound's
+// settings.clients, which is the truth every write path actually persists.
 //
-// The add and edit paths mirror through applyClientMemberships, but the DELETE
-// paths did not, and settings.clients is the truth they write. So a deleted
-// account kept its account row and every membership: the tables drifted from the
-// data plane, InboundIdsForEmail reported inbounds the account was no longer on,
-// and `vpn-ui revert-accounts` was blocked forever by a phantom multi-membership
-// account that no longer existed anywhere in settings. Found on a live panel.
+// Needed wherever an inbound's client list changes OUTSIDE addClient/updateClient
+// (those mirror through applyClientMemberships), and there are three such paths:
+//
+//   - the DELETE paths. A deleted account kept its account row and every
+//     membership: the tables drifted from the data plane, InboundIdsForEmail
+//     reported inbounds the account was no longer on, and `vpn-ui revert-accounts`
+//     was blocked forever by a phantom multi-membership account that no longer
+//     existed anywhere in settings. Found on a live panel.
+//   - creating an inbound. The inbound form carries its first client inline, so a
+//     fresh panel had accounts that existed in settings.clients and nowhere else:
+//     invisible on the Clients page, which lists the accounts layer.
+//   - a whole-inbound save, which posts the entire client array and can add or
+//     drop clients in one request.
 //
 // SyncInboundAccounts reconciles the whole inbound and prunes accounts left with
-// no membership, so it is correct for a single client delete, a delete-by-email
-// and the removal of the inbound itself (where it drops every membership pointing
-// at an id that is gone).
-func (a *InboundController) syncAccountsAfterDelete(inboundId int) {
+// no membership, so one call is correct for all of them, including the removal of
+// the inbound itself (where it drops every membership pointing at an id that is
+// gone).
+func (a *InboundController) syncInboundAccounts(inboundId int) {
 	if err := accountService.SyncInboundAccounts(database.GetDB(), inboundId); err != nil {
-		logger.Warning("syncing the accounts layer after a delete: ", err)
+		logger.Warning("syncing the accounts layer for inbound ", inboundId, ": ", err)
 	}
 }
 
