@@ -53,6 +53,13 @@
                 this.inbound = Inbound.fromJson(inbound.toJson());
             } else {
                 this.inbound = new Inbound();
+                // A new inbound starts with no accounts. Every settings class seeds
+                // one, which used to make creating an inbound silently create a
+                // client too - a name the operator never chose, on an inbound they
+                // were still configuring. Accounts are made on the Clients page now,
+                // where one can be put on several inbounds at once.
+                this.inbound.startEmpty = true;
+                this.inbound.clearClients();
             }
             // Always ensure testseed is initialized for VLESS protocol (even if vision flow is not set yet)
             // This ensures Vue reactivity works properly

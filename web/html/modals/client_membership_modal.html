@@ -122,6 +122,8 @@
                   format="YYYY-MM-DD HH:mm"
                   :dropdown-class-name="themeSwitcher.currentTheme"
                   :value="clientMembershipModal.expiryMoment"
+                  :open="clientMembershipModal.dateOpen"
+                  @openChange="o => clientMembershipModal.dateOpen = o"
                   @change="d => clientMembershipModal.setExpiryDate(d)"
                   :style="{ width: '100%' }"></a-date-picker>
                 <a-tooltip>
@@ -131,7 +133,7 @@
                        : '{{ i18n "pages.clients.usePickDate" }}' ]]
                   </template>
                   <button type="button" class="bo-cf-iconbtn"
-                    @click="clientMembershipModal.pickDate = !clientMembershipModal.pickDate">
+                    @click="clientMembershipModal.toggleDatePicker()">
                     <a-icon :type="clientMembershipModal.pickDate ? 'field-time' : 'calendar'"></a-icon>
                   </button>
                 </a-tooltip>
@@ -253,6 +255,10 @@
     ],
     // Entering the deadline as a date rather than a day count.
     pickDate: false,
+    // Held open explicitly. The calendar swaps the number input for a picker, so
+    // the click that reveals the picker never reaches it: without this the
+    // control appears on the first click and opens only on a second.
+    dateOpen: false,
     // The account's stored entry on EACH inbound serving it, keyed by inbound id
     // and handed in by the page. Per inbound, not one entry, because the identity
     // field differs by protocol and the write is addressed to whichever inbound
@@ -294,6 +300,7 @@
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
       this.tab = 'identity';
       this.pickDate = false;
+      this.dateOpen = false;
       if (row) {
         this.client = {
           email: row.email, enable: row.enable, limitIp: row.limitIp,
@@ -349,6 +356,13 @@
     },
     // Picking a date sets the same day count the number input edits, so the two
     // inputs stay one value however the operator switches between them.
+    toggleDatePicker() {
+      this.pickDate = !this.pickDate;
+      // Opened on the same click that switched to it. Deferred a tick because the
+      // picker does not exist yet when this runs.
+      this.dateOpen = this.pickDate;
+      if (this.pickDate) Vue.nextTick(() => { this.dateOpen = true; });
+    },
     setExpiryDate(d) {
       if (!d) { this.days = 0; return; }
       const ms = d.valueOf() - Date.now();
@@ -440,9 +454,10 @@
         case 'secret': return RandomUtil.randomSeq(32, { type: 'hex' });
         case 'naiveUsername': return '';
         case 'subId': return RandomUtil.randomLowerAndNum(16);
-        // Named like the accounts an operator creates in bulk, so a hand-made one
-        // and a generated one sit together in the list rather than standing out.
-        case 'email': return 'user-' + RandomUtil.randomLowerAndNum(8);
+        // The same generator the client form's own dice button has always used
+        // (form/client.html), so a name made here is indistinguishable from one
+        // made there.
+        case 'email': return RandomUtil.randomLowerAndNum(9);
         default: return '';
       }
     },

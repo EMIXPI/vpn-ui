@@ -1173,12 +1173,16 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
  * is being typed rather than sitting empty.
  * ================================================================== */
 
-.bo-cf { display:flex; align-items:stretch; margin:-24px; min-height:376px; }
+/* Fixed height, set by the tallest section (Identity). A modal that grows and
+   shrinks as the operator moves between tabs makes the footer buttons jump under
+   the cursor; the shorter sections simply leave space, and the longer ones
+   scroll inside the pane. */
+.bo-cf { display:flex; align-items:stretch; margin:-24px; height:496px; }
 .bo-cf-rail {
   flex:0 0 212px; border-inline-end:1px solid var(--border);
   background:var(--surface-2); display:flex; flex-direction:column;
 }
-.bo-cf-pane { flex:1 1 auto; min-width:0; padding:20px; overflow-y:auto; max-height:60vh; }
+.bo-cf-pane { flex:1 1 auto; min-width:0; padding:20px; overflow-y:auto; }
 
 .bo-cf-summary { padding:16px; border-bottom:1px solid var(--border); }
 .bo-cf-who {
@@ -1253,9 +1257,9 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 
 /* The rail stacks above the pane once there is no room beside it. */
 @media (max-width:640px) {
-  .bo-cf { flex-direction:column; min-height:0; }
+  .bo-cf { flex-direction:column; height:auto; }
   .bo-cf-rail { flex:0 0 auto; border-inline-end:0; border-bottom:1px solid var(--border); }
   .bo-cf-tabs { flex-direction:row; overflow-x:auto; }
   .bo-cf-tab { width:auto; white-space:nowrap; }
-  .bo-cf-pane { max-height:none; }
+  .bo-cf-pane { overflow-y:visible; }
 }

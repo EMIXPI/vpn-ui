@@ -2173,6 +2173,18 @@ class Inbound extends XrayCommonClass {
         }
     }
 
+    // Empties the client list without needing to know which key holds it.
+    //
+    // Every protocol's settings class seeds ONE client in its constructor, which
+    // made "create an inbound" and "create an account" the same act. They are not
+    // the same act any more: accounts are made on the Clients page, where one can
+    // be put on several inbounds at once. A new inbound therefore starts empty and
+    // the operator adds accounts to it afterwards.
+    clearClients() {
+        const list = this.clients;
+        if (Array.isArray(list)) list.splice(0, list.length);
+    }
+
     get clients() {
         switch (this.protocol) {
             case Protocols.VMESS: return this.settings.vmesses;
@@ -2205,6 +2217,12 @@ class Inbound extends XrayCommonClass {
     set protocol(protocol) {
         this._protocol = protocol;
         this.settings = Inbound.Settings.getSettings(protocol);
+        // getSettings builds a fresh settings object and every settings class seeds
+        // ONE client in its constructor, so picking a protocol puts an account back
+        // even when the form deliberately started empty. startEmpty is set by the
+        // add-inbound form and by nothing else: on an EDIT the inbound already has
+        // accounts and clearing them here would drop them without saying so.
+        if (this.startEmpty) this.clearClients();
         this.stream = new StreamSettings();
         if (protocol === Protocols.TROJAN) {
             this.tls = false;

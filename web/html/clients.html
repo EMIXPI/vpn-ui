@@ -34,18 +34,33 @@
                     </a-menu>
                   </a-dropdown>
 
-                  <a-dropdown v-if="assignable.length > 1">
-                    <a-button icon="copy">{{ i18n "pages.client.copyFromInbound" }}</a-button>
-                    <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
-                      @click="e => openCopyClients(Number(e.key))">
-                      <a-menu-item v-for="ib in assignable" :key="ib.inboundId">
-                        [[ ib.remark || ('#' + ib.inboundId) ]]
-                        <a-tag>[[ ib.protocol ]]</a-tag>
-                      </a-menu-item>
-                    </a-menu>
-                  </a-dropdown>
-
-                  <a-button icon="reload" @click="reload(true)"></a-button>
+                  <a-button-group>
+                    <a-button icon="sync" @click="manualRefresh" :loading="refreshing"></a-button>
+                    <a-popover placement="bottomRight" trigger="click"
+                      :overlay-class-name="themeSwitcher.currentTheme">
+                      <template #title>
+                        <div class="ant-custom-popover-title">
+                          <a-switch v-model="isRefreshEnabled"
+                            @change="toggleRefresh" size="small"></a-switch>
+                          <span>{{ i18n "pages.inbounds.autoRefresh" }}</span>
+                        </div>
+                      </template>
+                      <template #content>
+                        <a-space direction="vertical">
+                          <span>{{ i18n "pages.inbounds.autoRefreshInterval" }}</span>
+                          <a-select v-model="refreshInterval"
+                            :disabled="!isRefreshEnabled"
+                            :style="{ width: '100%' }"
+                            @change="changeRefreshInterval"
+                            :dropdown-class-name="themeSwitcher.currentTheme">
+                            <a-select-option v-for="key in [5,10,30,60]"
+                              :value="key*1000">[[ key ]]s</a-select-option>
+                          </a-select>
+                        </a-space>
+                      </template>
+                      <a-button icon="down"></a-button>
+                    </a-popover>
+                  </a-button-group>
 
                   <a-dropdown>
                     <a-button icon="ellipsis"></a-button>
@@ -130,12 +145,15 @@
                       <span class="bo-dim">[[ sizeFormat(row.up + row.down) ]] / [[ sizeFormat(row.totalGB) ]]</span>
                     </div>
                     <span v-else class="bo-dim">
-                      [[ sizeFormat(row.up + row.down) ]] / {{ i18n "unlimited" }}
+                      [[ sizeFormat(row.up + row.down) ]] /
+                      <span class="tr-infinity-ch">&infin;</span>
                     </span>
                   </template>
 
                   <template slot="expiryCol" slot-scope="text, row">
-                    <a-tag v-if="row.expiryTime === 0" color="green">{{ i18n "indefinite" }}</a-tag>
+                    <a-tag v-if="row.expiryTime === 0" color="green" class="infinite-tag">
+                      <span class="tr-infinity-ch">&infin;</span>
+                    </a-tag>
                     <!-- A NEGATIVE expiry is not a date: it means "N days from first
                          use" and the clock has not started. Rendering it as a date
                          would show 1970. -->
@@ -232,7 +250,6 @@
 {{template "modals/inboundInfoModal"}}
 {{template "modals/clientsModal"}}
 {{template "modals/clientsBulkModal"}}
-{{template "modals/copyClientsModal"}}
 {{template "modals/wgcConfigModal"}}
 {{template "modals/awgConfigModal"}}
 {{template "modals/greConfigModal"}}
@@ -286,6 +303,9 @@
       searchTimer: null,
       selectedEmails: [],
       expandedRowKeys: [],
+      refreshing: false,
+      isRefreshEnabled: localStorage.getItem("isRefreshEnabled") === "true",
+      refreshInterval: Number(localStorage.getItem("refreshInterval")) || 5000,
       onlineClients: [],
       lastOnlineMap: {},
       expireDiff: 0,
@@ -418,6 +438,30 @@
         const msg = await HttpUtil.get('/panel/api/clients/assignable');
         if (msg && msg.success) this.assignable = msg.obj || [];
       },
+      // Shares localStorage with the Inbounds page on purpose: an operator who
+      // turned auto-refresh on there means it here too.
+      async startDataRefreshLoop() {
+        while (this.isRefreshEnabled) {
+          try {
+            await this.getDBInbounds();
+          } catch (e) {
+            console.error(e);
+          }
+          await PromiseUtil.sleep(this.refreshInterval);
+        }
+      },
+      toggleRefresh() {
+        localStorage.setItem("isRefreshEnabled", this.isRefreshEnabled);
+        if (this.isRefreshEnabled) this.startDataRefreshLoop();
+      },
+      changeRefreshInterval() {
+        localStorage.setItem("refreshInterval", this.refreshInterval);
+      },
+      async manualRefresh() {
+        if (this.refreshing) return;
+        this.refreshing = true;
+        try { await this.reload(false); } finally { this.refreshing = false; }
+      },
       async reload(showSpin) {
         if (showSpin) this.spinning = true;
         await Promise.all([this.getDBInbounds(), this.loadOnlineState(), this.loadAssignable()]);
@@ -506,10 +550,6 @@
       // case the icon is hidden for.
       showAccountSub(row) {
         qrModal.showSub(row.email, { subId: row.subId });
-      },
-      openCopyClients(inboundId) {
-        const dbInbound = this.dbInbounds.find(r => r.id === inboundId);
-        if (dbInbound) copyClientsModal.show(dbInbound);
       },
       clickPageAction(action) {
         switch (action.key) {
@@ -621,6 +661,7 @@
     async mounted() {
       await this.getDefaultSettings();
       await this.reload(true);
+      if (this.isRefreshEnabled) this.startDataRefreshLoop();
     },
   });
 </script>
