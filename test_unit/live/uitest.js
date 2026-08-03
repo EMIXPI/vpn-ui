@@ -116,22 +116,81 @@ async function rowMenu(email, label) {
 //
 // The picker lives on its own tab and the form opens on Identity, so the tab has
 // to be selected before its checkboxes exist in the DOM at all.
+// Tick (or untick) one inbound, and do not return until the MODEL agrees.
+//
+// The click alone is not enough to build on. a-checkbox-group learns a new value
+// through its own watcher, so two clicks landing close together both compute from the
+// pre-click set and the second replaces the first: the box looks ticked and
+// `selected` holds one id. A fixed sleep between clicks only makes that rarer, and
+// when it lost the race every later assertion failed for a reason that had nothing to
+// do with what it was testing (one seeded inbound instead of two, so "lands on every
+// inbound ticked", "a block per inbound", the credential check and all four bulk
+// cases went red at once).
+//
+// So: click like a user, then poll the model, and fall back to setting it directly if
+// the watcher dropped it. The fallback is RECORDED rather than silent — these tests
+// exist to catch the page misbehaving, and a checkbox group that stops tracking its
+// own clicks is exactly that.
+const membershipClickFallbacks = [];
+
 async function toggleMembership(inboundId) {
   await evalJs(`clientMembershipModal.tab = 'inbounds'; true`);
   await wait(250);
-  return await evalJs(`(() => {
+  const clicked = await evalJs(`(() => {
      const i = clientMembershipModal.assignable.findIndex(a => a.inboundId === ${inboundId});
      if (i < 0) return false;
      const boxes = document.querySelectorAll('#client-membership-modal .ant-checkbox-group .ant-checkbox-input');
      if (!boxes[i]) return false;
+     const was = clientMembershipModal.selected.includes(${inboundId});
      boxes[i].click();
+     return was ? 'untick' : 'tick';
+   })()`);
+  if (!clicked) return false;
+  const want = clicked === 'tick';
+  for (let i = 0; i < 12; i++) {
+    await wait(150);
+    const has = await evalJs(`clientMembershipModal.selected.includes(${inboundId})`);
+    if (has === want) return true;
+  }
+  membershipClickFallbacks.push(inboundId);
+  await evalJs(`(() => {
+     const cur = clientMembershipModal.selected.filter(x => x !== ${inboundId});
+     clientMembershipModal.selected = ${want} ? cur.concat([${inboundId}]) : cur;
      return true;
    })()`);
+  return true;
 }
 
-const seededInboundIds = async () => await evalJs(
-  `clientMembershipModal.assignable.filter(a => ${JSON.stringify(REMARKS)}.includes(a.remark))
-     .map(a => a.inboundId)`);
+// The seeded inbounds, as the OPEN MODAL sees them.
+//
+// Re-fetched when the modal is holding fewer than were seeded. The Clients page
+// loads /clients/assignable once per page load and hands that array to the modal, so
+// a list built before both seeds landed stays short for the rest of the run, and the
+// account then gets created on one inbound instead of two. Every membership
+// assertion after that fails for a reason that has nothing to do with what it tests.
+// Refreshing here fixes the setup without weakening anything: the assertions still
+// measure what the SAVE did, and a genuinely missing inbound still comes back short.
+const seededInboundIds = async () => {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const ids = await evalJs(
+      `clientMembershipModal.assignable.filter(a => ${JSON.stringify(REMARKS)}.includes(a.remark))
+         .map(a => a.inboundId)`);
+    if ((ids || []).length >= REMARKS.length) return ids;
+    await evalJs(`(async () => {
+       const r = await fetch('/panel/api/clients/assignable',
+         { credentials: 'include', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+       const j = await r.json();
+       const rows = (j && j.obj) || [];
+       if (window.app) app.assignable = rows;
+       clientMembershipModal.assignable = rows;
+       return rows.length;
+     })()`);
+    await wait(400);
+  }
+  return await evalJs(
+    `clientMembershipModal.assignable.filter(a => ${JSON.stringify(REMARKS)}.includes(a.remark))
+       .map(a => a.inboundId)`);
+};
 
 // Every API call runs inside the page so it carries the session cookie the panel
 // issued to the browser, which is the same one the UI uses.
@@ -737,6 +796,16 @@ async function main() {
   const clientish = (menu || []).filter((t) => /add client|bulk|copy client|reset client|depleted/i.test(t));
   check('and its row menu offers no client entries', clientish.length === 0,
         'offending=' + JSON.stringify(clientish));
+
+  // Reported as its own line rather than folded into the checks above, because the
+  // two failure modes need telling apart. A checkbox group that no longer tracks its
+  // own clicks is a real page defect; every OTHER assertion here would still pass,
+  // because toggleMembership sets the model directly once the click is seen to have
+  // been dropped. Without this line that defect is invisible.
+  check('the inbound checkboxes track their own clicks',
+        membershipClickFallbacks.length === 0,
+        'the model had to be set directly for inbound(s) ' +
+          JSON.stringify(membershipClickFallbacks));
 
   await teardown();
 

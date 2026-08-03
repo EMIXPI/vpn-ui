@@ -214,12 +214,42 @@ def _tools_present(client: Client) -> tuple[bool, str]:
                    f"(pushed from test_subject/); have:\n{which}")
 
 
-def client_config(spec: Spec, server_ip: str, port: int, acct) -> dict:
+def _pin_tls(outbound: dict, sha256_hex: str) -> None:
+    """Rewrite an outbound's TLS block from allowInsecure to certificate pinning.
+
+    Xray REMOVED allowInsecure. Up to 2026-06-01 a config carrying it started with a
+    warning; after that date infra/conf refuses it outright ("The feature allowInsecure
+    has been removed and migrated to pinnedPeerCertSha256"), so the core never starts,
+    the local socks port never opens, and every TLS-based driver here reports the same
+    opaque "tunnel did not come up". That is a harness expiry date, not a product bug:
+    the panel already strips the field from what it feeds its own core.
+
+    Pinning is the better answer anyway. It verifies the EXACT certificate the panel
+    minted for this inbound instead of accepting any, and the core sets
+    InsecureSkipVerify itself when a pin is present (tls/config.go:398), so the SNI
+    still does not have to match the self-signed cert's names.
+
+    Done centrally rather than in each driver: anytls, tuic, naive and the four classic
+    protocols all reach TLS through this one config builder, and a per-driver copy is
+    exactly how three of them would drift apart again. With no fingerprint known the
+    outbound is left as it was, so a driver serving a non-TLS inbound is untouched."""
+    tls = (outbound.get("streamSettings") or {}).get("tlsSettings")
+    if not isinstance(tls, dict):
+        return
+    if sha256_hex:
+        tls.pop("allowInsecure", None)
+        tls["pinnedPeerCertSha256"] = sha256_hex
+
+
+def client_config(spec: Spec, server_ip: str, port: int, acct,
+                  tls_sha256: str = "") -> dict:
     """The full xray CLIENT config: a local socks inbound in front of the protocol's
     own outbound. `dns_over_proxy` adds the naive-shaped DNS path (see the module
     docstring); the others leave UDP:53 to travel the protocol's real UDP path so the
     shared dns-resolve / dns-leak checks actually exercise it."""
-    outbounds = [spec.outbound(server_ip, port, acct, spec)]
+    proxy = spec.outbound(server_ip, port, acct, spec)
+    _pin_tls(proxy, tls_sha256)
+    outbounds = [proxy]
     rules = []
     conf = {
         # access log off (a 100MB usage download would otherwise write a line per
@@ -275,7 +305,8 @@ def connect(client: Client, inbound, which: str, server_ip: str,
     _kill(client, spec)
     client.pin_server_route(server_ip)   # keep the proxy's own connection off-tunnel
 
-    conf = client_config(spec, server_ip, port, acct)
+    conf = client_config(spec, server_ip, port, acct,
+                         tls_sha256=getattr(inbound, "tls_sha256", ""))
     client.push(json.dumps(conf, indent=2), spec.conf)
 
     # 1. config preflight. `xray run -test` parses and BUILDS the config without

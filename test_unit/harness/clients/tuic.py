@@ -42,7 +42,11 @@ def _outbound(server_ip: str, port: int, acct, spec: "xraytun.Spec") -> dict:
         "settings": {
             "address": server_ip,
             "port": port,
-            "id": xraytun.tuic_uuid(acct.email),
+            # Derived from the email for the accounts THIS harness creates (server_setup
+            # builds the inbound with the same derivation, so the two cannot drift), but
+            # an account minted by the panel carries its own uuid and hands it over in
+            # acct.uuid — see server_setup.Account.
+            "id": acct.uuid or xraytun.tuic_uuid(acct.email),
             "password": acct.password,
             "email": acct.email,
             "congestionControl": "cubic",

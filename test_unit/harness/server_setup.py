@@ -15,6 +15,10 @@ Tunnel IPs are deterministic (radius.go computeVpnClientIP / vpnrange.go):
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+
 from dataclasses import dataclass, field
 
 from . import ikev2_certs
@@ -225,6 +229,34 @@ def _xray_stream(panel: Panel, network: str = "tcp", extra: dict | None = None) 
     return stream
 
 
+def stream_cert_sha256(stream: dict) -> str:
+    """SHA-256 of the DER form of the certificate an _xray_stream is carrying, hex.
+
+    This is what a client has to pin now. Xray REMOVED "allowInsecure" outright: after
+    2026-06-01 a config carrying it is refused with "The feature allowInsecure has been
+    removed and migrated to pinnedPeerCertSha256", so every TLS client driver in this
+    harness stopped being able to start on that date. Pinning is also strictly better
+    here: it verifies the exact certificate the panel minted instead of accepting any,
+    and it sets InsecureSkipVerify itself (tls/config.go:398), so a self-signed cert
+    with no matching SAN still connects.
+
+    Parsed by hand rather than with cryptography: a PEM body IS base64 of the DER, and
+    the harness already avoids adding host-side dependencies for one hash."""
+    try:
+        pem = (((stream.get("tlsSettings") or {}).get("certificates") or [{}])[0]
+               .get("certificate") or [""])[0]
+    except (IndexError, AttributeError, TypeError):
+        return ""
+    body = "".join(ln.strip() for ln in (pem or "").splitlines()
+                   if ln.strip() and not ln.startswith("-----"))
+    if not body:
+        return ""
+    try:
+        return hashlib.sha256(base64.b64decode(body)).hexdigest()
+    except (ValueError, binascii.Error):
+        return ""
+
+
 def _tuic_client(a: Account) -> dict:
     """A TUIC client as the panel API expects it. Identity is `id` (a UUID) alongside
     the password, so the id is NOT the username here: it is derived from the email by
@@ -422,7 +454,8 @@ def build_second_inbound(panel: Panel, proto: str) -> Inbound:
                                 stream=stream)
         return Inbound(
             protocol=proto, inbound_id=inb["id"], udp_port=ports["udp"],
-            tcp_port=0, accounts={"A": acct}, user_limit=1)
+            tcp_port=0, accounts={"A": acct}, user_limit=1,
+            tls_sha256=stream_cert_sha256(stream))
     raise ValueError(proto)
 
 
@@ -490,6 +523,15 @@ class Account:
     password: str
     email: str
     index: int      # zero-based position in clients[]
+    # Credentials the harness READS BACK off the panel rather than choosing, which is
+    # only how the multi-inbound phase builds its accounts: there the panel mints each
+    # field itself when the account joins an inbound whose protocol keys on it
+    # (accountproject.go::ensureCredentialsFor), so dialling with anything else would
+    # test the harness's guess instead of the projection. Empty everywhere else, and
+    # every reader falls back to the historical value, so no existing phase changes.
+    uuid: str = ""       # vmess / vless / tuic
+    security: str = ""   # vmess cipher ("auto")
+    secret: str = ""     # mtproto
 
 
 @dataclass
@@ -503,6 +545,9 @@ class Inbound:
     ovpn_udp: str = ""     # exported .ovpn profile text (openvpn)
     ovpn_tcp: str = ""
     user_limit: int = 1    # devices-per-account (User Limit feature); >1 = block mode
+    # Hex SHA-256 of the DER certificate this inbound presents, for the client to pin
+    # (see stream_cert_sha256). Empty for every inbound that serves no TLS.
+    tls_sha256: str = ""
     ca_cert: str = ""      # ikev2: PEM CA the CLIENT must trust (server presents a leaf signed by it)
     server_addr: str = ""  # ikev2: the cert SAN the client sets as `remote id` ("" -> use server IP)
     auth_mode: str = "eap-mschapv2"  # ikev2: eap-mschapv2 (default) | psk | eap-tls
@@ -569,6 +614,12 @@ class ServerConfig:
     # assert, bulk-ops and backup all iterate `inbounds`, so extras stay invisible to
     # them and only the ikev2 phase's per-mode block (protocols.py) consumes these.
     ikev2_extra: dict = field(default_factory=dict)
+    # The classic Xray inbounds (vmess/vless/trojan/shadowsocks) the multi-inbound
+    # phase builds for itself. Kept OUT of `inbounds` for the same reason as
+    # ikev2_extra: bulk-ops, backup, subscription and the routing-translation assert
+    # all iterate that dict, and widening it would change phases that have nothing to
+    # do with this one.
+    multi_inbounds: dict = field(default_factory=dict)
 
 
 def _acct(prefix: str, idx: int) -> Account:
@@ -1037,8 +1088,9 @@ def run(panel: Panel, server_ip: str, cfg: dict, result: JobResult,
         xs = phase.add(SubTest(f"{proto}-inbound"))
         try:
             acct_a, acct_b = _acct(proto, 0), _acct(proto, 1)
+            stream = _xray_stream(panel, network, stream_extra)
             inb = panel.add_inbound(remark, port, proto, mk_settings(acct_a, acct_b),
-                                    stream=_xray_stream(panel, network, stream_extra))
+                                    stream=stream)
             iid = inb["id"]
             sc.inbounds[proto] = Inbound(
                 # udp_port carries the listen port for every protocol whose Inbound has
@@ -1046,7 +1098,8 @@ def run(panel: Panel, server_ip: str, cfg: dict, result: JobResult,
                 # multi-inbound's per-proto `.udp_port` reads keep working. tuic really
                 # is UDP (QUIC); anytls/naive are TCP.
                 protocol=proto, inbound_id=iid, udp_port=port, tcp_port=0,
-                accounts={"A": acct_a, "B": acct_b}, user_limit=1)
+                accounts={"A": acct_a, "B": acct_b}, user_limit=1,
+                tls_sha256=stream_cert_sha256(stream))
             xs.status = Status.PASS
             xs.detail = (f"inbound {iid}, port {port} ({network}/tls), 2 accounts "
                          f"(A freedom / B blackhole), self-signed cert")

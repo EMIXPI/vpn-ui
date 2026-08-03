@@ -89,6 +89,12 @@ Tests (ids mirror harness/model.py:ALL_PHASES; always run in this fixed order):
   naive           same suite over NaiveProxy (HTTP/2 over TLS; the inbound also serves
                   h3). Proxies no UDP by design, so DNS goes over TCP through the proxy
                   and the UDP subtests are recorded N/A with that reason
+  multi-inbound   ONE account on an inbound of EVERY account-bearing protocol (18 of
+                  them, incl. vmess/vless/trojan/shadowsocks, which no other phase
+                  dials): connectivity on every projected credential, all traffic
+                  billed to ONE email, per-inbound traffic multiplier, one account
+                  quota, one IP limit counted across inbounds, and suspend/resume
+                  reaching every membership
   bulk-ops        bulk client add/sub/enable/disable + TXT/PDF export via API
   backup-restore  DB export + import round-trip
   subscription    sub links / JSON / Clash + remaining-days/traffic stats, every protocol

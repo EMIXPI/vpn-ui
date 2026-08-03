@@ -179,6 +179,9 @@ PHASE_SSH_UDP = "ssh-udp"
 PHASE_ANYTLS = "anytls"
 PHASE_TUIC = "tuic"
 PHASE_NAIVE = "naive"
+# ONE account across an inbound of every account-bearing protocol: the
+# accounts/membership layer driven end to end. See harness/multi_inbound.py.
+PHASE_MULTI = "multi-inbound"
 PHASE_BULK = "bulk-ops"
 PHASE_BACKUP = "backup-restore"
 PHASE_SUBSCRIPTION = "subscription"      # sub links/JSON/Clash + stats, every protocol
@@ -197,5 +200,6 @@ ALL_PHASES = [PHASE_CORE, PHASE_SETUP, PHASE_OPENVPN, PHASE_L2TP, PHASE_PPTP,
               PHASE_MTPROTO_TOGGLE, PHASE_MTPROTO_TERMINATION, PHASE_MTPROTO_ADTAG,
               PHASE_SSH, PHASE_SSH_UDP,
               PHASE_ANYTLS, PHASE_TUIC, PHASE_NAIVE,
+              PHASE_MULTI,
               PHASE_BULK, PHASE_BACKUP, PHASE_SUBSCRIPTION,
               PHASE_WARP, PHASE_RANDOM, PHASE_SYSTEMD, PHASE_UNINSTALL]

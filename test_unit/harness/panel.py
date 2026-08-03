@@ -21,6 +21,31 @@ class PanelError(RuntimeError):
     pass
 
 
+# The panel-wide client identity: the value that goes in the URL of
+# /panel/api/inbounds/updateClient/:clientId and /:id/delClient/:clientId.
+#
+# Mirrors clientIdentityKey() in web/service/inbound.go (and its browser twin,
+# getClientIdentity in web/assets/js/model/inbound.js). Posting the wrong field is not
+# an error the caller sees as a mismatch: the panel answers "empty client ID", or
+# worse, HTTP 200 with success:false, so a test that ignored the envelope would read a
+# silently skipped write as a pass.
+_IDENTITY_PASSWORD = ("trojan", "l2tp", "pptp", "openvpn", "openconnect", "sstp",
+                      "ikev2", "anytls", "naive")
+
+
+def client_identity(protocol: str, client: dict) -> str:
+    """The field `client` is addressed by under `protocol`."""
+    if protocol in _IDENTITY_PASSWORD:
+        return client.get("password", "") or ""
+    if protocol == "shadowsocks":
+        return client.get("email", "") or ""
+    if protocol in ("hysteria", "hysteria2"):
+        return client.get("auth", "") or ""
+    # vmess/vless/tuic (uuid) and the email-identity protocols (wg-c, awg, gre,
+    # mtproto, ssh), whose settings JSON carries id=email.
+    return client.get("id", "") or client.get("email", "") or ""
+
+
 class Panel:
     def __init__(self, host: str, port: int = 2083, base_path: str = "/",
                  scheme: str = "http", username: str = "admin",
@@ -274,12 +299,81 @@ class Panel:
             ib.get("listen", "") or "",
         )
 
-    def add_client(self, inbound_id: int, client: dict):
-        """Add one client (username/password account) to an inbound."""
-        self._post("/panel/api/inbounds/addClient", {
+    def add_client(self, inbound_id: int, client: dict, inbound_ids=None):
+        """Add one client (username/password account) to an inbound.
+
+        `inbound_ids` names every inbound the ACCOUNT should be served on (the
+        multi-inbound membership set). It is posted as a REPEATED `inboundIds` form
+        key, which is what Qs.stringify emits with arrayFormat 'repeat' and what the
+        panel binds with c.PostFormArray. Omitting it entirely is the legacy
+        single-inbound path and is what every existing caller does; the target
+        inbound is always in the set whether or not it is repeated here."""
+        data = {
             "id": str(inbound_id),
             "settings": json.dumps({"clients": [client]}),
-        })
+        }
+        if inbound_ids is not None:
+            # requests encodes a list value as repeated keys, exactly the wire shape
+            # postedMembershipIds reads. An EMPTY list must still post one empty value:
+            # that is the panel's "the group was explicitly cleared" sentinel, and
+            # sending no key at all would instead mean "don't touch memberships".
+            data["inboundIds"] = [str(i) for i in inbound_ids] or [""]
+        return self._post("/panel/api/inbounds/addClient", data)
+
+    def update_client(self, inbound_id: int, email: str, changes: dict,
+                      inbound_ids=None) -> dict:
+        """Change fields on ONE existing client through /updateClient/:clientId.
+
+        Reads the stored entry first and posts it back with `changes` overlaid, so a
+        field this caller does not mention keeps its value. That matters more here
+        than it looks: the endpoint takes the whole client object, so a caller that
+        rebuilt it from scratch would blank the account's credentials.
+
+        Returns the client dict as posted, for the caller to assert against."""
+        ib = self.get_inbound(inbound_id)
+        settings = json.loads(ib.get("settings") or "{}")
+        target = None
+        for c in settings.get("clients", []):
+            if c.get("email") == email:
+                target = dict(c)
+                break
+        if target is None:
+            raise PanelError(f"client {email} not found on inbound {inbound_id}")
+        target.update(changes)
+        proto = ib.get("protocol", "")
+        data = {
+            "id": str(inbound_id),
+            "remark": ib.get("remark", ""),
+            "enable": "true",
+            "listen": ib.get("listen", "") or "",
+            "port": str(ib.get("port", 0)),
+            "protocol": proto,
+            "settings": json.dumps({"clients": [target]}),
+            "streamSettings": "{}",
+            "sniffing": "{}",
+        }
+        if inbound_ids is not None:
+            data["inboundIds"] = [str(i) for i in inbound_ids] or [""]
+        self._post(f"/panel/api/inbounds/updateClient/{client_identity(proto, target)}", data)
+        return target
+
+    def set_membership_enable(self, inbound_id: int, email: str, enable: bool) -> dict:
+        """Switch one account on or off on ONE inbound, leaving the others serving.
+
+        Its own route rather than a shape of updateClient because `enable` inside a
+        posted client entry is the ACCOUNT's flag: the panel writes it through to
+        client_traffics, which RADIUS and the rbridge sweep both read panel-wide."""
+        return self._post(
+            f"/panel/api/inbounds/{inbound_id}/setMembershipEnable/{email}",
+            {"enable": "true" if enable else "false"})
+
+    def list_accounts(self, search: str = "", page: int = 1, size: int = 200) -> dict:
+        """The accounts read model behind the Clients page: one row per ACCOUNT with
+        its memberships, rather than one row per inbound client entry."""
+        q = f"?page={page}&size={size}"
+        if search:
+            q += f"&search={search}"
+        return self._get(f"/panel/api/clients/list{q}").get("obj", {}) or {}
 
     def del_inbound(self, inbound_id: int):
         """Delete an inbound by id (POST /panel/api/inbounds/del/:id). Triggers the
@@ -318,19 +412,8 @@ class Panel:
         target["enable"] = True
         proto = ib.get("protocol", "")
         # UpdateInboundClient matches clientId by the protocol's identity field
-        # (clientIdentityKey in web/service/inbound.go): the username/password VPNs
-        # — l2tp/pptp/openvpn/trojan AND openconnect/sstp/ikev2 — are keyed on the
-        # PASSWORD (sending the id/email mis-keys them -> "empty client ID").
-        # anytls and naive join that group: neither carries a uuid, so falling
-        # through to the id/email branch below mis-keys them the same way. tuic is
-        # deliberately absent: it DOES carry a uuid `id` and is keyed on it.
-        if proto in ("l2tp", "pptp", "openvpn", "trojan",
-                     "openconnect", "sstp", "ikev2", "anytls", "naive"):
-            client_id = target.get("password", "")
-        elif proto == "shadowsocks":
-            client_id = target.get("email", "")
-        else:
-            client_id = target.get("id", "") or target.get("email", "")
+        # (clientIdentityKey in web/service/inbound.go); see client_identity above.
+        client_id = client_identity(proto, target)
         self._post(f"/panel/api/inbounds/updateClient/{client_id}", {
             "id": str(inbound_id),
             "remark": ib.get("remark", ""),
