@@ -376,6 +376,17 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 	case err == gorm.ErrRecordNotFound:
 		fresh := newAccountFromEntry(entry)
 		extractAccountCredential(fresh, entry, protocol, 0, &scratch, scratchConflicts)
+		// The columns the entry carries for OTHER protocols. extractAccountCredential
+		// reads only the addressed protocol's own fields - it is the migration's
+		// reader, and a migration walks every membership in turn, so each protocol's
+		// field arrives on its own pass. A CREATE has exactly one pass, so without
+		// this an account first written through a vless or vmess inbound was born
+		// holding nothing but a uuid: the password, VPN login name, auth and secret
+		// the form had just shown the operator were dropped, and a different one was
+		// minted the moment the account reached an inbound that needed it. The update
+		// path below has lifted them since the accounts layer landed; only the create
+		// path did not.
+		liftCarriedCredentials(fresh, entry, protocol)
 		if err := tx.Create(fresh).Error; err != nil {
 			return nil, err
 		}
@@ -432,32 +443,7 @@ func overwriteAccountCredential(account *model.Account, entry map[string]any, pr
 			*dst = v
 		}
 	}
-	// Fields the ADDRESSED protocol does not use, lifted only when the caller
-	// actually sent them.
-	//
-	// The Clients page edits an account, not one inbound's copy of it, so its form
-	// carries every credential column the account has and posts them all to
-	// whichever inbound the write is addressed to. Without this, only the addressed
-	// protocol's fields survived and every other field the operator typed was
-	// replaced by a server-minted random.
-	//
-	// An absent key changes nothing, so the inbound-shaped writes that predate this
-	// behave exactly as before: they simply do not carry these keys.
-	//
-	// vpnUsername has its own key because it cannot share one: an entry's "id" is
-	// the uuid for vmess and the login name for l2tp, and one entry cannot mean
-	// both at once.
-	set(&account.VpnUsername, str("vpnUsername"))
-	set(&account.Auth, str("auth"))
-	set(&account.Secret, str("secret"))
-	set(&account.NaiveUser, str("naiveUsername"))
-	if protocol != model.L2TP && protocol != model.PPTP && protocol != model.OPENVPN &&
-		protocol != model.OPENCONNECT && protocol != model.SSTP && protocol != model.IKEV2 &&
-		protocol != model.SSH {
-		// Same reasoning for the password: for these protocols "password" IS the
-		// addressed field and the switch below already handles it.
-		set(&account.Password, str("password"))
-	}
+	liftCarriedCredentials(account, entry, protocol)
 
 	switch protocol {
 	case model.VMESS:
@@ -484,6 +470,45 @@ func overwriteAccountCredential(account *model.Account, entry map[string]any, pr
 		// Identity is the email and nothing reads "id"; no credential to lift.
 	default:
 		set(&account.UUID, str("id"))
+	}
+}
+
+// liftCarriedCredentials copies the credential columns an entry carries FOR OTHER
+// protocols onto the account.
+//
+// The Clients page edits an account, not one inbound's copy of it, so its form
+// holds every credential column the account has and posts them all to whichever
+// inbound the write happens to be addressed to. Without this only the addressed
+// protocol's own fields survive, and every other field the operator typed is
+// replaced by a server-minted random the first time the account is projected onto
+// an inbound that reads it.
+//
+// An absent key changes nothing, so the inbound-shaped writes that predate the
+// accounts layer behave exactly as before: they simply do not carry these keys.
+//
+// Each has its OWN key because it cannot share one: an entry's "id" is the uuid
+// for vmess, the login name for l2tp and the email for wg-c, and one entry cannot
+// mean all three at once.
+func liftCarriedCredentials(account *model.Account, entry map[string]any, protocol model.Protocol) {
+	str := func(k string) string { v, _ := entry[k].(string); return v }
+	set := func(dst *string, v string) {
+		if v != "" {
+			*dst = v
+		}
+	}
+	set(&account.VpnUsername, str("vpnUsername"))
+	set(&account.Auth, str("auth"))
+	set(&account.Secret, str("secret"))
+	set(&account.NaiveUser, str("naiveUsername"))
+	// Skipped where the ADDRESSED protocol owns the same column, because there the
+	// caller's own switch is the authority and runs after this.
+	if protocol != model.VMESS && protocol != model.VLESS && protocol != model.TUIC {
+		set(&account.UUID, str("uuid"))
+	}
+	if protocol != model.L2TP && protocol != model.PPTP && protocol != model.OPENVPN &&
+		protocol != model.OPENCONNECT && protocol != model.SSTP && protocol != model.IKEV2 &&
+		protocol != model.SSH {
+		set(&account.Password, str("password"))
 	}
 }
 
