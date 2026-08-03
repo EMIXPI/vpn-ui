@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = 無限制（單位：GB）"
 "zeroNoExpiry" = "0 = 永不過期"
 "sameProtocolRefused" = "同一個客戶端不能同時位於兩個 l2tp、pptp 或 ikev2 入站中。這些協議共用一個守護行程，無法分辨登入屬於哪個入站，因此該客戶端將永遠由 id 較小的入站提供服務。"
+"denser" = "更緊湊的列"
+"roomier" = "更寬鬆的列"
+"removeFromInbound" = "從該入站移除"
+"removeFromInboundContent" = "該帳戶在其他為其提供服務的入站上仍可正常使用。"
+"bulkNoInbound" = "請在「入站」標籤頁中至少選擇一個入站。"
+"alreadyExpired" = "該帳戶已過期。輸入新的天數即可設定新的到期時間；不修改此項則保留原有到期時間。"
+"summaryExpired" = "已過期"
+"credential" = "憑證"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "從不"

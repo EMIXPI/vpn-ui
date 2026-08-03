@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = sınırsız (birim: GB)"
 "zeroNoExpiry" = "0 = süresiz"
 "sameProtocolRefused" = "Bir müşteri aynı anda iki l2tp, pptp veya ikev2 geleninde bulunamaz. Bu protokoller, girişin hangi gelene ait olduğunu bildirmeyen tek bir servisi paylaşır, bu yüzden müşteriye her zaman id değeri küçük olan gelen hizmet verir."
+"denser" = "Daha sık satırlar"
+"roomier" = "Daha geniş satırlar"
+"removeFromInbound" = "Bu gelenden kaldır"
+"removeFromInboundContent" = "Hesap, kendisine hizmet veren diğer tüm gelenlerde çalışmayı sürdürür."
+"bulkNoInbound" = "Gelenler sekmesinden en az bir gelen seçin."
+"alreadyExpired" = "Bu hesabın süresi zaten dolmuş. Yeni bir son tarih vermek için yeni bir gün sayısı girin; alana dokunmazsanız eski tarih korunur."
+"summaryExpired" = "Süresi doldu"
+"credential" = "Kimlik bilgisi"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Asla"

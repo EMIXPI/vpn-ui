@@ -282,19 +282,11 @@
             // mounts. A render-time throw takes the modal with it, which is why
             // the symptom was a button that silently did nothing.
             //
-            // Same meaning as in client_modal: true only for a reseller on a
-            // days-per-GB plan, where the backend overwrites any posted expiry
-            // (ResellerService.forcedExpiry) so the controls are hidden.
+            // True only for a reseller on a days-per-GB plan, where the backend
+            // overwrites any posted expiry (ResellerService.forcedExpiry) so the
+            // controls are hidden.
             resellerForcedDays() {
                 return !!(RESELLER.isReseller && RESELLER.daysPerGb > 0);
-            },
-            // The third name form/client reads and the reason it needs a definition
-            // here: the inbound-membership checklist. There is nothing to be a
-            // member of while the inbound is still being written, and its id (which
-            // the checklist is built around) does not exist yet, so the form is told
-            // there is no picker. The real one lives in modals/client_modal.html.
-            membershipPicker() {
-                return { available: false, currentId: 0, options: [], selected: [] };
             },
             // The derived duration for the client being added. This modal has no
             // single `client` field (the form renders inside a v-for over the

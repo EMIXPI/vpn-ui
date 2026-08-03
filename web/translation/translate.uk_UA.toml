@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = без обмежень (одиниця: ГБ)"
 "zeroNoExpiry" = "0 = без терміну дії"
 "sameProtocolRefused" = "Клієнт не може одночасно бути у двох вхідних l2tp, pptp або ikev2. Ці протоколи використовують спільну службу, яка не повідомляє, до якого вхідного належить вхід, тому клієнта завжди обслуговуватиме вхідний з меншим id."
+"denser" = "Щільніші рядки"
+"roomier" = "Просторіші рядки"
+"removeFromInbound" = "Прибрати з цього вхідного"
+"removeFromInboundContent" = "Обліковий запис і далі працюватиме на всіх інших вхідних, які його обслуговують."
+"bulkNoInbound" = "Виберіть щонайменше один вхідний на вкладці «Вхідні»."
+"alreadyExpired" = "Термін дії цього облікового запису вже минув. Введіть нову кількість днів, щоб задати новий термін; якщо не чіпати поле, залишиться попередній."
+"summaryExpired" = "Минув"
+"credential" = "Облікові дані"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Ніколи"

@@ -20,19 +20,24 @@
                     {{ i18n "pages.clients.add" }}
                   </a-button>
 
-                  <!-- Bulk-add and copy are per-inbound forms (they build protocol
-                       credentials), so the inbound is chosen up front rather than
-                       inside a modal that would then have to rebuild itself. -->
-                  <a-dropdown v-if="assignable.length">
-                    <a-button icon="usergroup-add">{{ i18n "pages.client.bulk" }}</a-button>
-                    <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
-                      @click="e => openAddBulkClient(Number(e.key))">
-                      <a-menu-item v-for="ib in assignable" :key="ib.inboundId">
-                        [[ ib.remark || ('#' + ib.inboundId) ]]
-                        <a-tag>[[ ib.protocol ]]</a-tag>
-                      </a-menu-item>
-                    </a-menu>
-                  </a-dropdown>
+                  <!-- One button, no menu. The inbounds are picked INSIDE the form,
+                       on the same checklist the single-client form uses, so a bulk
+                       add is the same act as a single add repeated - including
+                       landing the batch on several inbounds at once, which the
+                       pick-first menu could never express. -->
+                  <a-button icon="usergroup-add" v-if="assignable.length"
+                    @click="openBulkAdd()">{{ i18n "pages.client.bulk" }}</a-button>
+
+                  <!-- Row density. Reads as a toggle rather than a button because
+                       it is one: primary while compact is on. -->
+                  <a-tooltip>
+                    <template slot="title">
+                      [[ density === 'compact' ? '{{ i18n "pages.clients.roomier" }}'
+                                              : '{{ i18n "pages.clients.denser" }}' ]]
+                    </template>
+                    <a-button icon="column-height" @click="toggleDensity()"
+                      :type="density === 'compact' ? 'primary' : 'default'"></a-button>
+                  </a-tooltip>
 
                   <a-button-group>
                     <a-button icon="sync" @click="manualRefresh" :loading="refreshing"></a-button>
@@ -111,116 +116,217 @@
                 </a-alert>
               </a-card>
 
-              <a-card hoverable>
+              <a-card hoverable class="bo-lg" :class="{ 'bo-lg--compact': density === 'compact' }">
                 <a-table
                   :columns="columns"
                   :data-source="clients"
                   :row-key="r => r.email"
                   :row-selection="{ selectedRowKeys: selectedEmails, onChange: onSelectChange }"
                   :pagination="pagination"
-                  :scroll="{ x: 1180 }"
+                  :scroll="{ x: 1100 }"
                   :expanded-row-keys="expandedRowKeys"
                   v-on="{ expandedRowsChange: keys => { expandedRowKeys = keys; } }"
                   @change="onTableChange"
                   size="middle">
 
-                  <template slot="emailCol" slot-scope="text, row">
-                    <div :style="{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }">
-                      <a-badge :status="row.enable ? 'success' : 'default'"></a-badge>
-                      <span :style="{ fontWeight: 500 }">[[ row.email ]]</span>
-                      <a-tag v-if="row.comment" color="purple">[[ row.comment ]]</a-tag>
+                  <!-- One lamp for the whole account state. It replaced a badge, a
+                       Frozen tag and a comment span competing for the same line;
+                       the label it used to spell out lives in its tooltip, which is
+                       where a glyph's meaning belongs when the glyph is in a column
+                       of twelve identical ones. -->
+                  <template slot="accountCol" slot-scope="text, row">
+                    <div class="bo-lg-who">
+                      <a-tooltip>
+                        <template slot="title">[[ stateLabel(row) ]]</template>
+                        <span class="bo-lamp" :class="lampClass(row)"></span>
+                      </a-tooltip>
+                      <div class="bo-lg-names">
+                        <div class="bo-lg-name">[[ row.email ]]</div>
+                        <div class="bo-lg-note" v-if="row.comment" :title="row.comment">[[ row.comment ]]</div>
+                      </div>
                     </div>
                   </template>
 
                   <!-- One account, one quota, however many inbounds serve it. That
-                       is the whole point of the accounts layer, so the usage bar is
-                       the account's and not a per-inbound figure. -->
-                  <template slot="quotaCol" slot-scope="text, row">
-                    <div v-if="row.totalGB > 0">
-                      <a-progress
-                        :percent="usedPercent(row)"
-                        :status="usedPercent(row) >= 100 ? 'exception' : 'normal'"
-                        size="small"
-                        :show-info="false"></a-progress>
-                      <span class="bo-dim">[[ sizeFormat(row.up + row.down) ]] / [[ sizeFormat(row.totalGB) ]]</span>
+                       is the whole point of the accounts layer, so the figure is the
+                       account's and not a per-inbound one. Figures first, bar
+                       second: the bar answers "roughly how far", the numbers answer
+                       the question anyone actually asks. -->
+                  <template slot="dataCol" slot-scope="text, row">
+                    <div class="bo-lg-figs">
+                      <b>[[ sizeFormat(row.up + row.down) ]]</b>
+                      <template v-if="row.totalGB > 0"> / [[ sizeFormat(row.totalGB) ]]</template>
+                      <template v-else> / <span class="tr-infinity-ch">&infin;</span></template>
                     </div>
-                    <span v-else class="bo-dim">
-                      [[ sizeFormat(row.up + row.down) ]] /
-                      <span class="tr-infinity-ch">&infin;</span>
+                    <div class="bo-meter" :class="meterClass(row)">
+                      <i v-if="row.totalGB > 0" :style="{ width: usedPercent(row) + '%' }"></i>
+                    </div>
+                  </template>
+
+                  <!-- Three different things wear this one field: a deadline, a
+                       countdown that has not started, and nothing at all. Each has
+                       to READ as what it is, which a single tag could not do. -->
+                  <template slot="expiresCol" slot-scope="text, row">
+                    <div class="bo-lg-rel" :class="expiryView(row).toneClass">[[ expiryView(row).rel ]]</div>
+                    <div class="bo-lg-abs" v-if="expiryView(row).abs">[[ expiryView(row).abs ]]</div>
+                  </template>
+
+                  <!-- Capped, with the rest behind a +N. An account on six inbounds
+                       used to wrap this cell onto three lines and push every row
+                       below it down. -->
+                  <template slot="servingCol" slot-scope="text, row">
+                    <div class="bo-lg-serving">
+                      <span v-if="!row.memberships || !row.memberships.length" class="bo-dim">
+                        {{ i18n "pages.clients.noInbounds" }}
+                      </span>
+                      <a-tooltip v-for="m in shownMemberships(row)" :key="m.inboundId">
+                        <template slot="title">
+                          [[ m.remark || ('#' + m.inboundId) ]]
+                          <span v-if="!m.enable"> &middot; {{ i18n "disabled" }}</span>
+                        </template>
+                        <a-tag class="bo-proto" :class="'bo-proto--' + protocolFamily(m.protocol)">
+                          [[ ProtocolLabels[m.protocol] || m.protocol ]]<span class="bo-lg-port">:[[ m.port ]]</span>
+                        </a-tag>
+                      </a-tooltip>
+                      <a-tooltip v-if="hiddenMemberships(row).length">
+                        <template slot="title">
+                          <div v-for="m in hiddenMemberships(row)" :key="m.inboundId">
+                            [[ m.remark || ('#' + m.inboundId) ]] ([[ m.protocol ]]:[[ m.port ]])
+                          </div>
+                        </template>
+                        <a-tag class="bo-proto">+[[ hiddenMemberships(row).length ]]</a-tag>
+                      </a-tooltip>
+                    </div>
+                  </template>
+
+                  <template slot="seenCol" slot-scope="text, row">
+                    <span class="bo-lg-seen" :class="{ 'bo-lg-seen--live': isClientOnline(row.email) }">
+                      [[ lastSeen(row) ]]
                     </span>
                   </template>
 
-                  <template slot="expiryCol" slot-scope="text, row">
-                    <a-tag v-if="row.expiryTime === 0" color="green" class="infinite-tag">
-                      <span class="tr-infinity-ch">&infin;</span>
-                    </a-tag>
-                    <!-- A NEGATIVE expiry is not a date: it means "N days from first
-                         use" and the clock has not started. Rendering it as a date
-                         would show 1970. -->
-                    <a-tag v-else-if="row.expiryTime < 0" color="blue">
-                      [[ delayedDays(row) ]] {{ i18n "pages.clients.daysAfterFirstUse" }}
-                    </a-tag>
-                    <a-tag v-else :color="expired(row) ? 'red' : 'green'">[[ formatExpiry(row) ]]</a-tag>
-                  </template>
-
-                  <template slot="inboundsCol" slot-scope="text, row">
-                    <span v-if="!row.memberships || !row.memberships.length" class="bo-dim">
-                      {{ i18n "pages.clients.noInbounds" }}
-                    </span>
-                    <a-tag v-for="m in row.memberships" :key="m.inboundId"
-                           :color="m.enable ? '' : 'red'"
-                           :title="m.protocol + ' :' + m.port">
-                      [[ m.remark || (m.protocol + ':' + m.port) ]]
-                    </a-tag>
-                  </template>
-
-                  <template slot="actionCol" slot-scope="text, row">
-                    <a-space>
+                  <!-- Account-level only, and two controls rather than five. Enable
+                       stays out because it is the one an operator reaches for
+                       without reading, and because its state has to be VISIBLE from
+                       the row; the rest are deliberate acts and read better as named
+                       menu items than as five icons nobody can tell apart.
+                       :trigger="['click']" is not optional - an a-dropdown opens on
+                       HOVER by default, which inside a table means a menu opening
+                       every time the pointer crosses a row. -->
+                  <template slot="rowCol" slot-scope="text, row">
+                    <div class="bo-lg-acts">
                       <a-tooltip>
-                        <template slot="title">{{ i18n "edit" }}</template>
-                        <a-button size="small" icon="edit" @click="openEdit(row)"></a-button>
+                        <template slot="title">{{ i18n "pages.inbounds.enable" }}</template>
+                        <a-switch size="small" :checked="!!row.enable"
+                          @change="v => toggleEnable(row, v)"></a-switch>
                       </a-tooltip>
-                      <a-tooltip>
-                        <template slot="title">{{ i18n "pages.clients.inbounds" }}</template>
-                        <a-button size="small" icon="cluster" @click="openMemberships(row)"></a-button>
-                      </a-tooltip>
-                      <!-- The account's subscription, which already covers every
-                           inbound serving it: one subId is projected onto all of
-                           them. Hidden rather than disabled when there is none,
-                           because a disabled antd control fires no mouse events
-                           and its tooltip would never open. -->
-                      <a-tooltip v-if="subSettings.enable && row.subId">
-                        <template slot="title">{{ i18n "pages.settings.subSettings" }}</template>
-                        <a-button size="small" icon="link" @click="showAccountSub(row)"></a-button>
-                      </a-tooltip>
-                      <a-button size="small" :icon="row.enable ? 'pause' : 'caret-right'"
-                                @click="toggleEnable(row)"></a-button>
-                      <a-button size="small" type="danger" icon="delete" @click="confirmDelete(row)"></a-button>
-                    </a-space>
+                      <a-dropdown :trigger="['click']">
+                        <a-button size="small" icon="more" @click="e => e.preventDefault()"></a-button>
+                        <a-menu slot="overlay" :theme="themeSwitcher.currentTheme"
+                          @click="e => rowAction(e.key, row)">
+                          <a-menu-item key="edit">
+                            <a-icon type="edit"></a-icon>{{ i18n "edit" }}
+                          </a-menu-item>
+                          <!-- The account's subscription, which already covers every
+                               inbound serving it: one subId is projected onto all of
+                               them. Absent rather than disabled when there is none. -->
+                          <a-menu-item key="sub" v-if="subSettings.enable && row.subId">
+                            <a-icon type="link"></a-icon>{{ i18n "pages.settings.subSettings" }}
+                          </a-menu-item>
+                          <a-menu-item key="reset">
+                            <a-icon type="retweet"></a-icon>{{ i18n "pages.inbounds.resetTraffic" }}
+                          </a-menu-item>
+                          <!-- Freeze locks the remaining days instead of letting them
+                               tick away while the account is off, so a customer who
+                               pauses for a month keeps the month. -->
+                          <a-menu-item key="freeze">
+                            <a-icon type="pause-circle"></a-icon>
+                            [[ isAccountFrozen(row) ? '{{ i18n "pages.client.unfreeze" }}'
+                                                    : '{{ i18n "pages.client.freeze" }}' ]]
+                          </a-menu-item>
+                          <a-menu-divider></a-menu-divider>
+                          <a-menu-item key="delete">
+                            <span :style="{ color: 'var(--error)' }">
+                              <a-icon type="delete"></a-icon>{{ i18n "delete" }}
+                            </span>
+                          </a-menu-item>
+                        </a-menu>
+                      </a-dropdown>
+                    </div>
                   </template>
 
-                  <!-- One block per inbound serving the account. An account can be
-                       on several, and each one has its own protocol, its own
-                       credential and its own traffic, so they are shown apart
-                       rather than folded into the row. The v-for alias is called
-                       `record` on purpose: aClientTable reads `record` as the
-                       inbound its row belongs to, so aliasing here is what lets
-                       the component be reused unchanged. -->
+                  <!-- One block per inbound serving the account. Each carries only
+                       what actually differs between them: the protocol, the
+                       credential the customer installs and the bytes that inbound
+                       moved. The quota, the expiry and the enable state are the
+                       ACCOUNT's, shown once on the row above rather than repeated
+                       here for every membership.
+                       The v-for alias is called `record` because clientActionIcons
+                       reads `record` as the inbound its client belongs to. -->
                   <template slot="expandedRowRender" slot-scope="row">
-                    <div v-for="record in accountInbounds(row)" :key="record.id"
-                      :style="{ marginBottom: '8px' }">
-                      <div class="bo-dim" :style="{ marginBottom: '2px' }">
-                        [[ record.remark || ('#' + record.id) ]]
-                        <a-tag>[[ record.protocol ]]</a-tag>
-                        <span>:[[ record.port ]]</span>
-                      </div>
-                      <a-table :row-key="client => client.email"
-                        :columns="isMobile ? innerMobileColumns : innerColumns"
-                        :data-source="accountClientIn(row, record)"
-                        :pagination="false"
-                        size="small">
-                        {{template "component/aClientTable"}}
-                      </a-table>
+                    <div class="bo-mb-list">
+                      <template v-for="record in accountInbounds(row)">
+                        <div class="bo-mb" :key="record.id"
+                          :class="{ off: !membershipEnabled(row, record) }"
+                          v-for="client in accountClientIn(row, record)">
+                          <div class="bo-mb-id">
+                            <a-tag :style="{ margin: '0' }" class="bo-proto"
+                              :class="'bo-proto--' + protocolFamily(record.protocol)">
+                              [[ ProtocolLabels[record.protocol] || record.protocol ]]
+                            </a-tag>
+                            <span class="bo-mb-name">[[ record.remark || ('#' + record.id) ]]</span>
+                            <span class="bo-mb-port">:[[ record.port ]]</span>
+                          </div>
+
+                          <!-- What the customer types into their client for THIS
+                               inbound: the field the protocol authenticates on. It
+                               is a uuid on vmess, a password on trojan and a login
+                               name on the dial-in protocols, which is exactly why
+                               it cannot be shown once on the account row. -->
+                          <a-tooltip v-if="membershipCredential(record, client)">
+                            <template slot="title">
+                              {{ i18n "pages.clients.credential" }} &middot; {{ i18n "copy" }}
+                            </template>
+                            <div class="bo-mb-cred" @click="copyText(membershipCredential(record, client))">
+                              <span class="bo-mb-cred-v">[[ membershipCredential(record, client) ]]</span>
+                              <a-icon type="copy"></a-icon>
+                            </div>
+                          </a-tooltip>
+                          <span v-else class="bo-mb-cred"></span>
+
+                          <a-popover :overlay-class-name="themeSwitcher.currentTheme">
+                            <template slot="content">
+                              <table cellpadding="2">
+                                <tr>
+                                  <td>&uarr; [[ sizeFormat(getUpStats(record, client.email)) ]]</td>
+                                  <td>&darr; [[ sizeFormat(getDownStats(record, client.email)) ]]</td>
+                                </tr>
+                                <tr>
+                                  <td>{{ i18n "pages.inbounds.allTimeTraffic" }}</td>
+                                  <td>[[ sizeFormat(getAllTimeClient(record, client.email)) ]]</td>
+                                </tr>
+                              </table>
+                            </template>
+                            <div class="bo-mb-use">
+                              <b>[[ sizeFormat(getSumStats(record, client.email)) ]]</b>
+                            </div>
+                          </a-popover>
+
+                          <div class="bo-mb-actions">
+                            <a-space :size="10">
+                              <!-- Per-inbound, unlike the row above: it takes the
+                                   account off ONE inbound and leaves the rest
+                                   serving it. -->
+                              <a-tooltip>
+                                <template slot="title">{{ i18n "pages.inbounds.enable" }}</template>
+                                <a-switch size="small" :checked="!!client.enable"
+                                  @change="v => switchEnableClient(record.id, client, v)"></a-switch>
+                              </a-tooltip>
+                              {{template "component/clientActionIcons"}}
+                            </a-space>
+                          </div>
+                        </div>
+                      </template>
                     </div>
                   </template>
                 </a-table>
@@ -248,7 +354,6 @@
 {{template "modals/textModal"}}
 {{template "modals/qrcodeModal"}}
 {{template "modals/inboundInfoModal"}}
-{{template "modals/clientsModal"}}
 {{template "modals/clientsBulkModal"}}
 {{template "modals/wgcConfigModal"}}
 {{template "modals/awgConfigModal"}}
@@ -257,39 +362,25 @@
 {{template "modals/clientMembershipModal" .}}
 
 <script>
-  // No select column: selection is the OUTER account row's job here, and a
-  // per-inbound "select all" inside an expanded row would quietly reach clients
-  // this page never listed.
-  const innerColumns = [
-    { title: '{{ i18n "pages.inbounds.operate" }}', width: 200, scopedSlots: { customRender: 'actions' } },
-    { title: '{{ i18n "pages.inbounds.enable" }}', width: 30, scopedSlots: { customRender: 'enable' } },
-    { title: '{{ i18n "online" }}', width: 32, scopedSlots: { customRender: 'online' } },
-    { title: '{{ i18n "pages.inbounds.client" }}', width: 80, scopedSlots: { customRender: 'client' } },
-    { title: '{{ i18n "pages.inbounds.traffic" }}', width: 80, align: 'center', scopedSlots: { customRender: 'traffic' } },
-    { title: '{{ i18n "pages.inbounds.allTimeTraffic" }}', width: 60, align: 'center', scopedSlots: { customRender: 'allTime' } },
-    { title: '{{ i18n "pages.inbounds.expireDate" }}', width: 80, align: 'center', scopedSlots: { customRender: 'expiryTime' } },
-  ];
-
-  const innerMobileColumns = [
-    { title: '{{ i18n "pages.inbounds.operate" }}', width: 10, align: 'center', scopedSlots: { customRender: 'actionMenu' } },
-    { title: '{{ i18n "pages.inbounds.client" }}', width: 90, align: 'left', scopedSlots: { customRender: 'client' } },
-    { title: '{{ i18n "pages.inbounds.info" }}', width: 10, align: 'center', scopedSlots: { customRender: 'info' } },
-  ];
-
   const app = new Vue({
     delimiters: ['[[', ']]'],
     el: '#app',
     // ClientActionsMixin brings every client action, the selection state and the
     // bulk-operation run; this page only has to supply the four hooks and the
-    // state it names.
-    mixins: [MediaQueryMixin, ClientActionsMixin],
+    // state it names. MediaQueryMixin went with the per-inbound tables that used
+    // to need a separate mobile column set: the expander is a flex list now and
+    // reflows on its own.
+    mixins: [ClientActionsMixin],
     data: {
       // themeSwitcher, pageTitle and pageClass are read by the shell in
       // page/shell_start. Omitting any of them makes the WHOLE #app render throw,
       // which leaves the page blank behind v-cloak with a valid 200 on the wire.
       themeSwitcher,
       pageTitle: '{{ i18n "pages.clients.title" }}',
-      pageClass: '',
+      // Not cosmetic: custom.css keys the table ring and several ant overrides off
+      // the page class, and the portalled modals are reached through sibling
+      // selectors on it. Without one this page rendered a table nobody had styled.
+      pageClass: 'clients-page',
       persianDatepicker,
       spinning: false,
       // The account rows this page lists, and the raw inbounds behind them. Both
@@ -304,6 +395,9 @@
       selectedEmails: [],
       expandedRowKeys: [],
       refreshing: false,
+      // Comfortable or compact rows. Remembered, because an operator running a
+      // fleet of several hundred sets this once and means it.
+      density: localStorage.getItem("clientsDensity") === "compact" ? "compact" : "comfortable",
       isRefreshEnabled: localStorage.getItem("isRefreshEnabled") === "true",
       refreshInterval: Number(localStorage.getItem("refreshInterval")) || 5000,
       onlineClients: [],
@@ -331,12 +425,19 @@
         availableBytes: Number(RESELLER.availableBytes) || 0,
       },
       pagination: { current: 1, pageSize: 50, total: 0, showSizeChanger: true, pageSizeOptions: ['20', '50', '100', '200'] },
+      // Fixed widths on everything except Serving, which is the one column whose
+      // content genuinely varies and so is the one that should absorb the slack.
+      // The four fixed ones are deliberately tight: three protocol chips need
+      // about 330px, and at the widths this started with Serving fell just under
+      // that, so a three-inbound account wrapped onto two lines and stood a head
+      // taller than every row around it.
       columns: [
-        { title: '{{ i18n "pages.clients.email" }}', scopedSlots: { customRender: 'emailCol' }, width: 220 },
-        { title: '{{ i18n "pages.clients.quota" }}', scopedSlots: { customRender: 'quotaCol' }, width: 190 },
-        { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiryCol' }, width: 150 },
-        { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'inboundsCol' } },
-        { title: '', scopedSlots: { customRender: 'actionCol' }, width: 210, align: 'right' },
+        { title: '{{ i18n "pages.clients.email" }}', scopedSlots: { customRender: 'accountCol' }, width: 230 },
+        { title: '{{ i18n "pages.clients.quota" }}', scopedSlots: { customRender: 'dataCol' }, width: 170 },
+        { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiresCol' }, width: 150 },
+        { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'servingCol' } },
+        { title: '{{ i18n "lastOnline" }}', scopedSlots: { customRender: 'seenCol' }, width: 100 },
+        { title: '', scopedSlots: { customRender: 'rowCol' }, width: 104, align: 'right' },
       ],
     },
     methods: {
@@ -351,6 +452,126 @@
       formatExpiry(row) { return IntlUtil.formatDate(row.expiryTime); },
       // Stored negative, in milliseconds, counting DOWN from first use.
       delayedDays(row) { return Math.round(Math.abs(row.expiryTime) / 86400000); },
+
+      // --- the ledger row --------------------------------------------------
+      depleted(row) { return row.totalGB > 0 && row.up + row.down >= row.totalGB; },
+      // The account's health as ONE value, in the reserved status scale.
+      //
+      // Order matters, and "disabled" is deliberately NOT first. The panel
+      // auto-disables an account the moment it expires or runs out, so testing
+      // enable first painted every depleted account the same neutral grey as one
+      // an operator had switched off by hand - hiding the only two states that
+      // need chasing. Frozen still outranks both, because a frozen account is off
+      // on purpose and its clock is stopped.
+      lampClass(row) {
+        if (this.isAccountFrozen(row)) return 'bo-lamp--off';
+        if (this.expired(row) || this.depleted(row)) return 'bo-lamp--error';
+        if (!row.enable) return 'bo-lamp--off';
+        if (this.expiringSoon(row) || this.usedPercent(row) >= 85) return 'bo-lamp--warn';
+        return 'bo-lamp--ok' + (this.isClientOnline(row.email) ? ' bo-lamp--live' : '');
+      },
+      // Same order, so the tooltip never disagrees with the colour it explains.
+      stateLabel(row) {
+        if (this.isAccountFrozen(row)) return '{{ i18n "pages.client.frozen" }}';
+        if (this.expired(row)) return '{{ i18n "pages.clients.summaryExpired" }}';
+        if (this.depleted(row)) return '{{ i18n "depleted" }}';
+        if (!row.enable) return '{{ i18n "disabled" }}';
+        return this.isClientOnline(row.email) ? '{{ i18n "online" }}' : '{{ i18n "offline" }}';
+      },
+      // A positive deadline inside a week. Deliberately NOT true for a delayed
+      // start or a frozen account: neither clock is running, so neither is
+      // running out.
+      expiringSoon(row) {
+        if (!(row.expiryTime > 0)) return false;
+        const left = row.expiryTime - Date.now();
+        return left > 0 && left <= 7 * 86400000;
+      },
+      meterClass(row) {
+        if (!row.totalGB) return 'bo-meter--inf';
+        const p = this.usedPercent(row);
+        return p >= 100 ? 'bo-meter--error' : p >= 85 ? 'bo-meter--warn' : '';
+      },
+      // The expiry field is three different things wearing one column. Frozen and
+      // delayed-start are BOTH stored as a negative expiry, and only `enable`
+      // tells them apart, so the frozen test has to come first.
+      expiryView(row) {
+        if (this.isAccountFrozen(row)) {
+          return { rel: '{{ i18n "pages.client.frozen" }}', toneClass: 'bo-lg-rel--info',
+                   abs: this.delayedDays(row) + ' {{ i18n "pages.clients.summaryDays" }}' };
+        }
+        if (row.expiryTime < 0) {
+          return { rel: this.delayedDays(row) + ' {{ i18n "pages.clients.daysAfterFirstUse" }}',
+                   toneClass: 'bo-lg-rel--info', abs: '' };
+        }
+        if (row.expiryTime === 0) {
+          return { rel: '{{ i18n "pages.clients.summaryNever" }}', toneClass: '', abs: '' };
+        }
+        // Localized by Intl.RelativeTimeFormat, so "in 12 days" / "3 days ago"
+        // arrive in the operator's own language with no key of ours.
+        return {
+          rel: IntlUtil.formatRelativeTime(row.expiryTime),
+          toneClass: this.expired(row) ? 'bo-lg-rel--error'
+                   : this.expiringSoon(row) ? 'bo-lg-rel--warn' : '',
+          abs: this.shortDate(row.expiryTime),
+        };
+      },
+      shortDate(ts) {
+        try {
+          return new Intl.DateTimeFormat(LanguageManager.getLanguage(),
+            { year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(ts));
+        } catch (e) {
+          return new Date(ts).toISOString().slice(0, 10);
+        }
+      },
+      // Roomier shows EVERY inbound, however many that is: the column is the
+      // answer to "where is this account served", and a "+2" is not that answer.
+      // The cost is that an account on five inbounds wraps its cell onto a second
+      // line and stands taller than its neighbours - which is what roomier is
+      // for. Compact is the mode that trades completeness for uniform rows.
+      //
+      // Compact's cap counts RENDERED chips, +N included. Capping memberships
+      // instead let a four-inbound account draw two chips and a "+2" - three
+      // chips wide - and wrap anyway.
+      servingCap() { return this.density === 'compact' ? 2 : Infinity; },
+      shownMemberships(row) {
+        const all = row.memberships || [];
+        const cap = this.servingCap();
+        return all.length <= cap ? all : all.slice(0, cap - 1);
+      },
+      hiddenMemberships(row) {
+        const all = row.memberships || [];
+        return all.slice(this.shownMemberships(row).length);
+      },
+      lastSeen(row) {
+        if (this.isClientOnline(row.email)) return '{{ i18n "online" }}';
+        const ts = this.getLastOnline(row.email);
+        if (!ts) return '{{ i18n "pages.clients.summaryNever" }}';
+        return IntlUtil.formatRelativeTime(ts);
+      },
+      toggleDensity() {
+        this.density = this.density === 'compact' ? 'comfortable' : 'compact';
+        localStorage.setItem('clientsDensity', this.density);
+      },
+      // The row menu. Reset and delete confirm here rather than in the markup: a
+      // menu item cannot host a popconfirm the way a button could, and both are
+      // irreversible enough to deserve the stop.
+      rowAction(key, row) {
+        switch (key) {
+          case 'edit': return this.openEdit(row);
+          case 'sub': return this.showAccountSub(row);
+          case 'freeze': return this.toggleAccountFreeze(row);
+          case 'delete': return this.confirmDelete(row);
+          case 'reset':
+            return this.$confirm({
+              title: '{{ i18n "pages.inbounds.resetTraffic" }} ' + row.email,
+              content: '{{ i18n "pages.inbounds.resetTrafficContent" }}',
+              class: themeSwitcher.currentTheme,
+              okText: '{{ i18n "reset" }}',
+              cancelText: '{{ i18n "cancel" }}',
+              onOk: () => this.resetAccountTraffic(row),
+            });
+        }
+      },
 
       // --- the hooks ClientActionsMixin expects ---------------------------
       loading(spinning = true) { this.spinning = spinning; },
@@ -478,10 +699,43 @@
           .map(m => this.dbInbounds.find(r => r.id === m.inboundId))
           .filter(Boolean);
       },
-      // A one-row data source: this account's client entry inside that inbound.
+      // A one-element list, not the client itself: it is consumed by a v-for, which
+      // is what puts BOTH `record` and `client` in scope for clientActionIcons
+      // without a wrapper component to pass them through.
       accountClientIn(row, dbInbound) {
         const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
         return client ? [client] : [];
+      },
+      // Enabled ON THIS INBOUND. Normally the same as the account's own flag, since
+      // a write projects onto every membership, but the per-membership switch below
+      // can turn one off on its own.
+      membershipEnabled(row, dbInbound) {
+        const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
+        return client ? client.enable !== false : false;
+      },
+      // The field this inbound's protocol authenticates on: a uuid for vmess and
+      // vless, the password for trojan and the credential VPNs, the login name for
+      // ssh. Single definition in model/inbound.js, mirrored server-side by
+      // clientIdentityKey; do not re-derive it here.
+      membershipCredential(dbInbound, client) {
+        if (!dbInbound || !client) return '';
+        const id = getClientIdentity(dbInbound.protocol, client);
+        // wg-c, awg, gre and mtproto are addressed by the email, which the row
+        // above already spells out; showing it again says nothing.
+        return id && id !== client.email ? String(id) : '';
+      },
+      // Two hues, neither of them a reserved status colour: the tag says which
+      // data plane serves the inbound, not how healthy it is. Same split as the
+      // Inbounds page, so one protocol wears one colour panel-wide.
+      protocolFamily(p) {
+        const k = String(p || '').toLowerCase();
+        const xrayNative = ['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'dokodemo-door', 'wireguard'];
+        return xrayNative.includes(k) ? 'xray' : 'vpn';
+      },
+      async copyText(value) {
+        if (!value) return;
+        const ok = await ClipboardManager.copyText(value);
+        if (ok) this.$message.success('{{ i18n "copied" }}');
       },
 
       // --- selection --------------------------------------------------------
@@ -524,26 +778,31 @@
       openAdd() {
         clientMembershipModal.show({ assignable: this.assignable, onDone: () => this.getDBInbounds() });
       },
-      openMemberships(row) {
+      // The SAME form as add, opened on an existing account. There used to be a
+      // second, older one here (modals/clientsModal + form/client), reached from
+      // this button while the membership form was reached from the one beside it:
+      // two forms for one account, disagreeing about what a credential is. That
+      // one is gone; this is the only client form the page has.
+      openEdit(row) {
         clientMembershipModal.show({
           row, storedBy: this.storedClients(row),
           assignable: this.assignable, onDone: () => this.getDBInbounds(),
         });
       },
-      // The full client form, opened on the first inbound serving the account.
-      // That form locks the inbound it was opened from into the membership set,
-      // which is why removing a membership lives in openMemberships instead.
-      openEdit(row) {
-        const first = (row.memberships || [])[0];
-        if (!first) return;
-        const dbInbound = this.dbInbounds.find(r => r.id === first.inboundId);
-        if (!dbInbound) return;
-        // findIndexOfClient keys on the protocol's credential (password, uuid),
-        // not on the email, so it has to be handed the stored client object and
-        // not a stand-in built from the account row.
-        const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
-        if (!client) return;
-        this.openEditClient(dbInbound.id, client);
+      // Bulk add opens straight onto the form. The inbounds are ticked inside it,
+      // so nothing has to be chosen before the form can be built.
+      openBulkAdd() {
+        clientsBulkModal.show({
+          title: '{{ i18n "pages.client.bulk" }}',
+          okText: '{{ i18n "pages.client.bulk" }}',
+          assignable: this.assignable,
+          // Every email in use anywhere, so the form can say which generated names
+          // are already taken. One of them fails the whole POST server-side
+          // (AddInboundClient rejects the request, not the offending client), so
+          // the batch is worth checking before it is sent.
+          existing: this.emailsInUse(),
+          onDone: () => this.getDBInbounds(),
+        });
       },
       // One URL for the whole account. Passing the row itself would hand the modal
       // an object with no subId when the account has none, which is exactly the
@@ -562,9 +821,68 @@
         }
       },
 
-      async toggleEnable(row) {
-        await this.applyToAccount(row, { enable: !row.enable });
+      async toggleEnable(row, next) {
+        const want = typeof next === 'boolean' ? next : !row.enable;
+        // Optimistic, and deliberately so: a-switch is controlled off row.enable,
+        // so without this the toggle springs back under the cursor and sits there
+        // for the whole round trip. getDBInbounds replaces the row with the
+        // server's answer, which is what corrects it if the write is refused.
+        row.enable = want;
+        await this.applyToAccount(row, { enable: want });
         await this.getDBInbounds();
+      },
+      // Frozen = disabled with a LOCKED remaining time. The negative expiry is what
+      // holds the clock: it is read as "this many days left", not as a date, so the
+      // days do not drain away while the account is off.
+      isAccountFrozen(row) {
+        return !!row && row.enable === false && Number(row.expiryTime) < 0;
+      },
+      // ONE call, not one per membership.
+      //
+      // The counters are already account-wide because the STORAGE is:
+      // client_traffics.email is unique panel-wide, so an account on four
+      // inbounds has exactly one row and zeroing it through any of them zeroes
+      // all of it. The loop that used to be here wrote that same row four times
+      // and paid for it: every reset sets the Xray restart flag, so a
+      // four-inbound account sat under a full-page spinner for ~24 seconds doing
+      // the same work four times. The inbound in the path is only what the
+      // ownership check is made against, which is why it can be any membership.
+      async resetAccountTraffic(row) {
+        const first = (row.memberships || [])[0];
+        if (!first) return;
+        this.loading();
+        try {
+          await HttpUtil.post(
+            `/panel/api/inbounds/${first.inboundId}/resetClientTraffic/${encodeURIComponent(row.email)}`);
+          await this.getDBInbounds();
+          await this.refreshResellerBalance();
+        } finally {
+          this.loading(false);
+        }
+      },
+      // One bulk call carrying every membership as a target, so the time-lock maths
+      // stays server-side and the whole account freezes or thaws in one write.
+      async toggleAccountFreeze(row) {
+        const targets = (row.memberships || []).map(m => ({ inboundId: m.inboundId, email: row.email }));
+        if (!targets.length) return;
+        const op = this.isAccountFrozen(row) ? 'unfreeze' : 'freeze';
+        this.loading();
+        try {
+          const payload = {
+            op, days: 0, amountBytes: 0,
+            skipFirstUse: false, skipUnlimited: false, skipDisabled: false,
+            targets,
+          };
+          const msg = await HttpUtil.post('/panel/api/inbounds/bulkUpdateClients', { data: JSON.stringify(payload) });
+          if (msg && msg.success) {
+            this.$message.success(op === 'freeze'
+              ? '{{ i18n "pages.client.freeze" }}' : '{{ i18n "pages.client.unfreeze" }}');
+            await this.getDBInbounds();
+            await this.refreshResellerBalance();
+          }
+        } finally {
+          this.loading(false);
+        }
       },
       // The account's entry as it is actually STORED on one of its inbounds. Every
       // write has to be built on top of this, never on a fresh object assembled

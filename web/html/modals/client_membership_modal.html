@@ -1,9 +1,14 @@
 {{define "modals/clientMembershipModal"}}
+<!-- @cancel is what Close, the X and Escape all arrive as, and it is here because
+     the modal is not the only thing on screen: the calendar's dropdown is a portal
+     on <body>, so closing the modal with it open left it floating over the page
+     with nothing to dismiss it. close() unmounts the picker with the modal. -->
 <a-modal id="client-membership-modal" v-model="clientMembershipModal.visible"
   :title="clientMembershipModal.title" @ok="() => clientMembershipModal.ok()"
+  @cancel="() => clientMembershipModal.close()"
   :confirm-loading="clientMembershipModal.confirmLoading" :closable="true" :mask-closable="false"
   :ok-text="clientMembershipModal.okText" cancel-text='{{ i18n "close" }}'
-  :width="720" :class="themeSwitcher.currentTheme" wrap-class-name="bo-client-modal">
+  :width="820" :class="themeSwitcher.currentTheme" wrap-class-name="bo-client-modal">
 
   <div class="bo-cf">
     <!-- The rail is the account at a glance, and it stays put while the operator
@@ -107,15 +112,25 @@
             </div>
           </a-col>
           <a-col :span="12">
-            <div class="bo-cf-field">
+            <!-- Days-per-GB makes the duration a function of the traffic, so a
+                 reseller on that plan gets no expiry control at all: the backend
+                 overwrites whatever is posted (ResellerService.forcedExpiry).
+                 Showing the field would only invite an edit that silently does
+                 nothing, so the derived figure is shown in its place. -->
+            <div class="bo-cf-field" v-if="clientMembershipModal.resellerForcedDays">
+              <label>{{ i18n "pages.resellers.daysPerGb" }}</label>
+              <div><a-tag color="blue">[[ clientMembershipModal.resellerForcedDaysText ]]</a-tag></div>
+            </div>
+            <div class="bo-cf-field" v-else>
               <label>{{ i18n "pages.client.expireDays" }}</label>
               <!-- Two ways into ONE stored value. A duration is what an operator
                    selling a 30-day plan actually knows; a date is what someone
                    matching an existing invoice knows. The calendar switches
                    between them and the day count is recomputed from the date. -->
               <div class="bo-cf-withicon">
-                <a-input-number v-if="!clientMembershipModal.pickDate"
-                  v-model="clientMembershipModal.days" :min="0"
+                <a-input-number v-if="!clientMembershipModal.dateMode"
+                  :value="clientMembershipModal.days" :min="0"
+                  @change="v => clientMembershipModal.setDays(v)"
                   :style="{ width: '100%' }"></a-input-number>
                 <!-- The picker owns its own open state. It was CONTROLLED through
                      `:open` + `@openChange`, and this template is compiled from the
@@ -139,7 +154,13 @@
                   :disabled-date="d => clientMembershipModal.isPastDate(d)"
                   @change="d => clientMembershipModal.setExpiryDate(d)"
                   :style="{ width: '100%' }"></a-date-picker>
-                <a-tooltip>
+                <!-- Hidden while the deadline is a delay rather than a date: with
+                     Start After First Use on, the stored value counts from a
+                     connection that has not happened yet, so no calendar day names
+                     it. The toggle used to stay, and picking the 1st on an account
+                     with the delay on stored "expires 29 days after they first
+                     connect" - a different promise from the one that was clicked. -->
+                <a-tooltip v-if="!clientMembershipModal.delayedStart">
                   <template slot="title">
                     [[ clientMembershipModal.pickDate
                        ? '{{ i18n "pages.clients.useDuration" }}'
@@ -152,16 +173,25 @@
                 </a-tooltip>
               </div>
               <div class="bo-cf-hint">{{ i18n "pages.clients.zeroNoExpiry" }}</div>
+              <!-- An account whose deadline has already passed cannot be shown as a
+                   positive number of days left, and 0 in this box means "never
+                   expires". So it is said in words instead, and the stored deadline
+                   is kept untouched unless the box itself is edited. -->
+              <div class="bo-cf-hint" v-if="clientMembershipModal.expiredAlready"
+                :style="{ color: 'var(--error)' }">
+                {{ i18n "pages.clients.alreadyExpired" }}
+              </div>
             </div>
           </a-col>
         </a-row>
 
-        <div class="bo-cf-switch">
+        <div class="bo-cf-switch" v-if="!clientMembershipModal.resellerForcedDays">
           <div>
             <div class="bo-cf-t">{{ i18n "pages.client.delayedStart" }}</div>
             <div class="bo-cf-d">{{ i18n "pages.clients.delayedStartDesc" }}</div>
           </div>
-          <a-switch v-model="clientMembershipModal.delayedStart"></a-switch>
+          <a-switch :checked="clientMembershipModal.delayedStart"
+            @change="v => clientMembershipModal.setDelayedStart(v)"></a-switch>
         </div>
         <div class="bo-cf-switch">
           <div>
@@ -268,6 +298,22 @@
     ],
     // Entering the deadline as a date rather than a day count.
     pickDate: false,
+    // The deadline exactly as it is stored, and whether the operator has touched
+    // the field since the form opened.
+    //
+    // Both exist because a stored deadline does not survive a round trip through a
+    // whole number of days. An account with 10 days and 5 hours left shows "11"
+    // (it has to round SOMEWHERE, and rounding down would report ten days to
+    // someone who has more), and saving with the field untouched wrote back
+    // now + 11 days: every save silently bought the customer several more hours.
+    // An account already past its deadline was worse - it can only show 0, which
+    // this form reads as "never expires", so opening an expired account and
+    // pressing Save handed out an account with no deadline at all.
+    //
+    // So the number is a VIEW of the stored value, and the stored value is what is
+    // posted back until the operator actually edits it.
+    storedExpiry: 0,
+    daysTouched: false,
     // Where toggleDatePicker looks for the picker it just revealed.
     pickerRoot: '#client-membership-modal',
     // The account's stored entry on EACH inbound serving it, keyed by inbound id
@@ -311,6 +357,8 @@
       this.okText = row ? '{{ i18n "sure" }}' : '{{ i18n "pages.clients.add" }}';
       this.tab = 'identity';
       this.pickDate = false;
+      this.daysTouched = false;
+      this.storedExpiry = row ? (Number(row.expiryTime) || 0) : 0;
       if (row) {
         this.client = {
           email: row.email, enable: row.enable, limitIp: row.limitIp,
@@ -358,11 +406,44 @@
       if (!this.quotaBytes) return '{{ i18n "pages.clients.summaryUnlimited" }}';
       return SizeFormatter.sizeFormat(Math.max(0, this.quotaBytes - this.usedBytes));
     },
+    // Whether this account's duration is a function of its traffic rather than
+    // something the operator picks. True only for a reseller on a days-per-GB
+    // plan, where the backend overwrites any posted expiry.
+    get resellerForcedDays() {
+      return !!(RESELLER.isReseller && RESELLER.daysPerGb > 0);
+    },
+    // The derived duration, shown in place of the controls so the reseller can see
+    // what they are selling before they save.
+    get resellerForcedDaysText() {
+      const days = NumberFormatter.toFixed((this.totalGb || 0) * RESELLER.daysPerGb, 1);
+      return days + ' ' + '{{ i18n "pages.client.expireDays" }}';
+    },
+    // Already past its deadline, so the day count cannot describe it.
+    get expiredAlready() {
+      return this.isEdit && this.storedExpiry > 0 && this.storedExpiry < Date.now();
+    },
+    // The calendar is only offered while the deadline IS a date.
+    get dateMode() { return this.pickDate && !this.delayedStart; },
     // The deadline as a moment, for the picker. A NEGATIVE expiry is a delayed
-    // start and has no date yet, so the picker shows nothing rather than 1970.
+    // start and has no date yet, so the picker shows nothing rather than 1970. An
+    // untouched deadline shows the stored date exactly, not the rounded day count
+    // read back out.
     get expiryMoment() {
-      if (!this.days || this.delayedStart) return null;
+      if (this.delayedStart) return null;
+      if (!this.daysTouched && this.storedExpiry > 0) return moment(this.storedExpiry);
+      if (!this.days) return null;
       return moment(Date.now() + this.days * 86400000);
+    },
+    setDays(v) {
+      this.days = Math.max(0, Number(v) || 0);
+      this.daysTouched = true;
+    },
+    setDelayedStart(v) {
+      this.delayedStart = v;
+      // A delay cannot be expressed as a calendar day, so the toggle disappears
+      // with it; leaving pickDate on would strand the form on a hidden control.
+      if (v) this.pickDate = false;
+      this.daysTouched = true;
     },
     // Picking a date sets the same day count the number input edits, so the two
     // inputs stay one value however the operator switches between them.
@@ -380,19 +461,34 @@
     },
     // Today rounds to zero days, which this form stores as "never expires", so it
     // is refused rather than silently meaning the opposite of what was clicked.
+    //
+    // Compared at day granularity. The end-of-day comparison this replaces left
+    // TODAY selectable right up to midnight - the one date the form cannot mean
+    // what it says - and it read as an ordinary available day.
     isPastDate(d) {
-      return !!d && d.clone().endOf('day').valueOf() <= Date.now();
+      return !!d && d.clone().startOf('day').valueOf() <= moment().startOf('day').valueOf();
     },
     // Whole calendar days ahead, so picking tomorrow is 1 and the date the picker
     // shows back (now + N days) lands on the day that was clicked.
     setExpiryDate(d) {
+      this.daysTouched = true;
       if (!d) { this.days = 0; return; }
       const days = d.clone().startOf('day').diff(moment().startOf('day'), 'days');
       this.days = Math.max(0, days);
     },
     get expiresText() {
+      if (this.expiredAlready && !this.daysTouched) return '{{ i18n "pages.clients.summaryExpired" }}';
       if (!this.days) return '{{ i18n "pages.clients.summaryNever" }}';
       return this.days + ' {{ i18n "pages.clients.summaryDays" }}';
+    },
+    // What to store for the deadline. Untouched, that is whatever was already
+    // there, byte for byte: a form that only DISPLAYS a value must not rewrite it
+    // on the way past. Touched, the number means days from now, or - with a
+    // delayed start - days from the first connection, which is stored negative.
+    postedExpiry() {
+      if (!this.daysTouched && this.isEdit) return this.storedExpiry;
+      if (!this.days) return 0;
+      return this.delayedStart ? -(this.days * 86400000) : Date.now() + this.days * 86400000;
     },
 
     // The account's own credential columns, and which protocols read each one.
@@ -545,9 +641,19 @@
                               : await this.saveNew(email, ids);
       this.confirmLoading = false;
       if (msg && msg.success) {
-        this.visible = false;
+        this.close();
         if (this.onDone) this.onDone();
       }
+    },
+
+    // Every way out of this form goes through here. pickDate is the important
+    // half: it is what the calendar is rendered behind, so clearing it unmounts
+    // the picker and takes its body-level dropdown with it. Left set, the dropdown
+    // survived the modal and sat over the page swallowing clicks.
+    close() {
+      this.visible = false;
+      this.pickDate = false;
+      this.confirmLoading = false;
     },
 
     // The entry to post, in the shape the ADDRESSED inbound's protocol expects.
@@ -575,9 +681,7 @@
         totalGB: (this.totalGb || 0) * 1073741824,
         // A NEGATIVE expiry is not a date. It is "this many days from first use",
         // and the server starts the clock on the first connection.
-        expiryTime: !this.days ? 0
-          : this.delayedStart ? -(this.days * 86400000)
-          : Date.now() + this.days * 86400000,
+        expiryTime: this.postedExpiry(),
         // Read by the accounts layer, ignored by every daemon. `id` cannot carry
         // the VPN login name here because this entry may be a vmess one, where it
         // already means the uuid.
@@ -585,6 +689,16 @@
         auth: c.auth || '',
         secret: c.secret || '',
         naiveUsername: c.naiveUsername || '',
+        // Carried on EVERY entry, not just the ones addressed by them. The write
+        // lands on whichever inbound is the anchor, and with a vless anchor the
+        // password went nowhere: the account was created without one and the
+        // server minted a different one the moment it was projected onto a trojan
+        // inbound, so the Credentials tab had shown the operator a password that
+        // never existed. The uuid has the same problem through a trojan anchor,
+        // and needs its own key because "id" already means the login name on l2tp
+        // and the email on wg-c. liftCarriedCredentials reads both.
+        password: c.password || '',
+        uuid: c.id || '',
       });
       switch (protocol) {
         case 'vmess':

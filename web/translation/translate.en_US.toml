@@ -560,7 +560,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -621,6 +620,14 @@
 "zeroUnlimited" = "0 = unlimited (unit: GB)"
 "zeroNoExpiry" = "0 = never expires"
 "sameProtocolRefused" = "A client cannot be on two l2tp, pptp or ikev2 inbounds at once. Those protocols share one daemon that does not report which inbound a login belongs to, so the client would always be served by the one with the lower id."
+"denser" = "Denser rows"
+"roomier" = "Roomier rows"
+"removeFromInbound" = "Remove from this inbound"
+"removeFromInboundContent" = "The account keeps working on every other inbound serving it."
+"bulkNoInbound" = "Pick at least one inbound on the Inbounds tab."
+"alreadyExpired" = "This account has already expired. Enter a new number of days to give it a fresh deadline; leaving the box alone keeps the old one."
+"summaryExpired" = "Expired"
+"credential" = "Credential"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Never"

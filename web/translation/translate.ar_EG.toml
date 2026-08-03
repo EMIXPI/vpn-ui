@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = غير محدود (الوحدة: جيجابايت)"
 "zeroNoExpiry" = "0 = بدون انتهاء"
 "sameProtocolRefused" = "لا يمكن أن يكون العميل على إدخالين من نوع l2tp أو pptp أو ikev2 في نفس الوقت. هذه البروتوكولات تشترك في خدمة واحدة لا تحدد الإدخال الذي ينتمي إليه تسجيل الدخول، لذلك سيتم خدمة العميل دائما من الإدخال ذي المعرف الأصغر."
+"denser" = "صفوف أكثر تقاربا"
+"roomier" = "صفوف أكثر اتساعا"
+"removeFromInbound" = "إزالة من هذا الإدخال"
+"removeFromInboundContent" = "يظل الحساب يعمل على كل الإدخالات الأخرى التي تخدمه."
+"bulkNoInbound" = "اختر إدخالا واحدا على الأقل من تبويب الإدخالات."
+"alreadyExpired" = "انتهت صلاحية هذا الحساب بالفعل. أدخل عدد أيام جديدا لتحديد مهلة جديدة؛ وترك الحقل كما هو يبقي المهلة السابقة."
+"summaryExpired" = "منتهي"
+"credential" = "بيانات الاعتماد"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "أبداً"

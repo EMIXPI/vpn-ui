@@ -21,12 +21,10 @@
   // Vue merges a page's own methods over a mixin's, so a page may override any of
   // the rest the same way.
   //
-  // Seven of these open a modal the CLIENTS page includes and the Inbounds page
+  // Four of these open a modal the CLIENTS page includes and the Inbounds page
   // does not, so calling one from a page that omits the include is a
   // ReferenceError rather than a no-op:
   //
-  //   openAddClient, openEditClient   -> modals/clientsModal
-  //   openAddBulkClient               -> modals/clientsBulkModal
   //   showWgcConfig                   -> modals/wgcConfigModal
   //   showAwgConfig                   -> modals/awgConfigModal
   //   showGreConfig                   -> modals/greConfigModal
@@ -34,7 +32,13 @@
   //
   // The rest reach only qrcodeModal and inboundInfoModal, which both pages carry.
   // Inbounds uses eight of these in total and is fine; a page that starts calling
-  // one of the seven has to add the include with it.
+  // one of the four has to add the include with it.
+  //
+  // Adding and editing an account are NOT here. They belong to the Clients page's
+  // own forms (modals/clientMembershipModal and modals/clientsBulkModal), which
+  // are account-shaped rather than inbound-shaped: they carry one credential set
+  // and a membership list, where a mixin helper could only ever speak for the one
+  // inbound it was handed.
 
   // Every bulk operation the modal can offer, in the order it lists them.
   const BULK_OPS = ['addDays', 'subDays', 'addTraffic', 'subTraffic',
@@ -433,38 +437,6 @@
       // Single-account export straight from a client row's action buttons.
       exportClientTxt(dbInbound, client) { this.exportTxt([{ inboundId: dbInbound.id, email: client.email }], client.email || dbInbound.remark); },
       exportClientPdf(dbInbound, client) { this.exportPdf([{ inboundId: dbInbound.id, email: client.email }], client.email || dbInbound.remark); },
-      openAddClient(dbInboundId) {
-        dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
-        if (dbInbound && dbInbound.isIkev2SingleClient() && (this.getInboundClients(dbInbound) || []).length >= 1) {
-          this.$message.warning('This IKEv2 inbound allows only one account.');
-          return;
-        }
-        clientModal.show({
-          title: '{{ i18n "pages.client.add"}}',
-          okText: '{{ i18n "pages.client.submitAdd"}}',
-          dbInbound: dbInbound,
-          confirm: async (clients, dbInboundId) => {
-            await this.addClient(clients, dbInboundId, clientModal, clientModal.postedInboundIds());
-          },
-          isEdit: false
-        });
-      },
-      openAddBulkClient(dbInboundId) {
-        dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
-        clientsBulkModal.show({
-          title: '{{ i18n "pages.client.bulk"}} ' + dbInbound.remark,
-          okText: '{{ i18n "pages.client.bulk"}}',
-          dbInbound: dbInbound,
-          // Every email in use anywhere, so the form can say which generated names
-          // are already taken. One of them fails the whole POST server-side
-          // (AddInboundClient rejects the request, not the offending client), so
-          // the batch is worth checking before it is sent.
-          existing: this.emailsInUse(),
-          confirm: async (clients, dbInboundId) => {
-            await this.addClient(clients, dbInboundId, clientsBulkModal);
-          },
-        });
-      },
       // A map rather than a Set: it is read from a template expression, and Vue 2
       // does not make a Set's contents reactive.
       emailsInUse() {
@@ -475,26 +447,6 @@
           });
         });
         return seen;
-      },
-      openEditClient(dbInboundId, client) {
-        dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
-        if (!dbInbound) return;
-        clients = this.getInboundClients(dbInbound);
-        if (!clients || !Array.isArray(clients)) return;
-        index = this.findIndexOfClient(dbInbound.protocol, clients, client);
-        if (index < 0) return;
-        clientModal.show({
-          title: '{{ i18n "pages.client.edit"}}',
-          okText: '{{ i18n "pages.client.submitEdit"}}',
-          dbInbound: dbInbound,
-          index: index,
-          confirm: async (client, dbInboundId, clientId) => {
-            clientModal.loading();
-            await this.updateClient(client, dbInboundId, clientId, clientModal.postedInboundIds());
-            clientModal.close();
-          },
-          isEdit: true
-        });
       },
       findIndexOfClient(protocol, clients, client) {
         if (!clients || !Array.isArray(clients) || !client) {
@@ -518,26 +470,16 @@
           default: return clients.findIndex(item => item && item.id === client.id && item.email === client.email);
         }
       },
-      // inboundIds is the account's whole membership set: these inbounds and no
-      // others. It is OMITTED unless the caller has a checklist to speak for, and an
-      // absent field means "just the inbound in the body", which is what the bulk-add
-      // modal, the enable switch and every scripted caller rely on. Qs.stringify
-      // posts an array as repeated keys, which is what the server binds.
-      async addClient(clients, dbInboundId, modal, inboundIds) {
-        const data = {
-          id: dbInboundId,
-          settings: '{"clients": [' + clients.toString() + ']}',
-        };
-        if (inboundIds) data.inboundIds = inboundIds;
-        await this.submit(`/panel/api/inbounds/addClient`, data, modal);
-      },
-      async updateClient(client, dbInboundId, clientId, inboundIds) {
+      // `modal` is the one whose loading spinner and close() the write drives, and
+      // it is optional: the only caller left is the per-membership enable switch,
+      // which is a control in a table row and has no modal of its own.
+      async updateClient(client, dbInboundId, clientId, inboundIds, modal) {
         const data = {
           id: dbInboundId,
           settings: '{"clients": [' + client.toString() + ']}',
         };
         if (inboundIds) data.inboundIds = inboundIds;
-        await this.submit(`/panel/api/inbounds/updateClient/${clientId}`, data, clientModal);
+        await this.submit(`/panel/api/inbounds/updateClient/${clientId}`, data, modal);
       },
       delClient(dbInboundId, client, confirmation = true) {
         dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);

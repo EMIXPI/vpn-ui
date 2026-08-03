@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = 無制限 (単位: GB)"
 "zeroNoExpiry" = "0 = 無期限"
 "sameProtocolRefused" = "1つのクライアントを l2tp、pptp、ikev2 のうち同じ種類のインバウンド2つに同時に登録することはできません。これらは1つのデーモンを共有しており、ログインがどのインバウンド宛てかを判別できないため、常に id の小さいインバウンドが処理します。"
+"denser" = "行間を詰める"
+"roomier" = "行間を広げる"
+"removeFromInbound" = "このインバウンドから外す"
+"removeFromInboundContent" = "このアカウントは、ほかに提供中のインバウンドではそのまま利用できます。"
+"bulkNoInbound" = "「インバウンド」タブでインバウンドを1つ以上選択してください。"
+"alreadyExpired" = "このアカウントはすでに期限切れです。新しい日数を入力すると期限を設定し直せます。欄をそのままにすると以前の期限が保持されます。"
+"summaryExpired" = "期限切れ"
+"credential" = "認証情報"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "なし"

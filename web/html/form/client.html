@@ -364,82 +364,13 @@
         <a-input-number v-model.number="client.reset" :min="0"></a-input-number>
     </a-form-item>
 
-    <!-- Which inbounds this ONE account is served on: same email, same allowance,
-         same expiry on each of them. Copied from the admin and reseller inbound
-         checklists (modals/admin_modal.html, modals/reseller_modal.html), down to
-         the select-all with its indeterminate state and the 180px scroll box.
-
-         Outside a-form-item on purpose, like the external-proxy rows below: this
-         form is label-col 8 / wrapper-col 14 inside antd's default 520px modal, so
-         a labelled checklist would be squeezed into 14/24 of it and its label would
-         run under the control.
-
-         membershipPicker is read from the hosting modal, not built here, because
-         form/client is ALSO rendered by the inbound modal through the protocol
-         forms. There it reports available:false: the inbound does not exist yet, so
-         there is nothing to be a member of. -->
-    <template v-if="membershipPicker.available && client.email">
-        <a-divider>
-            <a-tooltip>
-                <template slot="title">
-                    <span>{{ i18n "pages.inbounds.inboundMembershipDesc" }}</span>
-                </template>
-                {{ i18n "pages.inbounds.inboundMembership" }}
-                <a-icon type="question-circle"></a-icon>
-            </a-tooltip>
-        </a-divider>
-        <a-checkbox
-            :checked="membershipPicker.allChecked"
-            :indeterminate="membershipPicker.someChecked"
-            @change="membershipPicker.toggleAll"
-        >
-            <span :style="{ fontWeight: 500 }">{{ i18n "pages.inbounds.selectAllInbounds" }}</span>
-        </a-checkbox>
-        <a-divider :style="{ margin: '8px 0' }"></a-divider>
-        <div :style="{ maxHeight: '180px', overflowY: 'auto' }">
-            <!-- :value + @change rather than v-model: the group's own array is not
-                 the whole answer, since the inbound this form was opened from is
-                 always a member and the shared-daemon protocols allow only one
-                 inbound each. -->
-            <a-checkbox-group
-                :value="membershipPicker.selected"
-                @change="membershipPicker.change"
-                :style="{ width: '100%' }"
-            >
-                <a-row>
-                    <a-col
-                        :span="24"
-                        v-for="ib in membershipPicker.options"
-                        :key="ib.id"
-                    >
-                        <a-checkbox
-                            :value="ib.id"
-                            :disabled="membershipPicker.isLocked(ib)"
-                        >
-                            [[ ib.remark || ('#' + ib.id) ]]
-                            <a-tag :style="{ marginLeft: '4px' }">[[ ib.protocol ]]</a-tag>
-                            <span :style="{ color: '#8c8c8c' }">:[[ ib.port ]]</span>
-                            <span
-                                v-if="ib.id === membershipPicker.currentId"
-                                :style="{ color: '#8c8c8c' }"
-                            >
-                                ({{ i18n "pages.inbounds.membershipCurrentInbound" }})</span
-                            >
-                        </a-checkbox>
-                    </a-col>
-                </a-row>
-            </a-checkbox-group>
-        </div>
-        <!-- Shown only while something is actually blocked by it. The clashing rows
-             are disabled rather than refused after the click, and a disabled control
-             fires no mouse events, so the reason cannot live in a tooltip on them. -->
-        <div
-            v-if="membershipPicker.hasProtocolClash"
-            :style="{ color: '#8c8c8c', fontSize: '12px', marginTop: '8px' }"
-        >
-            {{ i18n "pages.inbounds.membershipSameProtocol" }}
-        </div>
-    </template>
+    <!-- An inbound-membership checklist used to sit here, for the form's other
+         host: the Clients page's edit modal. That modal is gone and memberships are
+         picked on the Clients page's own account form now
+         (modals/client_membership_modal.html), which is account-shaped rather than
+         inbound-shaped. What is left renders inside the INBOUND modal only, where
+         there is nothing to be a member of yet: the inbound is still being written
+         and has no id. -->
 
     <!-- GRE: the account's peer routers. Per CLIENT because each customer site has its
          own public address, and that address IS how the server tells peers apart (GRE

@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = không giới hạn (đơn vị: GB)"
 "zeroNoExpiry" = "0 = không hết hạn"
 "sameProtocolRefused" = "Một người dùng không thể thuộc hai đầu vào l2tp, pptp hoặc ikev2 cùng lúc. Các giao thức này dùng chung một tiến trình không cho biết lần đăng nhập thuộc về đầu vào nào, nên người dùng sẽ luôn được phục vụ bởi đầu vào có id nhỏ hơn."
+"denser" = "Hàng gọn hơn"
+"roomier" = "Hàng thoáng hơn"
+"removeFromInbound" = "Gỡ khỏi đầu vào này"
+"removeFromInboundContent" = "Tài khoản vẫn hoạt động trên mọi đầu vào khác đang phục vụ nó."
+"bulkNoInbound" = "Hãy chọn ít nhất một đầu vào ở thẻ Đầu vào."
+"alreadyExpired" = "Tài khoản này đã hết hạn. Nhập số ngày mới để đặt hạn mới; nếu không sửa ô này thì hạn cũ được giữ nguyên."
+"summaryExpired" = "Đã hết hạn"
+"credential" = "Thông tin đăng nhập"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Không bao giờ"

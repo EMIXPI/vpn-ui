@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = tanpa batas (satuan: GB)"
 "zeroNoExpiry" = "0 = tidak pernah kedaluwarsa"
 "sameProtocolRefused" = "Satu klien tidak dapat berada pada dua inbound l2tp, pptp atau ikev2 sekaligus. Protokol tersebut berbagi satu daemon yang tidak menyebutkan inbound mana yang menjadi tujuan login, sehingga klien selalu dilayani oleh inbound dengan id terkecil."
+"denser" = "Baris lebih rapat"
+"roomier" = "Baris lebih lega"
+"removeFromInbound" = "Hapus dari inbound ini"
+"removeFromInboundContent" = "Akun tetap berfungsi pada semua inbound lain yang melayaninya."
+"bulkNoInbound" = "Pilih setidaknya satu inbound pada tab Inbound."
+"alreadyExpired" = "Akun ini sudah kedaluwarsa. Masukkan jumlah hari baru untuk memberi tenggat baru; membiarkan kolom ini apa adanya mempertahankan tenggat lama."
+"summaryExpired" = "Kedaluwarsa"
+"credential" = "Kredensial"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Tidak Pernah"

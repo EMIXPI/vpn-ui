@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = безлимит (единица: ГБ)"
 "zeroNoExpiry" = "0 = без срока действия"
 "sameProtocolRefused" = "Клиент не может одновременно находиться в двух подключениях l2tp, pptp или ikev2. Эти протоколы используют общий демон, который не сообщает, к какому подключению относится вход, поэтому клиента всегда будет обслуживать подключение с меньшим id."
+"denser" = "Плотнее строки"
+"roomier" = "Просторнее строки"
+"removeFromInbound" = "Убрать из этого подключения"
+"removeFromInboundContent" = "Аккаунт продолжит работать во всех остальных подключениях, которые его обслуживают."
+"bulkNoInbound" = "Выберите хотя бы одно подключение на вкладке «Подключения»."
+"alreadyExpired" = "Срок действия аккаунта уже истёк. Введите новое количество дней, чтобы задать новый срок; если не трогать это поле, прежний срок сохранится."
+"summaryExpired" = "Истёк"
+"credential" = "Учётные данные"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Никогда"

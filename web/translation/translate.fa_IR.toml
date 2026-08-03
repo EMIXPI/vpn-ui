@@ -414,7 +414,6 @@
 "previewEmpty" = "This batch would create nothing. Check the count, or the first and last numbers."
 "bulkInboundHint" = "Every account in this batch is created on this inbound. Pick another from the Add Bulk menu to target a different one."
 "bulkCredentialsHint" = "The server mints each account its own credentials. Change them one at a time from the client list."
-"bulkSubIdHint" = "Leave empty for one subscription per account. A value here puts the whole batch on one."
 "bulkCommentHint" = "Added to every account in the batch."
 "usePickDate" = "Pick a date"
 "useDuration" = "Use a duration"
@@ -475,6 +474,14 @@
 "zeroUnlimited" = "0 = نامحدود (واحد: گیگابایت)"
 "zeroNoExpiry" = "0 = بدون انقضا"
 "sameProtocolRefused" = "یک کاربر نمی‌تواند هم‌زمان روی دو ورودی l2tp، pptp یا ikev2 باشد. این پروتکل‌ها از یک سرویس مشترک استفاده می‌کنند که مشخص نمی‌کند هر ورود به کدام ورودی تعلق دارد، بنابراین کاربر همیشه توسط ورودی با شناسه کوچک‌تر سرویس داده می‌شود."
+"denser" = "ردیف‌های فشرده‌تر"
+"roomier" = "ردیف‌های بازتر"
+"removeFromInbound" = "حذف از این ورودی"
+"removeFromInboundContent" = "این حساب روی بقیه ورودی‌هایی که به آن سرویس می‌دهند فعال می‌ماند."
+"bulkNoInbound" = "در تب ورودی‌ها دست‌کم یک ورودی انتخاب کنید."
+"alreadyExpired" = "این حساب منقضی شده است. برای تعیین مهلت تازه، تعداد روز جدیدی وارد کنید؛ اگر این فیلد را دست نزنید مهلت قبلی حفظ می‌شود."
+"summaryExpired" = "منقضی شده"
+"credential" = "اعتبارنامه"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "هرگز"

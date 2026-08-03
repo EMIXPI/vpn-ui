@@ -87,6 +87,29 @@ async function inject() {
    true`);
 }
 
+// Opens one account's row menu and clicks an item by its label.
+//
+// The row's five action buttons collapsed into a switch and one overflow menu,
+// so there is no `.anticon-edit` in the row to click any more. Driven for real
+// rather than by calling app.rowAction(): a menu that does not open is exactly
+// the regression worth catching, and an a-dropdown that lost :trigger="['click']"
+// would silently go back to opening on hover.
+async function rowMenu(email, label) {
+  await evalJs(`(() => {
+     const r = window.__rowFor(${JSON.stringify(email)});
+     const b = r && r.querySelector('.bo-lg-acts .ant-btn');
+     if (b) b.click();
+     return !!b;
+   })()`);
+  await wait(600);
+  return await evalJs(`(() => {
+     const menu = [...document.querySelectorAll('.ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item')];
+     const item = menu.find(i => new RegExp(${JSON.stringify(label)}, 'i').test(i.innerText || ''));
+     if (item) item.click();
+     return { opened: menu.length, clicked: !!item, items: menu.map(i => i.innerText.trim()) };
+   })()`);
+}
+
 // Ticks or unticks ONE inbound in the membership modal, addressed by inbound id.
 // Never by checkbox index: the modal lists every assignable inbound, not just the
 // account's, so an index picks a different inbound on any panel that has others.
@@ -315,42 +338,35 @@ async function main() {
         made ? 'memberships=' + made.n : 'missing');
 
   // ------------------------------------------------------------- row actions
-  await evalJs(`(() => {
-     const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     const b = r && r.querySelector('button .anticon-edit');
-     if (b) b.closest('button').click();
-     return true;
-   })()`);
+  await rowMenu(EMAIL, 'edit');
   await wait(1200);
-  open = await evalJs('window.__openModals()');
-  check('Edit opens the full client form', Array.isArray(open) && open.length > 0, JSON.stringify(open));
-  const inputs = await evalJs(`document.querySelectorAll('#client-modal input').length`);
-  check('the client form carries its protocol fields', inputs >= 3, 'inputs=' + inputs);
+  // ONE form for add and edit. There used to be a second, older one behind this
+  // button (modals/clientsModal), with the membership form behind the button
+  // beside it: two forms for one account, disagreeing about what a credential is.
+  const edit = await evalJs(`(() => ({
+     open: clientMembershipModal.visible, isEdit: clientMembershipModal.isEdit,
+     email: clientMembershipModal.client.email,
+     memberships: clientMembershipModal.selected.length,
+     legacy: !!document.querySelector('#client-modal'),
+   }))()`);
+  check('Edit opens the account form, prefilled',
+        edit && edit.open && edit.isEdit && edit.email === EMAIL && edit.memberships >= 1,
+        JSON.stringify(edit));
+  check('and the older client form is gone entirely', edit && edit.legacy === false,
+        JSON.stringify(edit));
   await evalJs('window.__closeAll()');
   await wait(600);
 
+  // The same switch the Inbounds list uses for an inbound, one level down.
   await evalJs(`(() => {
      const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     const b = r && r.querySelector('button .anticon-cluster');
-     if (b) b.closest('button').click();
-     return true;
-   })()`);
-  await wait(900);
-  open = await evalJs('window.__openModals()');
-  check('the Inbounds button opens the membership modal',
-        Array.isArray(open) && open.length > 0, JSON.stringify(open));
-  await evalJs('window.__closeAll()');
-  await wait(600);
-
-  await evalJs(`(() => {
-     const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     const b = r && r.querySelector('button .anticon-pause');
-     if (b) b.closest('button').click();
+     const sw = r && r.querySelector('.ant-switch');
+     if (sw) sw.click();
      return true;
    })()`);
   await wait(2500);
   const toggled = (await accounts()).find((a) => a.email === EMAIL);
-  check('the enable toggle reaches every membership', toggled && toggled.enable === false,
+  check('the enable switch reaches every membership', toggled && toggled.enable === false,
         toggled ? 'enable=' + toggled.enable : 'missing');
 
   // ------------------------------------------------- the per-inbound expansion
@@ -365,13 +381,20 @@ async function main() {
    })()`);
   await wait(1400);
   const inner = await evalJs(`(() => ({
-     rows: document.querySelectorAll('.ant-table-expanded-row .ant-table-tbody tr').length,
+     rows: document.querySelectorAll('.ant-table-expanded-row .bo-mb').length,
      icons: document.querySelectorAll('.ant-table-expanded-row .bo-client-actions .anticon').length,
+     creds: Array.from(document.querySelectorAll('.ant-table-expanded-row .bo-mb-cred-v'))
+       .map(e => (e.innerText || '').trim()).filter(Boolean),
    }))()`);
   check('expanding an account shows a block per inbound serving it',
         inner && inner.rows >= 2, JSON.stringify(inner));
   check('and each block carries that inbound\'s client action icons',
         inner && inner.icons > 0, JSON.stringify(inner));
+  // Per inbound because it IS per inbound: the same account is a uuid on vmess and
+  // a password on trojan, so one line on the row above could not say it.
+  check('and the credential that inbound authenticates on',
+        inner && inner.creds.length >= 2 && new Set(inner.creds).size >= 2,
+        JSON.stringify(inner.creds));
 
   // The account-level subscription icon: one URL covering every membership.
   const sub = await evalJs(`(async () => {
@@ -395,12 +418,7 @@ async function main() {
   const both = (await seededInboundIds()) || [];
   const drop = both[0];
 
-  await evalJs(`(() => {
-     const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     const b = r && r.querySelector('button .anticon-cluster');
-     if (b) b.closest('button').click();
-     return true;
-   })()`);
+  await rowMenu(EMAIL, 'edit');
   await wait(1000);
   // Untick the inbound the account's identity came from, so the write has to move
   // its anchor AND drop the membership it was anchored on.
@@ -421,12 +439,7 @@ async function main() {
   // whose id is lower than the one the account currently lives on.
   await goto('/panel/clients');
   await inject();
-  await evalJs(`(() => {
-     const r = window.__rowFor(${JSON.stringify(EMAIL)});
-     const b = r && r.querySelector('button .anticon-cluster');
-     if (b) b.closest('button').click();
-     return true;
-   })()`);
+  await rowMenu(EMAIL, 'edit');
   await wait(1000);
   await toggleMembership(drop);
   await wait(500);
@@ -487,40 +500,36 @@ async function main() {
   await goto('/panel/clients');
   await inject();
 
-  // The inbound is picked BEFORE the form opens, so the menu that picks it is part
-  // of the path: the form cannot build protocol credentials without one. An
-  // a-dropdown opens on hover, not on click, so this is a mouseenter.
-  const bulkMenu = await evalJs(`(async () => {
+  // The button opens the form directly - there is no inbound to pick first any
+  // more, because the form picks them itself on the same checklist the
+  // single-client form uses. Clicked for real: a menu that no longer exists is
+  // exactly the regression this catches.
+  const bulkOpen = await evalJs(`(async () => {
      const btn = Array.from(document.querySelectorAll('button'))
        .find(b => /add bulk/i.test(b.innerText || ''));
-     if (!btn) return { why: 'no Add Bulk button' };
-     const trigger = btn.closest('.ant-dropdown-trigger') || btn;
-     trigger.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+     if (!btn) return { ok: false, why: 'no Add Bulk button' };
+     btn.click();
      await new Promise(r => setTimeout(r, 1000));
-     const items = Array.from(document.querySelectorAll('.ant-dropdown-menu-item'))
-       .map(i => (i.innerText || '').trim()).filter(Boolean);
-     trigger.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
-     await new Promise(r => setTimeout(r, 500));
-     return { items, assignable: app.assignable.length };
+     return { ok: clientsBulkModal.visible, tab: clientsBulkModal.tab,
+              assignable: clientsBulkModal.assignable.length,
+              menu: document.querySelectorAll('.ant-dropdown-menu-item').length };
    })()`);
-  check('the Add Bulk menu offers every assignable inbound',
-        bulkMenu && (bulkMenu.items || []).length === bulkMenu.assignable
-          && bulkMenu.items.some((t) => t.includes(REMARKS[0])), JSON.stringify(bulkMenu));
+  check('Add Bulk opens its form with no inbound menu in the way',
+        bulkOpen && bulkOpen.ok && bulkOpen.tab === 'identity'
+          && bulkOpen.assignable > 0 && bulkOpen.menu === 0, JSON.stringify(bulkOpen));
 
-  // Opened the way the menu item opens it. Clicking through the overlay itself is
-  // left to the check above: an antd overlay is detached from the trigger and
-  // driving it by synthetic click is brittle in a way this form is not.
-  const bulkOpen = await evalJs(`(async () => {
-     const ib = app.assignable.find(a => a.remark === ${JSON.stringify(REMARKS[0])});
+  // The batch targets a SET, chosen in the form. One inbound is enough for the
+  // checks below; the multi-inbound case is what the membership form already
+  // covers, and the write path underneath is the same one.
+  const bulkPick = await evalJs(`(() => {
+     const ib = clientsBulkModal.assignable.find(a => a.remark === ${JSON.stringify(REMARKS[0])});
      if (!ib) return { ok: false, why: 'no seeded inbound' };
-     app.openAddBulkClient(ib.inboundId);
-     await new Promise(r => setTimeout(r, 900));
-     return { ok: clientsBulkModal.visible, target: clientsBulkModal.targetName,
-              protocol: clientsBulkModal.dbInbound.protocol };
+     clientsBulkModal.selected = [ib.inboundId];
+     return { ok: true, selected: clientsBulkModal.selected.length, protocol: ib.protocol };
    })()`);
-  check('Add Bulk opens its form on the chosen inbound',
-        bulkOpen && bulkOpen.ok && bulkOpen.target === REMARKS[0]
-          && bulkOpen.protocol === 'vmess', JSON.stringify(bulkOpen));
+  check('the bulk form targets the inbounds ticked in it',
+        bulkPick && bulkPick.ok && bulkPick.selected === 1
+          && bulkPick.protocol === 'vmess', JSON.stringify(bulkPick));
 
   // Polled rather than slept on: innerText is layout-dependent, so a pane sampled
   // during the modal's fade-in measures 0 and the check fails at random.
@@ -571,8 +580,7 @@ async function main() {
      return r ? r.innerText.replace(/\\s+/g, ' ').trim() : '';
    })()`);
   check('the bulk rail previews the batch before it exists',
-        typeof bulkRail === 'string' && /\b3\b/.test(bulkRail)
-          && bulkRail.includes(REMARKS[0]), JSON.stringify(bulkRail));
+        typeof bulkRail === 'string' && /\b3\b/.test(bulkRail), JSON.stringify(bulkRail));
 
   await evalJs(`(() => {
      const b = Array.from(document.querySelectorAll('#client-bulk-modal .ant-modal-footer button'))
@@ -591,9 +599,10 @@ async function main() {
   const clash = await evalJs(`(async () => {
      const ib = app.assignable.find(a => a.remark === ${JSON.stringify(REMARKS[0])});
      if (!ib) return { why: 'no seeded inbound' };
-     app.openAddBulkClient(ib.inboundId);
+     app.openBulkAdd();
      await new Promise(r => setTimeout(r, 800));
      const m = clientsBulkModal;
+     m.selected = [ib.inboundId];
      m.emailMethod = 4;
      m.emailPrefix = 'uitest-bulk-';
      m.firstNum = 1;
