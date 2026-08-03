@@ -678,6 +678,143 @@ func (s *InboundService) checkPPPUsernamesForDuplicates(protocol string, clients
 	return "", nil
 }
 
+// vpnLoginProtocols are the protocols whose client "id" is a LOGIN NAME: a value
+// the customer types into their client and the server authenticates them by.
+//
+// wg-c, awg, gre and mtproto are deliberately absent even though they also store an
+// "id". Nothing reads it for them (the identity is the email, and the credential is
+// a keypair or a secret), so it is not a login and folding it into this namespace
+// would refuse names nobody can log in with.
+var vpnLoginProtocols = []model.Protocol{
+	model.L2TP, model.PPTP, model.OPENVPN, model.OPENCONNECT,
+	model.SSTP, model.IKEV2, model.SSH,
+}
+
+func isVpnLoginProtocol(protocol model.Protocol) bool {
+	for _, p := range vpnLoginProtocols {
+		if protocol == p {
+			return true
+		}
+	}
+	return false
+}
+
+// loginKey normalises a login name for comparison, the same way accountKey
+// normalises an email. Authentication itself compares exactly, so this is STRICTER
+// than the wire: it refuses "Alice" against a stored "alice". That is deliberate.
+// Two accounts differing only in case are indistinguishable to the operator who has
+// to support them, and the email rule this is modelled on already works this way.
+func loginKey(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// getAllVpnLoginOwners maps every login name in use, panel-wide, to the set of
+// account emails currently using it.
+//
+// Panel-wide and cross-protocol, which is the whole point. It used to be scoped to
+// one protocol, because that is all the DATA PLANE strictly needs: l2tp/pptp/ikev2
+// share a daemon that sends a bare NAS-Identifier, so RadiusService.findClientInbound
+// resolves an account by username across a protocol's inbounds and takes the first
+// match. But "unique per protocol" is an implementation detail leaking into policy:
+// an operator does not think of a customer's login as belonging to l2tp, and two
+// customers sharing one name is a support problem whatever the protocols are.
+//
+// A set of emails per name, not one email, because MIGRATED data can legitimately
+// already contain a collision (a panel that predates this rule, or an import). The
+// caller forgives a name the posting account already holds, which is what keeps that
+// data editable while still refusing every NEW collision.
+func (s *InboundService) getAllVpnLoginOwners() (map[string]map[string]bool, error) {
+	db := database.GetDB()
+	var rows []struct {
+		Login string
+		Email string
+	}
+	protocols := make([]string, 0, len(vpnLoginProtocols))
+	for _, p := range vpnLoginProtocols {
+		protocols = append(protocols, string(p))
+	}
+	// COALESCE for the same reason as getAllPPPUsernames: `id` is omitempty, so an
+	// account stored without one yields NULL and a bare scan into a string dies,
+	// taking every add and edit of that protocol with it.
+	err := db.Raw(`
+		SELECT COALESCE(JSON_EXTRACT(client.value, '$.id'), '')   AS login,
+		       COALESCE(JSON_EXTRACT(client.value, '$.email'), '') AS email
+		FROM inbounds,
+			JSON_EACH(JSON_EXTRACT(inbounds.settings, '$.clients')) AS client
+		WHERE inbounds.protocol IN ?
+		`, protocols).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	owners := map[string]map[string]bool{}
+	for _, r := range rows {
+		key := loginKey(r.Login)
+		if key == "" {
+			continue
+		}
+		if owners[key] == nil {
+			owners[key] = map[string]bool{}
+		}
+		owners[key][accountKey(r.Email)] = true
+	}
+	return owners, nil
+}
+
+// findNewDuplicateLogin returns the first login name in clients that a DIFFERENT
+// account already answers to, panel-wide. Empty means the batch is clean.
+//
+// Two things count as taken, because RADIUS treats them as the same thing: another
+// account's login name, and another account's EMAIL. getClientPassword matches on
+// `client.ID == username || client.Email == username` (radius.go:764), so a login of
+// "bob@example.com" authenticates as whoever owns that email. Checking only the login
+// column would leave that door open.
+//
+// Only CHANGED names are held to the rule. A name the posting account already holds
+// passes, so re-saving an inbound works, and so does editing an account that a
+// migration left sharing a name with another one. New collisions are refused
+// outright; old ones are left for the operator to clean up deliberately.
+func (s *InboundService) findNewDuplicateLogin(clients []model.Client) (string, error) {
+	owners, err := s.getAllVpnLoginOwners()
+	if err != nil {
+		return "", err
+	}
+	emails, err := s.getAllEmailsExcludingInbound(0)
+	if err != nil {
+		return "", err
+	}
+	emailOwners := map[string]bool{}
+	for _, e := range emails {
+		if k := accountKey(e); k != "" {
+			emailOwners[k] = true
+		}
+	}
+
+	seen := map[string]string{} // login -> the email in THIS batch that claimed it
+	for _, client := range clients {
+		key := loginKey(client.ID)
+		if key == "" {
+			continue
+		}
+		mine := accountKey(client.Email)
+		// Inside the posted list a repeat is always wrong unless it is the same
+		// account twice, which one inbound cannot serve anyway.
+		if prev, dup := seen[key]; dup && prev != mine {
+			return client.ID, nil
+		}
+		seen[key] = mine
+		// Already stored against this account: unchanged, so not a new collision.
+		if owners[key][mine] {
+			continue
+		}
+		if len(owners[key]) > 0 {
+			return client.ID, nil
+		}
+		// A login that is somebody else's email would authenticate as them.
+		if key != mine && emailOwners[key] {
+			return client.ID, nil
+		}
+	}
+	return "", nil
+}
+
 // checkEmailsExistExcludingInbound returns the first email in clients that already
 // names another account, whether inside the batch itself or anywhere in the DB
 // outside ignoreInboundId.
@@ -1105,8 +1242,22 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		}
 	}
 
-	// Check for duplicate L2TP/PPTP/OpenVPN/SSTP usernames
-	if inbound.Protocol == "l2tp" || inbound.Protocol == "pptp" || inbound.Protocol == "openvpn" || inbound.Protocol == "sstp" || inbound.Protocol == "ikev2" || inbound.Protocol == "wg-c" || inbound.Protocol == "awg" || inbound.Protocol == "gre" || inbound.Protocol == "ssh" {
+	// A login name is unique PANEL-WIDE, exactly like an email. See
+	// findNewDuplicateLogin: the old check was per protocol, which is all the RADIUS
+	// demux strictly needs but is not a rule an operator can hold in their head, and
+	// it left openconnect out of the list entirely.
+	if isVpnLoginProtocol(inbound.Protocol) {
+		dupUser, err := s.findNewDuplicateLogin(clients)
+		if err != nil {
+			return inbound, false, err
+		}
+		if dupUser != "" {
+			return inbound, false, common.NewError("Duplicate username:", dupUser)
+		}
+	} else if inbound.Protocol == model.WGC || inbound.Protocol == model.AWG || inbound.Protocol == model.GRE {
+		// Their "id" is the email by convention and nothing authenticates by it, so
+		// they keep the narrow per-protocol check rather than joining the login
+		// namespace.
 		dupUser, err := s.checkPPPUsernamesForDuplicates(string(inbound.Protocol), clients)
 		if err != nil {
 			return inbound, false, err
@@ -1693,8 +1844,17 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		}
 	}
 
-	// Check for duplicate L2TP/PPTP/OpenVPN/SSTP usernames
-	if oldInbound.Protocol == "l2tp" || oldInbound.Protocol == "pptp" || oldInbound.Protocol == "openvpn" || oldInbound.Protocol == "sstp" || oldInbound.Protocol == "ikev2" || oldInbound.Protocol == "wg-c" || oldInbound.Protocol == "awg" || oldInbound.Protocol == "gre" || oldInbound.Protocol == "ssh" {
+	// Panel-wide login uniqueness; see findNewDuplicateLogin. Re-saving an inbound is
+	// safe because every name it already holds belongs to the account posting it.
+	if isVpnLoginProtocol(oldInbound.Protocol) {
+		dupUser, err := s.findNewDuplicateLogin(clients)
+		if err != nil {
+			return false, err
+		}
+		if dupUser != "" {
+			return false, common.NewError("Duplicate username:", dupUser)
+		}
+	} else if oldInbound.Protocol == model.WGC || oldInbound.Protocol == model.AWG || oldInbound.Protocol == model.GRE {
 		dupUser, err := s.checkPPPUsernamesForDuplicates(string(oldInbound.Protocol), clients)
 		if err != nil {
 			return false, err
@@ -2265,8 +2425,22 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		}
 	}
 
-	// Check for duplicate L2TP/PPTP/OpenVPN/SSTP usernames (allow keeping the same username)
-	if oldInbound.Protocol == "l2tp" || oldInbound.Protocol == "pptp" || oldInbound.Protocol == "openvpn" || oldInbound.Protocol == "sstp" || oldInbound.Protocol == "ikev2" || oldInbound.Protocol == "wg-c" || oldInbound.Protocol == "awg" || oldInbound.Protocol == "gre" || oldInbound.Protocol == "ssh" {
+	// Panel-wide login uniqueness on the single-client edit path (see
+	// findNewDuplicateLogin). The "did it actually change" gate stays: findNewDuplicateLogin
+	// already forgives a name the posting account holds, but an edit that renames an
+	// account whose OLD name was a migrated duplicate must not be refused for the name it
+	// is moving away from.
+	if isVpnLoginProtocol(oldInbound.Protocol) {
+		if loginKey(clients[0].ID) != loginKey(oldClients[clientIndex].ID) {
+			dupUser, err := s.findNewDuplicateLogin(clients)
+			if err != nil {
+				return false, err
+			}
+			if dupUser != "" {
+				return false, common.NewError("Duplicate username:", dupUser)
+			}
+		}
+	} else if oldInbound.Protocol == model.WGC || oldInbound.Protocol == model.AWG || oldInbound.Protocol == model.GRE {
 		oldUsername := oldClients[clientIndex].ID
 		newUsername := clients[0].ID
 		if newUsername != oldUsername {

@@ -730,6 +730,144 @@ func seedShadowsocksInbound(t *testing.T, port int, method string) *model.Inboun
 	return inbound
 }
 
+// A login name is unique PANEL-WIDE, like an email. The check used to be scoped to
+// one protocol, which is all the RADIUS demux strictly needs (l2tp/pptp/ikev2 share a
+// daemon that sends a bare NAS-Identifier, so findClientInbound resolves by username
+// across a protocol and takes the first match) but is not a rule anyone can hold in
+// their head: an operator does not think of a customer's login as belonging to l2tp.
+func TestLoginNameIsUniqueAcrossProtocols(t *testing.T) {
+	svc := &InboundService{}
+	newAccountsDB(t)
+	seedInboundWithClients(t, model.L2TP, 47101, []map[string]any{
+		{"id": "shareduser", "password": "pw1", "email": "a@example.com", "enable": true},
+	})
+	pptp := seedInboundWithClients(t, model.PPTP, 47102, []map[string]any{})
+
+	dup, err := svc.findNewDuplicateLogin([]model.Client{
+		{ID: "shareduser", Password: "pw2", Email: "b@example.com", Enable: true},
+	})
+	if err != nil {
+		t.Fatalf("findNewDuplicateLogin: %v", err)
+	}
+	if dup != "shareduser" {
+		t.Errorf("a login already used on another PROTOCOL was accepted (got %q)", dup)
+	}
+	_ = pptp
+
+	// Case differences do not make it a different name.
+	dup, _ = svc.findNewDuplicateLogin([]model.Client{
+		{ID: "SharedUser", Email: "c@example.com", Enable: true},
+	})
+	if dup == "" {
+		t.Error("a login differing only in case was accepted")
+	}
+	// A name nobody holds is fine.
+	dup, _ = svc.findNewDuplicateLogin([]model.Client{
+		{ID: "brandnew", Email: "d@example.com", Enable: true},
+	})
+	if dup != "" {
+		t.Errorf("a free login was refused: %q", dup)
+	}
+}
+
+// RADIUS matches `client.ID == username || client.Email == username`
+// (radius.go:764), so a login that equals somebody else's email authenticates as
+// them. The two are one namespace and the check has to treat them as one.
+func TestLoginNameCannotBeAnotherAccountsEmail(t *testing.T) {
+	svc := &InboundService{}
+	newAccountsDB(t)
+	seedInboundWithClients(t, model.VLESS, 47201, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "victim@example.com",
+			"enable": true},
+	})
+	seedInboundWithClients(t, model.L2TP, 47202, []map[string]any{})
+
+	dup, err := svc.findNewDuplicateLogin([]model.Client{
+		{ID: "victim@example.com", Password: "pw", Email: "attacker@example.com",
+			Enable: true},
+	})
+	if err != nil {
+		t.Fatalf("findNewDuplicateLogin: %v", err)
+	}
+	if dup == "" {
+		t.Error("a login equal to ANOTHER account's email was accepted: RADIUS would "+
+			"authenticate it as that account")
+	}
+	// An account may of course use its OWN email as its login.
+	dup, _ = svc.findNewDuplicateLogin([]model.Client{
+		{ID: "victim@example.com", Email: "victim@example.com", Enable: true},
+	})
+	if dup != "" {
+		t.Errorf("an account was refused its own email as a login: %q", dup)
+	}
+}
+
+// Migrated data can already hold a collision, from a panel that predates this rule
+// or an import. Those accounts must stay editable: only a name the posting account
+// does NOT already hold is a new collision.
+func TestExistingDuplicateLoginStaysEditable(t *testing.T) {
+	svc := &InboundService{}
+	newAccountsDB(t)
+	// The shape a migration leaves: one login on two accounts, on two protocols.
+	seedInboundWithClients(t, model.L2TP, 47301, []map[string]any{
+		{"id": "legacydup", "password": "pw1", "email": "old1@example.com", "enable": true},
+	})
+	seedInboundWithClients(t, model.PPTP, 47302, []map[string]any{
+		{"id": "legacydup", "password": "pw2", "email": "old2@example.com", "enable": true},
+	})
+
+	for _, email := range []string{"old1@example.com", "old2@example.com"} {
+		dup, err := svc.findNewDuplicateLogin([]model.Client{
+			{ID: "legacydup", Password: "pw", Email: email, Enable: true},
+		})
+		if err != nil {
+			t.Fatalf("findNewDuplicateLogin: %v", err)
+		}
+		if dup != "" {
+			t.Errorf("%s can no longer be edited: re-posting the login it already "+
+				"holds was refused as a duplicate", email)
+		}
+	}
+	// But a THIRD account still cannot take that name.
+	dup, _ := svc.findNewDuplicateLogin([]model.Client{
+		{ID: "legacydup", Email: "new@example.com", Enable: true},
+	})
+	if dup == "" {
+		t.Error("a new account was allowed to join an existing login collision")
+	}
+}
+
+// Two clients in ONE posted batch cannot share a login either.
+func TestDuplicateLoginWithinOneBatchIsRefused(t *testing.T) {
+	svc := &InboundService{}
+	newAccountsDB(t)
+	seedInboundWithClients(t, model.OPENCONNECT, 47401, []map[string]any{})
+	dup, err := svc.findNewDuplicateLogin([]model.Client{
+		{ID: "samename", Email: "one@example.com", Enable: true},
+		{ID: "samename", Email: "two@example.com", Enable: true},
+	})
+	if err != nil {
+		t.Fatalf("findNewDuplicateLogin: %v", err)
+	}
+	if dup != "samename" {
+		t.Errorf("two clients in one batch shared a login and it was accepted (got %q)", dup)
+	}
+}
+
+// openconnect was missing from the old guard list entirely, so its logins were never
+// checked at all. It is a login protocol like the rest.
+func TestOpenconnectIsALoginProtocol(t *testing.T) {
+	if !isVpnLoginProtocol(model.OPENCONNECT) {
+		t.Error("openconnect is not treated as a login protocol, so its usernames go unchecked")
+	}
+	for _, p := range []model.Protocol{model.WGC, model.AWG, model.GRE, model.MTPROTO} {
+		if isVpnLoginProtocol(p) {
+			t.Errorf("%s stores id=email and authenticates by neither; it must not join "+
+				"the login namespace", p)
+		}
+	}
+}
+
 // The exact sequence the E2E runs: disable the account through a single-inbound
 // write, then re-enable it through a write that DOES name the membership set. The
 // second write must actually re-enable it.
