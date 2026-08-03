@@ -85,6 +85,12 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/:id/copyClients", requirePerm(model.PermCreateClient), owns, a.copyInboundClients)
 	g.POST("/:id/delClient/:clientId", requirePerm(model.PermDeleteClient), owns, a.delInboundClient)
 	g.POST("/updateClient/:clientId", requirePerm(model.PermEditClient), a.updateInboundClient)
+	// Switch one account on or off on ONE inbound. Deliberately not a shape of
+	// updateClient: `enable` inside a posted client entry means the ACCOUNT's flag
+	// to every existing caller, so the per-inbound intent needs its own route or it
+	// cannot be told apart. Same guards as any other client edit, plus `owns` because
+	// the inbound being changed is the one in the path.
+	g.POST("/:id/setMembershipEnable/:email", requirePerm(model.PermEditClient), owns, ownsClient, a.setMembershipEnable)
 	g.POST("/bulkUpdateClients", requirePerm(model.PermBulkOperation), a.bulkUpdateClients)
 	g.POST("/bulkPreview", requirePerm(model.PermBulkOperation), a.bulkPreview)
 	// ownsClient as well as owns: the service resolves this one by :email and ignores
@@ -975,22 +981,33 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 	// first, so the accounts exist for it to project. Without this the Clients
 	// page's bulk-add form could offer a checklist whose extra inbounds were
 	// silently dropped.
+	// The inbounds the projection actually rewrote. A write naming ONE inbound still
+	// re-projects the account onto every inbound serving it (the account-wide fields
+	// it just changed have to reach all of them), so the reconcile below has to cover
+	// those too or a daemon keeps serving the settings JSON it no longer matches.
+	var projected []int
 	if emails := postedClientEmails(data); len(emails) > 1 {
 		a.syncInboundAccounts(data.Id)
 		if membershipsExplicit {
 			for _, email := range emails {
-				if _, merr := a.applyClientMemberships(c, email, membershipIds, membershipsExplicit); merr != nil {
+				touched, merr := a.applyClientMemberships(c, email, membershipIds, membershipsExplicit)
+				if merr != nil {
 					logger.Warning("applying client memberships for ", email, ": ", merr)
 				}
+				projected = unionInboundIds(projected, touched)
 			}
 		}
-	} else if _, merr := a.applyClientMemberships(c, postedClientEmail(data), membershipIds, membershipsExplicit); merr != nil {
-		logger.Warning("applying client memberships: ", merr)
+	} else {
+		touched, merr := a.applyClientMemberships(c, postedClientEmail(data), membershipIds, membershipsExplicit)
+		if merr != nil {
+			logger.Warning("applying client memberships: ", merr)
+		}
+		projected = unionInboundIds(projected, touched)
 	}
 
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientAddSuccess"), nil)
 
-	a.reconcileForInbounds(membershipIds, needRestart)
+	a.reconcileForInbounds(unionInboundIds(membershipIds, projected), needRestart)
 }
 
 // copyInboundClients copies clients from source inbound to target inbound.
@@ -1182,7 +1199,8 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 	if perr != nil {
 		logger.Warning("reading previous memberships: ", perr)
 	}
-	if _, merr := a.applyClientMemberships(c, email, membershipIds, membershipsExplicit); merr != nil {
+	projected, merr := a.applyClientMemberships(c, email, membershipIds, membershipsExplicit)
+	if merr != nil {
 		logger.Warning("applying client memberships: ", merr)
 	}
 
@@ -1191,7 +1209,7 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 	// Reconcile the inbounds it is on now AND the ones it was just removed from:
 	// a dropped membership has to rewrite that daemon's config too, or the account
 	// keeps working there until something else happens to trigger a regeneration.
-	a.reconcileForInbounds(unionInboundIds(membershipIds, previous), needRestart)
+	a.reconcileForInbounds(unionInboundIds(unionInboundIds(membershipIds, previous), projected), needRestart)
 }
 
 // unionInboundIds merges two id lists, preserving order and dropping duplicates.
@@ -1425,6 +1443,42 @@ func (a *InboundController) resetClientTraffic(c *gin.Context) {
 	a.onAwgClientChanged()
 	a.onMtprotoClientChanged()
 	a.onSshClientChanged()
+}
+
+// setMembershipEnable switches one account on or off on ONE inbound, leaving every
+// other inbound it is served on untouched.
+//
+// This is what the Clients page's per-inbound switch posts to. It used to post an
+// ordinary client update carrying enable:false, which is the ACCOUNT's flag: RADIUS
+// reads it panel-wide through client_traffics and so does the rbridge sweep, so a
+// control documented as taking the account off one inbound took the customer off
+// all of them, and left the other memberships' stored entries still reading
+// enable:true so the page showed them as serving.
+func (a *InboundController) setMembershipEnable(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	email := c.Param("email")
+	var body struct {
+		Enable bool `form:"enable" json:"enable"`
+	}
+	if err := c.ShouldBind(&body); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+
+	touched, err := accountService.SetMembershipEnable(email, id, body.Enable)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientUpdateSuccess"), nil)
+	// Only this inbound's entry can have changed, but the reconcile goes through the
+	// same fan-out as every other client write so a protocol is never left holding a
+	// config the settings JSON no longer agrees with.
+	a.reconcileForInbounds(unionInboundIds([]int{id}, touched), true)
 }
 
 // resetAllTraffics resets all traffic counters across all inbounds.

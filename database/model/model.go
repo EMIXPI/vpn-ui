@@ -605,6 +605,25 @@ type AccountInbound struct {
 	// Empty means "whatever the account/protocol default is".
 	Flow string `json:"flow" gorm:"column:flow"`
 
+	// Enable is "is this account served on THIS inbound", which is a different
+	// question from Account.Enable ("is this account live at all"). The projection
+	// renders the AND of the two, so an account switched off here stops being served
+	// on this inbound and keeps working on every other one.
+	//
+	// This column is what makes the Clients page's per-inbound switch honest. It used
+	// to write Account.Enable, which is panel-wide: RADIUS reads it through
+	// client_traffics (radius.go:769) and so does the rbridge sweep (radius.go:701),
+	// so a switch documented as "takes the account off ONE inbound and leaves the rest
+	// serving it" took the customer off ALL of them, while the other memberships'
+	// stored entries were left reading enable:true so the page showed them as fine.
+	//
+	// A POINTER for the same reason Slot is one: every row that predates this column
+	// is NULL, and NULL has to mean "served", not "switched off". A plain bool with
+	// `default:true` is the trap that already cost this table one whole migration:
+	// GORM treats Go's false as unset and writes the default over it, so a membership
+	// the operator disabled would come back enabled on the next save.
+	Enable *bool `json:"enable" gorm:"column:enable"`
+
 	// Extra is the VERBATIM client entry this membership was migrated from, minus
 	// nothing: the whole original JSON object. The projection starts from it and
 	// overlays only the keys the account layer owns, so any field neither Account

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/mhsanaei/3x-ui/v2/database"
@@ -161,21 +163,152 @@ func TestMergeKeepSet(t *testing.T) {
 	}
 }
 
-// A single-inbound request must behave exactly as before. This is what protects
-// every existing caller (the Telegram bot, bulk ops, external scripts) on upgrade.
-func TestApplyMembershipsSingleInboundIsInert(t *testing.T) {
+// A single-inbound request must not change the membership SET. That is what
+// protects every existing caller (the Telegram bot, bulk ops, external scripts) on
+// upgrade: they name one inbound and mean one inbound, and an account they have
+// never heard of must not be taken off the others.
+//
+// It does NOT mean the request is inert. See
+// TestSingleInboundWriteReprojectsEveryMembership for the half that has to happen.
+func TestApplyMembershipsSingleInboundKeepsTheMembershipSet(t *testing.T) {
 	svc := newAccountsDB(t)
-	inbound := seedInboundWithClients(t, model.VLESS, 46301, []map[string]any{
+	vless := seedInboundWithClients(t, model.VLESS, 46301, []map[string]any{
 		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
 	})
+	trojan := seedInboundWithClients(t, model.Trojan, 46302, []map[string]any{
+		{"password": "pw-bob", "email": "bob@example.com", "enable": true},
+	})
 	svc.MigrationAccounts()
-	before := snapshotUntouchedTables(t)
+	before := len(membershipsInDB(t))
 
-	if _, err := svc.ApplyMemberships("bob@example.com", []int{inbound.Id}, nil, false); err != nil {
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id}, nil, false); err != nil {
 		t.Fatalf("ApplyMemberships: %v", err)
 	}
 
-	assertAdditiveOnly(t, before)
+	after := membershipsInDB(t)
+	if len(after) != before {
+		t.Fatalf("a single-inbound write changed the membership count: %d -> %d", before, len(after))
+	}
+	on := map[int]bool{}
+	for _, m := range after {
+		on[m.InboundId] = true
+	}
+	if !on[vless.Id] || !on[trojan.Id] {
+		t.Errorf("a single-inbound write dropped a membership: still on %v, want both %d and %d",
+			on, vless.Id, trojan.Id)
+	}
+}
+
+// The other half, and the bug this closes: a write naming ONE inbound already
+// changes the SHARED account row (the mirror lifts the edited entry into it), so it
+// has to be pushed back out to every membership. Returning before the projection
+// left the account row saying one thing and 17 of an account's 18 inbounds saying
+// another, with every enforcement path reading the stale per-inbound copies.
+func TestSingleInboundWriteReprojectsEveryMembership(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46311, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com",
+			"enable": true, "totalGB": 0},
+	})
+	trojan := seedInboundWithClients(t, model.Trojan, 46312, []map[string]any{
+		{"password": "pw-bob", "email": "bob@example.com", "enable": true, "totalGB": 0},
+	})
+	svc.MigrationAccounts()
+
+	// The legacy shape: rewrite ONE inbound's entry with a new quota and a disable,
+	// then run the single-inbound path over it exactly as the controller does.
+	writeClients(t, vless.Id, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com",
+			"enable": false, "totalGB": 5368709120},
+	})
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id}, nil, false); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+
+	for _, id := range []int{vless.Id, trojan.Id} {
+		entry := clientEntry(t, id, "bob@example.com")
+		if entry == nil {
+			t.Fatalf("inbound %d lost the account entirely", id)
+		}
+		if entry["enable"] != false {
+			t.Errorf("inbound %d reads enable=%v, want false: the account row was "+
+				"disabled and this membership was left serving", id, entry["enable"])
+		}
+		if got, _ := entry["totalGB"].(float64); int64(got) != 5368709120 {
+			t.Errorf("inbound %d reads totalGB=%v, want the account's 5368709120", id, entry["totalGB"])
+		}
+	}
+}
+
+// The per-inbound switch has to be per-inbound. Its own flag, ANDed with the
+// account's, so one membership goes dark and the rest keep serving.
+func TestMembershipEnableIsPerInbound(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46321, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	trojan := seedInboundWithClients(t, model.Trojan, 46322, []map[string]any{
+		{"password": "pw-bob", "email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+
+	if _, err := svc.SetMembershipEnable("bob@example.com", vless.Id, false); err != nil {
+		t.Fatalf("SetMembershipEnable: %v", err)
+	}
+
+	if got := clientEntry(t, vless.Id, "bob@example.com")["enable"]; got != false {
+		t.Errorf("the switched-off membership reads enable=%v, want false", got)
+	}
+	if got := clientEntry(t, trojan.Id, "bob@example.com")["enable"]; got != true {
+		t.Errorf("the OTHER membership reads enable=%v, want true: switching one inbound "+
+			"off must leave the rest serving", got)
+	}
+	// And the account itself is untouched, which is what stops client_traffics (and
+	// so RADIUS and the rbridge sweep) from cutting the customer off panel-wide.
+	accounts := accountsInDB(t)
+	if len(accounts) != 1 || !accounts[0].Enable {
+		t.Errorf("account enable = %v, want true: a per-inbound switch must not "+
+			"lower the account-wide flag", accounts)
+	}
+
+	// Switching it back on restores that membership and nothing else.
+	if _, err := svc.SetMembershipEnable("bob@example.com", vless.Id, true); err != nil {
+		t.Fatalf("SetMembershipEnable back on: %v", err)
+	}
+	if got := clientEntry(t, vless.Id, "bob@example.com")["enable"]; got != true {
+		t.Errorf("re-enabled membership reads enable=%v, want true", got)
+	}
+}
+
+// A disabled membership renders enable:false into that inbound's settings. The
+// mirror must not read that back as an account-wide disable, or the next write
+// touching that inbound would take every other membership down with it.
+func TestDisabledMembershipDoesNotLowerTheAccount(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46331, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	trojan := seedInboundWithClients(t, model.Trojan, 46332, []map[string]any{
+		{"password": "pw-bob", "email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+	if _, err := svc.SetMembershipEnable("bob@example.com", vless.Id, false); err != nil {
+		t.Fatalf("SetMembershipEnable: %v", err)
+	}
+
+	// Any later write that syncs the disabled inbound: the entry says false, and the
+	// reason is the membership, not the account.
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id}, nil, false); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+
+	accounts := accountsInDB(t)
+	if len(accounts) != 1 || !accounts[0].Enable {
+		t.Fatalf("the account was disabled by re-syncing an inbound it is switched off on: %+v", accounts)
+	}
+	if got := clientEntry(t, trojan.Id, "bob@example.com")["enable"]; got != true {
+		t.Errorf("the other membership reads enable=%v, want true", got)
+	}
 }
 
 // Two l2tp inbounds share one daemon that sends a bare "l2tp" NAS-Identifier, so
@@ -441,4 +574,260 @@ func TestDeletingAnInboundPrunesAccountsLeftWithNothing(t *testing.T) {
 		t.Error("an account still served on another inbound was pruned")
 	}
 	_ = keep
+}
+
+// An account holds ONE password, shared with trojan, anytls, naive and every
+// credential VPN. shadowsocks-2022 is the one protocol that cannot take it: its PSK
+// must be base64 of exactly the cipher's key length. So an account that already had
+// a password and then joined a 2022 inbound was projected with a key that cipher
+// refuses, and could never connect there.
+func TestShadowsocks2022MembershipGetsAUsableKey(t *testing.T) {
+	svc := newAccountsDB(t)
+	// openvpn first, so the account's password is a dashless uuid: 32 characters
+	// that happen to be legal base64 and decode to 24 bytes, not the 32 this cipher
+	// needs. Exactly the shape that made the failure invisible.
+	ovpn := seedInboundWithClients(t, model.OPENVPN, 46341, []map[string]any{
+		{"id": "bob-login", "password": "0123456789abcdef0123456789abcdef",
+			"email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+
+	ss := seedShadowsocksInbound(t, 46342, "2022-blake3-aes-256-gcm")
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{ovpn.Id, ss.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+
+	entry := clientEntry(t, ss.Id, "bob@example.com")
+	if entry == nil {
+		t.Fatal("the account was not projected onto the shadowsocks inbound")
+	}
+	psk, _ := entry["password"].(string)
+	raw, err := base64.StdEncoding.DecodeString(psk)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("projected PSK %q is not base64 of 32 bytes (err=%v, len=%d): that "+
+			"account cannot connect on a 2022-blake3-aes-256-gcm inbound", psk, err, len(raw))
+	}
+	// And the shared account password is untouched, so openvpn still authenticates.
+	accounts := accountsInDB(t)
+	if len(accounts) != 1 || accounts[0].Password != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("the account password was rotated to the shadowsocks PSK: %+v", accounts)
+	}
+	if got, _ := clientEntry(t, ovpn.Id, "bob@example.com")["password"].(string); got != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("openvpn password = %q, want the account's own", got)
+	}
+
+	// Re-projecting must not churn the PSK: a rotating credential would break the
+	// client config the customer already installed.
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{ovpn.Id, ss.Id}, nil, true); err != nil {
+		t.Fatalf("second ApplyMemberships: %v", err)
+	}
+	if got, _ := clientEntry(t, ss.Id, "bob@example.com")["password"].(string); got != psk {
+		t.Errorf("the PSK changed on re-projection: %q -> %q", psk, got)
+	}
+}
+
+// A non-2022 cipher takes any string, so it keeps sharing the account password.
+func TestShadowsocksLegacyMethodKeepsTheSharedPassword(t *testing.T) {
+	svc := newAccountsDB(t)
+	ovpn := seedInboundWithClients(t, model.OPENVPN, 46351, []map[string]any{
+		{"id": "bob-login", "password": "0123456789abcdef0123456789abcdef",
+			"email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+	ss := seedShadowsocksInbound(t, 46352, "aes-256-gcm")
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{ovpn.Id, ss.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+	if got, _ := clientEntry(t, ss.Id, "bob@example.com")["password"].(string); got != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("legacy-cipher shadowsocks password = %q, want the shared account password", got)
+	}
+}
+
+// MTProto's three transports are per-CLIENT booleans the accounts layer does not
+// model. A membership created by ticking an inbound has no entry to inherit them
+// from, so all three arrived false: an account that exists, is listed, and cannot
+// connect in any transport.
+func TestMtprotoMembershipGetsItsModes(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 46361, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+	mt := seedInboundWithClients(t, model.MTPROTO, 46362, []map[string]any{})
+
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id, mt.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+
+	entry := clientEntry(t, mt.Id, "bob@example.com")
+	if entry == nil {
+		t.Fatal("the account was not projected onto the mtproto inbound")
+	}
+	for _, mode := range []string{"modeClassic", "modeSecure", "modeTls"} {
+		if entry[mode] != true {
+			t.Errorf("%s = %v, want true: a new mtproto membership with every mode off "+
+				"cannot connect in any transport", mode, entry[mode])
+		}
+	}
+	if entry["secret"] == nil || entry["secret"] == "" {
+		t.Errorf("no secret minted for the mtproto membership: %v", entry["secret"])
+	}
+	// An operator turning a mode off must stick: the defaults are for a BRAND NEW
+	// membership, never re-applied over a stored choice.
+	entry["modeTls"] = false
+	writeClients(t, mt.Id, []map[string]any{entry})
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id, mt.Id}, nil, true); err != nil {
+		t.Fatalf("second ApplyMemberships: %v", err)
+	}
+	if got := clientEntry(t, mt.Id, "bob@example.com")["modeTls"]; got != false {
+		t.Errorf("modeTls = %v after re-projection, want the operator's false to stick", got)
+	}
+}
+
+// writeClients replaces an inbound's stored clients array, which is how a legacy
+// caller that bypasses the accounts layer leaves the settings JSON.
+func writeClients(t *testing.T, inboundId int, clients []map[string]any) {
+	t.Helper()
+	settings, err := json.Marshal(map[string]any{"clients": clients})
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", inboundId).
+		Update("settings", string(settings)).Error; err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+}
+
+// clientEntry reads one account's stored entry on one inbound, as the raw JSON the
+// enforcement paths parse rather than as a struct with defaults filled in.
+func clientEntry(t *testing.T, inboundId int, email string) map[string]any {
+	t.Helper()
+	for _, entry := range readClients(t, inboundId) {
+		if got, _ := entry["email"].(string); got == email {
+			return entry
+		}
+	}
+	return nil
+}
+
+// seedShadowsocksInbound makes an empty shadowsocks inbound with a chosen cipher,
+// which is the field that decides whether its per-user password is free text.
+func seedShadowsocksInbound(t *testing.T, port int, method string) *model.Inbound {
+	t.Helper()
+	settings, err := json.Marshal(map[string]any{
+		"clients": []map[string]any{}, "method": method, "network": "tcp,udp",
+	})
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	inbound := &model.Inbound{
+		UserId: 1, Tag: "ss-inbound", Port: port,
+		Protocol: model.Shadowsocks, Enable: true, Settings: string(settings),
+	}
+	if err := database.GetDB().Create(inbound).Error; err != nil {
+		t.Fatalf("create inbound: %v", err)
+	}
+	return inbound
+}
+
+// The exact sequence the E2E runs: disable the account through a single-inbound
+// write, then re-enable it through a write that DOES name the membership set. The
+// second write must actually re-enable it.
+func TestReEnableAfterSingleInboundDisable(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 47501, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	trojan := seedInboundWithClients(t, model.Trojan, 47502, []map[string]any{
+		{"password": "pw-bob", "email": "bob@example.com", "enable": true},
+	})
+	svc.MigrationAccounts()
+	ids := []int{vless.Id, trojan.Id}
+
+	// 1. disable through a single-inbound write (no membership set named).
+	writeClients(t, vless.Id, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": false},
+	})
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id}, nil, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	for _, id := range ids {
+		if got := clientEntry(t, id, "bob@example.com")["enable"]; got != false {
+			t.Fatalf("setup: inbound %d reads enable=%v, want false", id, got)
+		}
+	}
+
+	// 2. re-enable, naming the whole membership set.
+	writeClients(t, vless.Id, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	if _, err := svc.ApplyMemberships("bob@example.com", ids, nil, true); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+
+	accounts := accountsInDB(t)
+	if len(accounts) != 1 || !accounts[0].Enable {
+		t.Errorf("the account is still disabled after a re-enable naming every membership: %+v", accounts)
+	}
+	for _, id := range ids {
+		if got := clientEntry(t, id, "bob@example.com")["enable"]; got != true {
+			t.Errorf("inbound %d still reads enable=%v after the re-enable", id, got)
+		}
+	}
+}
+
+// The E2E shape, reproduced: an account on MANY inbounds, put through a
+// disable/re-enable cycle, and only then switched off on ONE membership. The
+// two-inbound version of this passes, so whatever breaks needs the fuller sequence.
+func TestMembershipEnableAfterAnEnableCycle(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 47601, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	ids := []int{vless.Id}
+	for i, proto := range []model.Protocol{model.Trojan, model.ANYTLS, model.VMESS,
+		model.L2TP, model.PPTP} {
+		ib := seedInboundWithClients(t, proto, 47602+i, []map[string]any{})
+		ids = append(ids, ib.Id)
+	}
+	svc.MigrationAccounts()
+	if _, err := svc.ApplyMemberships("bob@example.com", ids, nil, true); err != nil {
+		t.Fatalf("spread: %v", err)
+	}
+
+	// disable through a single-inbound write, then re-enable naming the whole set
+	writeClients(t, vless.Id, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": false},
+	})
+	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id}, nil, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	writeClients(t, vless.Id, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	if _, err := svc.ApplyMemberships("bob@example.com", ids, nil, true); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	for _, id := range ids {
+		if got := clientEntry(t, id, "bob@example.com")["enable"]; got != true {
+			t.Fatalf("precondition: inbound %d reads enable=%v after the re-enable", id, got)
+		}
+	}
+
+	// now the per-membership switch on ONE of them
+	if _, err := svc.SetMembershipEnable("bob@example.com", vless.Id, false); err != nil {
+		t.Fatalf("SetMembershipEnable: %v", err)
+	}
+	off := []int{}
+	for _, id := range ids {
+		if clientEntry(t, id, "bob@example.com")["enable"] != true {
+			off = append(off, id)
+		}
+	}
+	if len(off) != 1 || off[0] != vless.Id {
+		t.Errorf("switching inbound %d off disabled %v, want exactly [%d]", vless.Id, off, vless.Id)
+	}
+	if a := accountsInDB(t); len(a) != 1 || !a[0].Enable {
+		t.Errorf("the account flag was lowered by a per-membership switch: %+v", a)
+	}
 }

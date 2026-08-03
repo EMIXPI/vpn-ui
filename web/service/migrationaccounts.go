@@ -418,7 +418,7 @@ func (s *AccountService) verifyAccountsPass(tx *gorm.DB, report *AccountsMigrati
 				continue
 			}
 
-			rendered := renderClientEntry(account, membership, inbound.Protocol, entry)
+			rendered := renderClientEntry(account, membership, inbound, entry)
 			if !projectionRoundTrips(entry, rendered, listIndex) {
 				return fmt.Errorf("verification failed: projection does not round-trip for inbound %d client %q\n  stored:   %s\n  rendered: %s",
 					inbound.Id, email, compactJSON(entry), compactJSON(rendered))

@@ -53,14 +53,51 @@ var accountOwnedKeys = []string{
 //
 // The mapping mirrors buildTargetClientFromSource's switch, which is the tested
 // answer to "what credential does protocol P need". Keep the two in step.
-func applyAccountCredential(entry map[string]any, account *model.Account, protocol model.Protocol) {
-	switch protocol {
+func applyAccountCredential(entry map[string]any, account *model.Account, inbound *model.Inbound) {
+	switch inbound.Protocol {
 	case model.VMESS:
 		entry["id"] = account.UUID
 		entry["security"] = account.Security
 	case model.VLESS:
 		entry["id"] = account.UUID
-	case model.Trojan, model.Shadowsocks, model.ANYTLS:
+	case model.Trojan, model.ANYTLS:
+		entry["password"] = account.Password
+	case model.Shadowsocks:
+		// The one protocol whose password is not free text. A 2022-blake3 cipher
+		// takes a PSK that must be base64 of EXACTLY its key length, and the account
+		// holds ONE password shared with trojan, anytls, naive and every credential
+		// VPN. So an account that already had a password (a dashless uuid, say, from
+		// joining an openvpn inbound) and then joined a 2022 inbound was projected
+		// with a PSK that cipher cannot use: created, listed, and unable to connect
+		// there, forever.
+		//
+		// Resolved per MEMBERSHIP, in three steps, because the account column cannot
+		// be rewritten without changing the password of every other protocol on it:
+		//
+		//  1. an entry that already carries a password KEEPS it. That is what makes
+		//     the minted PSK below stable across re-projections, and it is also what
+		//     keeps the migration's round-trip check green: rendering a stored entry
+		//     must reproduce it, and minting here would fail every stored ss entry
+		//     and roll the whole migration back.
+		//  2. otherwise the account's own password is used when it happens to be a
+		//     legal PSK for this cipher, which is the shadowsocks-first case and
+		//     keeps it byte-identical to before.
+		//  3. otherwise a fresh PSK of the right length is minted for this membership
+		//     alone.
+		//
+		// Non-2022 ciphers take any string, so they keep sharing the account
+		// password exactly as before.
+		if key := shadowsocksKeySize(inbound); key > 0 {
+			if current, ok := entry["password"].(string); ok && current != "" {
+				break
+			}
+			if validShadowsocksKey(account.Password, key) {
+				entry["password"] = account.Password
+			} else {
+				entry["password"] = shadowsocksUserKey(inbound)
+			}
+			break
+		}
 		entry["password"] = account.Password
 	case model.NAIVE:
 		entry["password"] = account.Password
@@ -125,9 +162,19 @@ func preserveOrDefaultID(entry map[string]any, email string) {
 	entry["id"] = email
 }
 
+// MembershipEnabled reports whether a membership is switched on. A nil Enable is
+// every row written before the column existed, and those are all serving.
+func MembershipEnabled(membership *model.AccountInbound) bool {
+	return membership == nil || membership.Enable == nil || *membership.Enable
+}
+
 // renderClientEntry produces the settings.clients entry for one membership,
 // starting from whatever that entry already was.
-func renderClientEntry(account *model.Account, membership *model.AccountInbound, protocol model.Protocol, existing map[string]any) map[string]any {
+//
+// Takes the whole inbound rather than just its protocol because shadowsocks'
+// credential depends on the inbound's cipher, not only on the protocol name.
+func renderClientEntry(account *model.Account, membership *model.AccountInbound, inbound *model.Inbound, existing map[string]any) map[string]any {
+	protocol := inbound.Protocol
 	entry := map[string]any{}
 	// Prefer the live entry we are updating; fall back to the membership's stored
 	// copy (which is what a re-created inbound or a fresh projection has).
@@ -146,13 +193,18 @@ func renderClientEntry(account *model.Account, membership *model.AccountInbound,
 	entry["subId"] = account.SubID
 	entry["totalGB"] = account.TotalGB
 	entry["expiryTime"] = account.ExpiryTime
-	entry["enable"] = account.Enable
+	// The AND of the two questions the two flags answer: is this account live at
+	// all, and is it served on THIS inbound. Both have to say yes, and either one
+	// saying no has to reach the entry, because every enforcement path downstream
+	// reads exactly this per-inbound field (radius.go:765, wgc.go:400, gre.go:403,
+	// ssh.go:125, mtproto.go:629, and the core's own per-inbound user list).
+	entry["enable"] = account.Enable && MembershipEnabled(membership)
 	entry["reset"] = account.Reset
 	entry["limitIp"] = account.LimitIP
 	entry["tgId"] = account.TgID
 	entry["comment"] = account.Comment
 
-	applyAccountCredential(entry, account, protocol)
+	applyAccountCredential(entry, account, inbound)
 
 	// vless carries a per-membership flow override; every other protocol leaves
 	// whatever the entry already had.
@@ -200,12 +252,12 @@ func projectAccountOntoInbound(inbound *model.Inbound, account *model.Account, m
 		if accountKey(email) != key {
 			continue
 		}
-		list[i] = renderClientEntry(account, membership, inbound.Protocol, existing)
+		list[i] = renderClientEntry(account, membership, inbound, existing)
 		found = true
 		break
 	}
 	if !found {
-		fresh := renderClientEntry(account, membership, inbound.Protocol, nil)
+		fresh := renderClientEntry(account, membership, inbound, nil)
 		// Stamp the timestamps the legacy add path sets, so an account that joined
 		// an inbound through a membership is not distinguishable in the client table
 		// from one added directly (the panel renders a creation date from these, and
@@ -222,6 +274,7 @@ func projectAccountOntoInbound(inbound *model.Inbound, account *model.Account, m
 			fresh["created_at"] = now
 		}
 		fresh["updated_at"] = now
+		seedProtocolDefaults(fresh, inbound.Protocol)
 		list = append(list, fresh)
 	}
 
@@ -231,6 +284,46 @@ func projectAccountOntoInbound(inbound *model.Inbound, account *model.Account, m
 		return "", err
 	}
 	return string(out), nil
+}
+
+// seedProtocolDefaults fills in the per-protocol fields a BRAND NEW membership has
+// nowhere to inherit, for the protocols where an absent field does not mean "the
+// default" but "switched off".
+//
+// The accounts layer models only what every protocol shares (identity, credential,
+// quota, expiry, enable). Everything else rides in the passed-through part of the
+// entry, which works because a membership normally starts from a real client entry
+// somebody filled in. A membership created by ticking an inbound on the Clients
+// page has no such entry, so those fields are simply absent.
+//
+// For most protocols absent is harmless: a missing vless `flow` is the protocol
+// default, a missing naive `username` falls back to the email. MTProto is the one
+// where it is fatal. Its three transports are per-client booleans, and absent
+// decodes to false for all three, so the account was created, appeared on the
+// inbound, and could not connect in ANY transport. The values here are the same
+// ones the panel's own new-client form uses (Inbound.MtprotoSettings.MtprotoUser,
+// web/assets/js/model/inbound.js:6104), so an account provisioned by membership is
+// indistinguishable from one added through the inbound form.
+//
+// Called ONLY on the fresh-entry path, never on re-projection, for the same reason
+// the created_at stamp above is: renderClientEntry is what the migration's
+// round-trip verification renders through, and inventing a field there would make
+// every stored entry lacking it fail to match and roll the whole pass back. The
+// write path may add defaults; the render path may not.
+func seedProtocolDefaults(entry map[string]any, protocol model.Protocol) {
+	if protocol != model.MTPROTO {
+		return
+	}
+	for key, value := range map[string]any{
+		"modeClassic": true,
+		"modeSecure":  true,
+		"modeTls":     true,
+		"tlsDomain":   "www.google.com",
+	} {
+		if _, has := entry[key]; !has {
+			entry[key] = value
+		}
+	}
 }
 
 // removeAccountFromInbound drops an account's entry from an inbound's settings.
@@ -322,7 +415,7 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 		if accountKey(email) == "" {
 			continue
 		}
-		account, err := s.upsertAccountFromEntry(tx, entry, inbound.Protocol)
+		account, err := s.upsertAccountFromEntry(tx, entry, &inbound)
 		if err != nil {
 			return err
 		}
@@ -359,7 +452,8 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 // (clientIdentity returns "", so edit and delete stop matching it) and, for the
 // native protocols, leaves a client the core cannot authenticate. It silently
 // corrupts the entry the request was not even about.
-func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]any, protocol model.Protocol) (*model.Account, error) {
+func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]any, inbound *model.Inbound) (*model.Account, error) {
+	protocol := inbound.Protocol
 	email, _ := entry["email"].(string)
 	key := accountKey(email)
 
@@ -397,6 +491,16 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 
 	updated := newAccountFromEntry(entry)
 	updated.Id = account.Id
+	// An entry reads enable=false for either of two reasons, and only one of them is
+	// the account's. The projection renders the AND of the account flag and the
+	// membership flag, so an account switched off on THIS inbound alone projects a
+	// false here while being perfectly live everywhere else. Mirroring that back
+	// would lower the account and take every other inbound down with it, which is
+	// the exact bug the per-membership column exists to end. So a disabled
+	// membership explains the false, and the account keeps what it had.
+	if !s.membershipEnabledFor(tx, account.Id, inbound.Id) {
+		updated.Enable = account.Enable
+	}
 	// Credentials are per FIELD and are filled from whichever protocol supplies
 	// them, so they are carried forward rather than reset: an account on vless and
 	// l2tp would otherwise lose its uuid whenever the l2tp entry was the one
@@ -423,10 +527,29 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 	// rotates a credential has to reach the account, or the projection would write
 	// the stale one straight back over it on the next membership change.
 	overwriteAccountCredential(updated, entry, protocol)
+	// A 2022-blake3 shadowsocks entry can hold a PSK minted for THAT membership
+	// alone (applyAccountCredential), and the account password is shared with
+	// trojan, anytls, naive and every credential VPN. Lifting it would rotate all of
+	// them to a key only shadowsocks can use.
+	if protocol == model.Shadowsocks && shadowsocksKeySize(inbound) > 0 {
+		updated.Password = account.Password
+	}
 	if err := tx.Save(updated).Error; err != nil {
 		return nil, err
 	}
 	return updated, nil
+}
+
+// membershipEnabledFor answers "is this account switched on for this inbound",
+// reading the stored membership. A membership that does not exist yet is enabled:
+// it is about to be created by the same sync, and nothing has switched it off.
+func (s *AccountService) membershipEnabledFor(tx *gorm.DB, accountId, inboundId int) bool {
+	var membership model.AccountInbound
+	if err := tx.Where("account_id = ? AND inbound_id = ?", accountId, inboundId).
+		First(&membership).Error; err != nil {
+		return true
+	}
+	return MembershipEnabled(&membership)
 }
 
 // overwriteAccountCredential copies the credential fields a protocol keys on from
@@ -573,27 +696,48 @@ func (s *AccountService) pruneOrphanAccounts(tx *gorm.DB) error {
 	return db.Where("id NOT IN ?", live).Delete(&model.Account{}).Error
 }
 
-// shadowsocksUserKey mints a per-user password valid for the inbound's cipher.
+// shadowsocksKeySize is the exact PSK length the inbound's cipher requires, in
+// bytes, or 0 when the cipher takes any string.
 //
-// Only the 2022-blake3 family constrains it; every legacy method takes any string,
-// so those keep the dashless uuid the other password protocols use.
-//
-// An account on two shadowsocks inbounds of DIFFERENT 2022 key lengths still
-// cannot be served by both, because one account holds one password. That is the
-// same single-column limit the credential VPNs have and is not fixed here.
-func shadowsocksUserKey(inbound *model.Inbound) string {
+// Only the 2022-blake3 family constrains it; every legacy method is happy with the
+// dashless uuid the other password protocols share.
+func shadowsocksKeySize(inbound *model.Inbound) int {
 	method := ""
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err == nil {
 		method, _ = settings["method"].(string)
 	}
-	size := 0
 	switch strings.ToLower(strings.TrimSpace(method)) {
 	case "2022-blake3-aes-128-gcm":
-		size = 16
+		return 16
 	case "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305":
-		size = 32
+		return 32
 	}
+	return 0
+}
+
+// validShadowsocksKey reports whether a password is a legal PSK for a cipher of
+// the given key size: base64 decoding to EXACTLY that many bytes.
+//
+// The length is what matters and what the shared account password gets wrong. A
+// 32-character dashless uuid is legal base64 by accident (it decodes to 24 bytes),
+// so "does it decode" alone would call a broken PSK good.
+func validShadowsocksKey(password string, keySize int) bool {
+	if keySize <= 0 {
+		return true
+	}
+	raw, err := base64.StdEncoding.DecodeString(password)
+	return err == nil && len(raw) == keySize
+}
+
+// shadowsocksUserKey mints a per-user password valid for the inbound's cipher.
+//
+// An account on two shadowsocks inbounds of DIFFERENT 2022 key lengths is served
+// on both: each membership keeps its own minted PSK in its own entry (see the
+// Shadowsocks case in applyAccountCredential), so the single account password
+// column no longer decides it.
+func shadowsocksUserKey(inbound *model.Inbound) string {
+	size := shadowsocksKeySize(inbound)
 	if size == 0 {
 		return strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
@@ -614,8 +758,22 @@ func shadowsocksUserKey(inbound *model.Inbound) string {
 // this layer exists to prevent: an account written to three inbounds and
 // half-removed from a fourth is a live account nobody is billed for.
 //
-// A single-inbound request stops after the mirror sync, which is what keeps every
-// existing caller's behaviour byte-identical.
+// A single-inbound request does not touch the membership SET, but it still
+// re-projects. That is not an optimisation, it is the fix for a de-sync the
+// half-way version created: the mirror below writes the edited entry INTO the
+// shared account row, so a write naming one inbound already changed the account's
+// quota, expiry and enable for every membership it has. Returning before the
+// projection left the other memberships' stored entries reading the OLD values,
+// and every enforcement path reads those per-inbound entries. Measured on an
+// account spanning 18 inbounds: the account row read enable=false while 17
+// memberships still read enable=true, and the Clients page showed all 17 as
+// serving. The change then reappeared later, when the next membership-carrying
+// edit finally re-projected.
+//
+// So both halves of the write are applied or neither is. For a single-inbound
+// account, which is nearly all of them, ProjectAccount touches that one inbound
+// and this costs nothing.
+//
 // removable names the memberships the CALLER is allowed to drop. It is passed in
 // rather than derived, because "not in the wanted set" is not sufficient
 // authority to remove one: an account can be on an inbound the caller cannot
@@ -633,27 +791,32 @@ func (s *AccountService) ApplyMemberships(email string, wanted []int, removable 
 		if err := s.SyncInboundAccounts(tx, wanted[0]); err != nil {
 			return err
 		}
-		// The caller said nothing about memberships, so this is an ordinary
-		// single-inbound write and must behave exactly as it always has.
-		if !explicit {
-			return nil
-		}
-
 		account, err := s.GetAccountByEmailTx(tx, email)
 		if err != nil {
 			return err
 		}
 		if account == nil {
+			// A delete path can legitimately leave no account behind (the mirror
+			// prunes an account whose last membership went away), and a single-inbound
+			// write has nothing further to do then. An explicit membership request
+			// with no account is a real error: it named a set to apply.
+			if !explicit {
+				return nil
+			}
 			return common.NewErrorf("no account for %q after the write", email)
 		}
-		// Everything the account is on that the caller may not touch stays, so an
-		// edit can never remove a membership on someone else's inbound.
-		keep, err := s.GetMembershipInboundIds(account.Id)
-		if err != nil {
-			return err
-		}
-		if err := s.SetMemberships(tx, account.Id, mergeKeepSet(wanted, keep, removable)); err != nil {
-			return err
+		// The caller said nothing about memberships, so the SET is left exactly as it
+		// is; only the account-wide fields it just changed are pushed back out.
+		if explicit {
+			// Everything the account is on that the caller may not touch stays, so an
+			// edit can never remove a membership on someone else's inbound.
+			keep, err := s.GetMembershipInboundIds(account.Id)
+			if err != nil {
+				return err
+			}
+			if err := s.SetMemberships(tx, account.Id, mergeKeepSet(wanted, keep, removable)); err != nil {
+				return err
+			}
 		}
 		changed, err := s.ProjectAccount(tx, account.Id)
 		if err != nil {
@@ -663,6 +826,62 @@ func (s *AccountService) ApplyMemberships(email string, wanted []int, removable 
 		// Bring the mirror back in step with what the projection just wrote.
 		for _, inboundId := range changed {
 			if err := s.SyncInboundAccounts(tx, inboundId); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return touched, err
+}
+
+// SetMembershipEnable switches one account on or off on ONE inbound, leaving every
+// other inbound serving it.
+//
+// Its own entry point rather than a flag on the client write, because the wire
+// cannot tell the two intents apart otherwise: `enable` inside a posted client
+// entry has always meant the account's own flag (that is what the bulk paths, the
+// Telegram bot and the Clients form all mean by it), and reading it as
+// per-membership instead would silently turn every existing caller's account-wide
+// disable into a one-inbound one.
+//
+// Returns the inbound ids whose settings changed, for the caller's reconcile.
+func (s *AccountService) SetMembershipEnable(email string, inboundId int, enable bool) ([]int, error) {
+	if email == "" {
+		return nil, common.NewError("no email")
+	}
+	var touched []int
+	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		account, err := s.GetAccountByEmailTx(tx, email)
+		if err != nil {
+			return err
+		}
+		if account == nil {
+			return common.NewErrorf("no account for %q", email)
+		}
+		var membership model.AccountInbound
+		if err := tx.Where("account_id = ? AND inbound_id = ?", account.Id, inboundId).
+			First(&membership).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return common.NewErrorf("account %q is not on inbound %d", email, inboundId)
+			}
+			return err
+		}
+		if err := tx.Model(&model.AccountInbound{}).
+			Where("account_id = ? AND inbound_id = ?", account.Id, inboundId).
+			Update("enable", enable).Error; err != nil {
+			return err
+		}
+		// Re-project the whole account rather than just this inbound. The rendered
+		// entry is the AND of the account flag and the membership flag, so only this
+		// one can actually change, but going through the same path as every other
+		// write is what keeps there being exactly one writer of settings.clients.
+		changed, err := s.ProjectAccount(tx, account.Id)
+		if err != nil {
+			return err
+		}
+		touched = changed
+		for _, id := range changed {
+			if err := s.SyncInboundAccounts(tx, id); err != nil {
 				return err
 			}
 		}
@@ -811,6 +1030,11 @@ func (s *AccountService) ensureCredentialsFor(tx *gorm.DB, accountId int, inboun
 		// and looked fine, and could never connect. The client form has always
 		// minted this correctly (RandomUtil.randomShadowsocksPassword); the
 		// membership path had not.
+		//
+		// This only seeds the account column for a shadowsocks-FIRST account, and it
+		// is no longer what decides the entry: an account that already holds a
+		// password keeps it here, and applyAccountCredential mints a per-membership
+		// PSK when that password cannot serve this inbound's cipher.
 		need(&account.Password, func() string { return shadowsocksUserKey(inbound) })
 	case model.TUIC:
 		// Authenticates with a uuid AND a password, and the uuid must keep its

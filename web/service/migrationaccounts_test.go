@@ -443,7 +443,7 @@ func TestMigrationAccountsPreservesUnmodelledProtocolFields(t *testing.T) {
 
 	// And the projection must render them straight back out.
 	account := accountsInDB(t)[0]
-	rendered := renderClientEntry(&account, &memberships[0], model.WGC, nil)
+	rendered := renderClientEntry(&account, &memberships[0], &model.Inbound{Protocol: model.WGC}, nil)
 	renderedDevices, ok := rendered["devices"].([]any)
 	if !ok || len(renderedDevices) != 2 {
 		t.Fatalf("projection dropped devices: %#v", rendered["devices"])
@@ -471,7 +471,7 @@ func TestMigrationAccountsKeepsSshLoginUsername(t *testing.T) {
 	if accounts[0].VpnUsername != "dave-login" {
 		t.Fatalf("VpnUsername = %q, want %q", accounts[0].VpnUsername, "dave-login")
 	}
-	rendered := renderClientEntry(&accounts[0], &membershipsInDB(t)[0], model.SSH, nil)
+	rendered := renderClientEntry(&accounts[0], &membershipsInDB(t)[0], &model.Inbound{Protocol: model.SSH}, nil)
 	if rendered["id"] != "dave-login" {
 		t.Errorf("projected ssh id = %v, want %q (the email here would break the login)", rendered["id"], "dave-login")
 	}
@@ -675,7 +675,7 @@ func TestMigrationAccountsPreservesEmailIdentityProtocolIds(t *testing.T) {
 		if err := database.GetDB().Where("id = ?", m.InboundId).First(&inbound).Error; err != nil {
 			t.Fatalf("read inbound: %v", err)
 		}
-		rendered := renderClientEntry(account, &m, inbound.Protocol, nil)
+		rendered := renderClientEntry(account, &m, &inbound, nil)
 		if got, _ := rendered["id"].(string); got != "shortname" {
 			t.Errorf("%s: projected id = %q, want the stored %q left untouched",
 				inbound.Protocol, got, "shortname")
@@ -688,7 +688,7 @@ func TestRenderClientEntryDefaultsIdToEmailWhenAbsent(t *testing.T) {
 	account := &model.Account{Email: "fresh@example.com"}
 	m := &model.AccountInbound{}
 	for _, protocol := range []model.Protocol{model.GRE, model.WGC, model.AWG, model.MTPROTO} {
-		rendered := renderClientEntry(account, m, protocol, nil)
+		rendered := renderClientEntry(account, m, &model.Inbound{Protocol: protocol}, nil)
 		if got, _ := rendered["id"].(string); got != "fresh@example.com" {
 			t.Errorf("%s: new membership id = %q, want the email as the fallback", protocol, got)
 		}
@@ -734,7 +734,7 @@ func TestMigrationAccountsMigratesDisabledClients(t *testing.T) {
 	if err != nil || len(m) != 1 {
 		t.Fatalf("memberships: %v", err)
 	}
-	if got := renderClientEntry(off, &m[0], model.VLESS, nil)["enable"]; got != false {
+	if got := renderClientEntry(off, &m[0], &model.Inbound{Protocol: model.VLESS}, nil)["enable"]; got != false {
 		t.Errorf("projected enable = %v, want false", got)
 	}
 }

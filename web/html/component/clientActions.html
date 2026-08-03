@@ -470,16 +470,20 @@
           default: return clients.findIndex(item => item && item.id === client.id && item.email === client.email);
         }
       },
-      // `modal` is the one whose loading spinner and close() the write drives, and
-      // it is optional: the only caller left is the per-membership enable switch,
-      // which is a control in a table row and has no modal of its own.
-      async updateClient(client, dbInboundId, clientId, inboundIds, modal) {
-        const data = {
-          id: dbInboundId,
-          settings: '{"clients": [' + client.toString() + ']}',
-        };
-        if (inboundIds) data.inboundIds = inboundIds;
-        await this.submit(`/panel/api/inbounds/updateClient/${clientId}`, data, modal);
+      // Switch an account on or off on ONE inbound.
+      //
+      // Its own route, not a client update carrying enable:false. `enable` inside a
+      // posted client entry is the ACCOUNT's flag: the panel writes it to
+      // client_traffics, which RADIUS (radius.go:769) and the rbridge sweep
+      // (radius.go:701) both read panel-wide. So this switch used to take the
+      // customer off EVERY inbound while re-projecting only this one, leaving the
+      // other memberships' rows still reading enable:true - the page showed them as
+      // serving and they were not. The per-membership flag lives on
+      // account_inbounds.enable and the projection renders the AND of the two.
+      async setMembershipEnable(dbInboundId, email, enable) {
+        await this.submit(
+          `/panel/api/inbounds/${dbInboundId}/setMembershipEnable/${encodeURIComponent(email)}`,
+          { enable: !!enable });
       },
       delClient(dbInboundId, client, confirmation = true) {
         dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
@@ -540,22 +544,18 @@
         newDbInbound = this.checkFallback(dbInbound);
         infoModal.show(newDbInbound, index);
       },
+      // The per-inbound switch in the Clients page's membership rows. Addressed by
+      // EMAIL rather than by the protocol's client id: the account is the same
+      // customer on every inbound, and the email is the one identity all of them
+      // share, so this needs none of the per-protocol id resolution a client edit
+      // does.
       async switchEnableClient(dbInboundId, client, state) {
         this.loading();
         try {
-          dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
-          if (!dbInbound) return;
-
-          inbound = dbInbound.toInbound();
-          clients = inbound && inbound.clients ? inbound.clients : null;
-          if (!clients || !Array.isArray(clients)) return;
-
-          index = this.findIndexOfClient(dbInbound.protocol, clients, client);
-          if (index < 0 || !clients[index]) return;
-
-          clients[index].enable = typeof state === 'boolean' ? state : !!client.enable;
-          clientId = this.getClientId(dbInbound.protocol, clients[index]);
-          await this.updateClient(clients[index], dbInboundId, clientId);
+          const email = client && client.email;
+          if (!email) return;
+          await this.setMembershipEnable(
+            dbInboundId, email, typeof state === 'boolean' ? state : !!client.enable);
         } finally {
           this.loading(false);
         }
