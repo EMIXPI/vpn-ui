@@ -967,8 +967,23 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 	// Clients page, which lists the accounts layer. It self-healed on the next
 	// single-client write to the same inbound, which is what made it look like a
 	// refresh problem. The mirror is per-inbound, so one call covers the batch.
-	if len(postedClientEmails(data)) > 1 {
+	//
+	// A batch can name a membership SET as well, and then every account in it has
+	// to reach every inbound in the set. That is per account, not per request, so
+	// it is a loop rather than one call: ApplyMemberships projects one email onto
+	// the set and mints whatever each protocol additionally needs. The mirror runs
+	// first, so the accounts exist for it to project. Without this the Clients
+	// page's bulk-add form could offer a checklist whose extra inbounds were
+	// silently dropped.
+	if emails := postedClientEmails(data); len(emails) > 1 {
 		a.syncInboundAccounts(data.Id)
+		if membershipsExplicit {
+			for _, email := range emails {
+				if _, merr := a.applyClientMemberships(c, email, membershipIds, membershipsExplicit); merr != nil {
+					logger.Warning("applying client memberships for ", email, ": ", merr)
+				}
+			}
+		}
 	} else if _, merr := a.applyClientMemberships(c, postedClientEmail(data), membershipIds, membershipsExplicit); merr != nil {
 		logger.Warning("applying client memberships: ", merr)
 	}
