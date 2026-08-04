@@ -854,6 +854,38 @@ func (s *CoreService) provisionedProtocolSet() map[string]bool {
 	return set
 }
 
+// coreInstallStateIsRecorded reports whether provisionedProtocolSet's answer came
+// from something the panel actually WROTE DOWN, or from the baseline guess.
+//
+// The distinction exists because IsProvisioned() is not only a stored flag. With
+// vpnProvisioned unset it falls back to a HEURISTIC:
+//
+//	procFileIsOne("/proc/sys/net/ipv4/ip_forward") && daemonInstalled("openvpn")
+//
+// and daemonInstalled is `commandExists(name) || backend.DaemonPath(name) != ""`,
+// i.e. a plain PATH lookup. So a box with a DISTRO openvpn and ip_forward=1 (any
+// host that has ever run Docker, libvirt or a container runtime, and every
+// router) reads as provisioned on a completely fresh panel database, and
+// provisionedProtocolSet then credits it with the whole frozen baseline: l2tp,
+// pptp, openvpn, openconnect.
+//
+// That is charitable and right for a pre-tracking upgrade, and exactly backwards
+// for the pre-flight conflict probe, which is suppressed for a core the panel
+// believes it installed. The presence of the very distro OpenVPN we would
+// collide with was what silenced the warning about colliding with it, and the
+// four cores it silenced are precisely the four whose shared config files needed
+// backup-before-overwrite. Callers that ask "should I warn the operator about
+// what is already on this host" must consult THIS, not IsProvisioned.
+//
+// Do not fold this back into provisionedProtocolSet as an "optimisation": the
+// baseline fallback is correct for that function's other consumers (status
+// cards, the inbound gate, uninstall's shared-requirement arithmetic), which
+// need the charitable answer.
+func (s *CoreService) coreInstallStateIsRecorded() bool {
+	var ss SettingService
+	return ss.HasRecordedProvisionedProtocols() || ss.GetVpnProvisioned()
+}
+
 // MissingProtocols returns installable cores this host is NOT set up for. Since
 // setup became per-core these are cores the operator has not installed (or has
 // uninstalled), not a defect: the Core Settings page offers them under "Add
@@ -1175,6 +1207,10 @@ func (s *CoreService) runProvisionSteps(emit func(ProvisionStep), cores []string
 	const sysctlConf = "net.ipv4.ip_forward=1\n" +
 		"net.ipv4.conf.all.rp_filter=2\n" +
 		"net.ipv4.conf.default.rp_filter=2\n"
+	// Recorded before the write so uninstall knows to take it away again (per-core
+	// uninstall used to leave this drop-in behind forever, so a host kept loose
+	// rp_filter across every reboot long after the last VPN core was removed).
+	ownPrepareHostFile("/etc/sysctl.d/99-vpn-ui.conf", "")
 	err = os.WriteFile("/etc/sysctl.d/99-vpn-ui.conf", []byte(sysctlConf), 0644)
 	emit(ProvisionStep{Name: "persist /etc/sysctl.d/99-vpn-ui.conf", OK: err == nil, Msg: msgOrOK(err)})
 
@@ -1202,6 +1238,12 @@ func (s *CoreService) runProvisionSteps(emit func(ProvisionStep), cores []string
 		if needsFeature(selected, featPppd) && backend.HasPppdBundle() {
 			pErr := backend.ExtractPppdBundle()
 			emit(ProvisionStep{Name: "extract pppd bundle", OK: pErr == nil, Msg: msgOrOK(pErr)})
+			// Recorded before each Link*: the backend already declines when the path
+			// exists (so a native pppd is never clobbered), and this writes that
+			// decision down so the uninstall report can say which of these outward
+			// links are ours and which are the host's own.
+			ownPrepareSymlink(backend.PppdSystem, backend.PppdBundled, "l2tp")
+			ownPrepareSymlink(backend.PppdPluginDir, backend.PppdBundleRoot+"/lib/pppd", "l2tp")
 			lErr := backend.LinkSystemPppd()
 			emit(ProvisionStep{Name: "link system pppd", OK: lErr == nil, Msg: msgOrOK(lErr)})
 			plErr := backend.LinkPluginDir()
@@ -1217,6 +1259,7 @@ func (s *CoreService) runProvisionSteps(emit func(ProvisionStep), cores []string
 		if needsFeature(selected, featAccel) && backend.HasAccelBundle() {
 			aErr := backend.ExtractAccelBundle()
 			emit(ProvisionStep{Name: "extract accel-ppp (SSTP) bundle", OK: aErr == nil, Msg: msgOrOK(aErr)})
+			ownPrepareSymlink(backend.AccelModuleDir, backend.AccelBundleRoot+"/lib/accel-ppp", "sstp")
 			amErr := backend.LinkAccelModuleDir()
 			emit(ProvisionStep{Name: "link accel-ppp module dir", OK: amErr == nil, Msg: msgOrOK(amErr)})
 		}
@@ -1228,6 +1271,7 @@ func (s *CoreService) runProvisionSteps(emit func(ProvisionStep), cores []string
 		if needsFeature(selected, featStrongswan) && backend.HasStrongswanBundle() {
 			swErr := backend.ExtractStrongswanBundle()
 			emit(ProvisionStep{Name: "extract strongswan (IKEv2) bundle", OK: swErr == nil, Msg: msgOrOK(swErr)})
+			ownPrepareSymlink(backend.StrongswanIpsecDir, backend.StrongswanBundleIpsecLib, "ikev2")
 			swlErr := backend.LinkStrongswanIpsecDir()
 			emit(ProvisionStep{Name: "link strongswan ipsec dir", OK: swlErr == nil, Msg: msgOrOK(swlErr)})
 		}
@@ -1235,6 +1279,7 @@ func (s *CoreService) runProvisionSteps(emit func(ProvisionStep), cores []string
 		// pptpd execs pptpctrl from a fixed compiled-in path; point it at the
 		// extracted bundle so pptpd works from any install dir.
 		if needsFeature(selected, featPptpCtrl) {
+			ownPrepareSymlink(backend.PptpCtrlLink, backend.DaemonPath("pptpctrl"), "pptp")
 			clErr := backend.LinkPptpCtrl()
 			emit(ProvisionStep{Name: "link pptpctrl", OK: clErr == nil, Msg: msgOrOK(clErr)})
 		}

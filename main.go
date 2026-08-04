@@ -210,6 +210,25 @@ func runWebServer() {
 	// client model. Never blocks startup.
 	accountMigrations := &service.AccountService{}
 	accountMigrations.MigrationAccounts()
+	// Seed the per-inbound usage breakdown from the usage that already exists, which
+	// needs the memberships above to be there. Also on every start and for the same
+	// reason: MigrateDB is reached only by the `migrate` subcommand and the DB-import
+	// path, so a panel that is simply upgraded would never run it. One shot, guarded
+	// by a setting, and never blocking startup - the breakdown is a display figure
+	// and every enforcement path still reads client_traffics.
+	accountMigrations.MigrationMembershipUsage()
+	// Clear the records a failed delete left behind on every install that predates
+	// the delete fixes: memberships of inbounds that are gone, accounts serving
+	// nothing, and traffic rows no settings entry claims. Each of those holds an
+	// email against a re-create, which is what operators report as the panel
+	// refusing a "Duplicate email" for a customer they deleted. Ordered AFTER the
+	// backfill above, so the memberships it is judging are the complete set.
+	//
+	// Same reason as the three above for being here and not in MigrateDB, one shot,
+	// guarded by its own setting, and never blocking startup. It deletes only records
+	// nothing can reach, and REPORTS rather than touches the entries that resolve to
+	// one account identity, which are live customers.
+	inboundMigrations.MigrationCleanupOrphans()
 	// Same reason again: hand the admins who predate the overview permission the bit
 	// that now gates the page they could always open, so an upgrade does not quietly
 	// take the panel's home page away from every non-super admin. One shot, guarded by
@@ -388,17 +407,48 @@ func installSystemd() {
 // edits are left in place and flagged for the operator. Invoked by
 // `vpn-ui --uninstall`; `--yes`/`--force` skips the confirmation prompt. Must run
 // as root. Best-effort: a single failed step is recorded, not fatal.
-func runUninstall(assumeYes bool) {
+//
+// coresAnswer pre-answers "remove the installed VPN cores too?": service.InboundsKeep
+// ("keep") or service.InboundsDelete ("delete"), empty when unset. Unset asks,
+// except under assumeYes.
+func runUninstall(assumeYes bool, coresAnswer string) {
 	// The teardown calls services that log through the logger package (unlike
 	// SaveService), so initialise it first to avoid a nil-logger panic.
 	initLogger()
-	// The DB is only needed to read the configured systemd service name; if it's
-	// already gone we still tear down the rest of the host with defaults.
+	// The DB is only needed to read the configured systemd service name and the
+	// installed-core list; if it's already gone we still tear down the rest of the
+	// host with defaults.
+	dbOK := true
 	if err := database.InitDB(config.GetDBPath()); err != nil {
+		dbOK = false
 		fmt.Fprintln(os.Stderr, "warning: database unavailable, using defaults:", err)
 	}
 
 	exePath, _ := os.Executable()
+
+	// The cores actually installed here, so the question below can name what is at
+	// stake. Only when the DB opened: CoreCatalog reads the settings table and the
+	// per-core inbound counts, and a nil *gorm.DB nil-derefs rather than erroring.
+	var installedCores []string
+	if dbOK {
+		var cs service.CoreService // zero-value usable and stateless
+		for _, c := range cs.CoreCatalog() {
+			if !c.Builtin && c.Installed {
+				installedCores = append(installedCores, c.Title)
+			}
+		}
+	}
+
+	// One reader for BOTH questions. A second bufio.NewReader(os.Stdin) would
+	// start with an empty buffer while the first one has already swallowed the
+	// next line: on a tty that is invisible, but piped input (`printf 'yes\nn\n'`)
+	// loses the second answer and blocks on EOF.
+	stdin := bufio.NewReader(os.Stdin)
+
+	// Whether the cores get their own question: only when nothing pre-answered it,
+	// the run is interactive, and there is something to keep. A DB that would not
+	// open still asks, since "no cores installed" is then unproven.
+	askCores := coresAnswer == "" && !assumeYes && (!dbOK || len(installedCores) > 0)
 
 	if !assumeYes {
 		fmt.Println("This will REMOVE vpn-ui and everything it installed on this host:")
@@ -407,16 +457,44 @@ func runUninstall(assumeYes bool) {
 		fmt.Println("  • /etc configs, /usr/libexec/vpn-ui bundles, logs, bin/, the database")
 		fmt.Println("  • the vpn-ui binary itself")
 		fmt.Println("Distro packages and boot/modprobe edits are kept and listed at the end.")
+		if askCores {
+			// The list above is the FULL teardown, which is not what happens if the
+			// next question is answered "keep". Say so here rather than let the
+			// operator agree to a removal that then silently does not occur.
+			fmt.Println("Whether the installed VPN cores go too is a separate question, asked next.")
+		}
 		fmt.Print("Type 'yes' to proceed: ")
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		line, _ := stdin.ReadString('\n')
 		if strings.TrimSpace(line) != "yes" {
 			fmt.Println("Aborted — nothing was removed.")
 			return
 		}
 	}
 
+	// Keep or remove the cores. The two defaults are deliberately OPPOSITE:
+	//
+	//   --yes  removes them, because that is what `--uninstall --yes` has always
+	//          done and what every unattended caller (deploy scripts, the E2E
+	//          harness) asserts on. Changing it would silently break automation.
+	//   a bare Enter keeps them, because typing "yes" to "remove vpn-ui" is not
+	//          the same as agreeing to take a live VPN service down with it, and
+	//          the cores are the expensive half to rebuild.
+	keepCores := false
+	switch {
+	case coresAnswer == service.InboundsKeep:
+		keepCores = true
+	case askCores:
+		keepCores = askKeepCores(stdin, installedCores)
+	default:
+		// service.InboundsDelete, --yes, or an interactive run with no core
+		// installed: nothing to spare, so the teardown stays whole.
+	}
+
 	fmt.Println("Uninstalling vpn-ui...")
-	report := service.Uninstall(service.UninstallOptions{ExePath: exePath})
+	report := service.Uninstall(service.UninstallOptions{ExePath: exePath, KeepCores: keepCores})
+	if keepCores && len(installedCores) > 0 {
+		report.Kept = append(report.Kept, "cores left installed: "+strings.Join(installedCores, ", "))
+	}
 
 	// Remove the database (next to the binary) — done here, after the service
 	// teardown that needed it to resolve the unit name.
@@ -467,6 +545,37 @@ func runUninstall(assumeYes bool) {
 		}
 	}
 	fmt.Println("\nvpn-ui uninstalled.")
+}
+
+// askKeepCores asks whether the installed VPN cores should come off the host as
+// well, and returns true to KEEP them. Anything other than an explicit yes keeps
+// them, EOF included: see runUninstall for why the interactive default is the
+// opposite of --yes's.
+//
+// The RADIUS sentence is not padding. Six of the ten installable cores
+// authenticate against a RADIUS server that runs in-process inside this binary
+// on 127.0.0.1:1812/1813, so "keep the cores" keeps their files and their
+// listening sockets but not their ability to let anybody new in. An operator who
+// learns that afterwards files it as a bug.
+func askKeepCores(stdin *bufio.Reader, installed []string) bool {
+	fmt.Println()
+	fmt.Println("Remove the installed VPN cores as well?")
+	if len(installed) > 0 {
+		fmt.Println("  Installed: " + strings.Join(installed, ", "))
+	}
+	fmt.Println("  • remove: their daemons, /etc configs, bundled trees and bin/ go too,")
+	fmt.Println("    along with the nftables table and fwmark routing they all pass through")
+	fmt.Println("  • keep:   all of that is left exactly as it is")
+	fmt.Println("RADIUS runs INSIDE the vpn-ui binary, not as a separate daemon, so kept L2TP,")
+	fmt.Println("PPTP, OpenVPN, OpenConnect, SSTP and IKEv2 cores cannot authenticate new logins")
+	fmt.Println("once vpn-ui is gone. WireGuard, AmneziaWG, GRE and MTProto are unaffected.")
+	fmt.Print("Remove the cores too? [y/N]: ")
+	line, _ := stdin.ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return false
+	}
+	return true
 }
 
 // randomFreePort returns a random, currently-bindable TCP port in a high range,
@@ -1648,6 +1757,34 @@ func generateSelfSignedPanelCert() {
 }
 
 func updateCert(publicKey string, privateKey string) {
+	// Validated BEFORE the database is even opened, because a refused command
+	// should leave nothing behind, not even a freshly initialised DB file.
+	//
+	// The settings form already validates through AllSetting.CheckValid
+	// (web/entity/entity.go:140-152); the CLI did not, and that asymmetry is the
+	// bug. Without this, `vpn-ui cert -webCert ...` accepts a mismatched or
+	// unreadable pair and the damage only surfaces at the NEXT restart, where
+	// web.go:541-556 logs one line and silently comes up on plain HTTP. A silent
+	// downgrade to HTTP hours after the command that caused it is not a failure
+	// anyone connects back to this command.
+	//
+	// It matters more here than in the form: the block below points ALL FOUR
+	// settings at the same pair, so one bad CLI invocation degrades the panel
+	// listener and the subscription listener together.
+	//
+	// service.ValidateCertPair is deliberately the same check the certificate
+	// store uses to gate activation (tls.LoadX509KeyPair PLUS a key-matches-leaf
+	// test), rather than a second, weaker copy of tls.LoadX509KeyPair here.
+	//
+	// Clearing (both empty) skips the check: that is a valid request to stop
+	// serving TLS, and there is nothing to validate.
+	if privateKey != "" && publicKey != "" {
+		if err := service.ValidateCertPair(publicKey, privateKey); err != nil {
+			fmt.Printf("refusing to store this certificate: %v\n  cert: %s\n  key:  %s\nNothing was changed.\n", err, publicKey, privateKey)
+			return
+		}
+	}
+
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println(err)
@@ -2553,6 +2690,8 @@ func main() {
 	//   --port <n>            set the panel web port
 	//   --path <basePath>     set the panel web base path
 	//   --systemd / systemd    install + enable-at-boot + start as a systemd unit
+	//   --cores <keep|remove>  with --uninstall only: pre-answer whether the
+	//                          installed VPN cores are removed with the panel
 	// The value switches are "work safe" exactly like --random: stop the running
 	// unit, write the change, start it again. --random and the explicit values run
 	// before --systemd, so a combined invocation boots the unit with the new
@@ -2561,6 +2700,9 @@ func main() {
 		doRandom, doSystemd, doUninstall, doForce, onlySwitches := false, false, false, false, true
 		var setUser, setPass, setPath string
 		var setPort int
+		// Kept out of hasExplicit on purpose: that flag drives applyExplicitSetting
+		// (panel port/user/pass/path), which the uninstall path never reaches.
+		var setCores string
 		hasExplicit := false
 		cliArgs := os.Args[1:]
 		for i := 0; i < len(cliArgs); i++ {
@@ -2589,6 +2731,21 @@ func main() {
 				doUninstall = true
 			case "yes", "force":
 				doForce = true
+			case "cores":
+				// Pre-answers the uninstall's cores question. "remove" is the word the
+				// switch documents; "delete" is accepted because it is the spelling
+				// service.InboundsDelete uses, and the two vocabularies must not drift.
+				switch v := strings.ToLower(strings.TrimSpace(takeVal())); v {
+				case "keep":
+					setCores = service.InboundsKeep
+				case "remove", "delete":
+					setCores = service.InboundsDelete
+				default:
+					// Refuse rather than fall back to a default: a typo'd answer under
+					// --yes would otherwise remove the very cores it was meant to keep.
+					fmt.Fprintf(os.Stderr, "invalid --cores value %q (want 'keep' or 'remove')\n", v)
+					os.Exit(1)
+				}
 			case "user":
 				setUser, hasExplicit = takeVal(), true
 			case "pass":
@@ -2608,7 +2765,7 @@ func main() {
 			requireRoot()
 			// Uninstall is exclusive and destructive — if requested, run only it.
 			if doUninstall {
-				runUninstall(doForce)
+				runUninstall(doForce, setCores)
 				return
 			}
 			if doRandom {
@@ -2701,6 +2858,10 @@ func main() {
 		fmt.Println("    --uninstall    remove the panel: systemd unit, daemons, firewall,")
 		fmt.Println("                   routing, /etc configs, bundles, logs, DB and the binary")
 		fmt.Println("                   (--yes to skip the confirmation prompt)")
+		fmt.Println("    --cores keep|remove")
+		fmt.Println("                   with --uninstall: pre-answer whether the installed VPN")
+		fmt.Println("                   cores go too. Unset asks (Enter keeps them); with --yes")
+		fmt.Println("                   and no --cores they are removed, as they always were")
 	}
 
 	flag.Parse()

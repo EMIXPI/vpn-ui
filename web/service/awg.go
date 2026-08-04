@@ -503,6 +503,9 @@ func (s *AwgService) rememberObfs(iface string, obfs awgObfs) {
 func (s *AwgService) ensureLink(iface string, mtu int, blockNet net.IP, prefix int) error {
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
+		// See wg-c's ensureLink: claimed before the LinkAdd so ownership is a record
+		// rather than an inference from the name.
+		ownIfaceCreated(iface, "awg")
 		la := netlink.NewLinkAttrs()
 		la.Name = iface
 		if mtu > 0 {
@@ -517,6 +520,8 @@ func (s *AwgService) ensureLink(iface string, mtu int, blockNet net.IP, prefix i
 		if link, err = netlink.LinkByName(iface); err != nil {
 			return err
 		}
+	} else if ownForbidsDelete(ownIface, iface) {
+		return fmt.Errorf("%s already exists and was not created by vpn-ui; not touching it", iface)
 	}
 	if blockNet != nil {
 		v4 := blockNet.To4()
@@ -531,6 +536,11 @@ func (s *AwgService) ensureLink(iface string, mtu int, blockNet net.IP, prefix i
 	return netlink.LinkSetUp(link)
 }
 
+// removeStaleLinks deletes every awg<id> interface not present in keep.
+//
+// Same fix as wg-c's: this matched a bare name prefix with no link-type check, so anything
+// at all on the host called "awg<something>" was deleted on the next reconcile tick. See
+// awgOwnsLink in ifaceown.go for the ownership test that replaced it.
 func (s *AwgService) removeStaleLinks(keep map[string]bool) {
 	links, err := netlink.LinkList()
 	if err != nil {
@@ -538,8 +548,11 @@ func (s *AwgService) removeStaleLinks(keep map[string]bool) {
 	}
 	for _, l := range links {
 		name := l.Attrs().Name
-		if strings.HasPrefix(name, awgIfacePrefix) && !keep[name] {
-			_ = netlink.LinkDel(l)
+		if keep[name] || !awgOwnsLink(l) {
+			continue
+		}
+		if err := netlink.LinkDel(l); err == nil {
+			ownRemoveEntry(ownIface, name)
 		}
 	}
 }
@@ -571,13 +584,16 @@ func (s *AwgService) AmneziawgAvailable() bool {
 }
 
 // AnyInterfaceUp reports whether at least one awg interface exists and is up.
+//
+// Ownership-checked like the stale-link sweep: a prefix match let an operator's own "awg0"
+// make the status row claim the AmneziaWG core was running.
 func (s *AwgService) AnyInterfaceUp() bool {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return false
 	}
 	for _, l := range links {
-		if strings.HasPrefix(l.Attrs().Name, awgIfacePrefix) && l.Attrs().Flags&net.FlagUp != 0 {
+		if awgOwnsLink(l) && l.Attrs().Flags&net.FlagUp != 0 {
 			return true
 		}
 	}
@@ -603,6 +619,9 @@ type AwgClientConfig struct {
 	Remark      string `json:"remark"`
 	PublicKey   string `json:"publicKey"`
 	Config      string `json:"config"`
+	// Host/Port mirror this config's own Endpoint= — see WgcClientConfig, same reason.
+	Host string `json:"host"`
+	Port int    `json:"port"`
 }
 
 func (o *awgSettings) dnsList() string {
@@ -716,6 +735,8 @@ func (s *AwgService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 					Remark:      remark,
 					PublicKey:   dev.PubKey,
 					Config:      b.String(),
+					Host:        t.host,
+					Port:        t.port,
 				})
 			}
 		}

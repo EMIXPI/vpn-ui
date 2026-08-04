@@ -29,6 +29,36 @@ const vpnAddrSpace = "10.0.0.0/12"
 // NftService manages nftables rules for L2TP, PPTP, and OpenVPN traffic accounting, TPROXY, and NAT.
 type NftService struct{}
 
+// readSysctl reads one sysctl's current value, or "" when it cannot be read (a
+// key this kernel does not have). Used to capture what a setting was before we
+// change it, so uninstall can put it back.
+func readSysctl(key string) string {
+	out, err := exec.Command("sysctl", "-n", key).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// restoreHostSysctls puts back the host-wide sysctls the data plane relaxed.
+// Called from the core uninstall once no core is left to need them.
+func restoreHostSysctls() []string {
+	var done []string
+	for _, key := range ownIDsOfKind(ownSysctl) {
+		prev, found := ownPrevOf(ownSysctl, key)
+		if !found || prev == "" {
+			continue
+		}
+		if err := exec.Command("sysctl", "-w", key+"="+prev).Run(); err != nil {
+			logger.Warning("could not restore sysctl", key, "to", prev, err)
+			continue
+		}
+		ownRemoveEntry(ownSysctl, key)
+		done = append(done, key+"="+prev)
+	}
+	return done
+}
+
 // firewalldRunning reports whether firewalld is installed and active.
 func firewalldRunning() bool {
 	if !commandExists("firewall-cmd") {
@@ -57,7 +87,18 @@ func firewalldRunning() bool {
 func ensureVpnHostNetworking() {
 	// rp_filter → loose. `all` is the effective-max override; set `default` too so
 	// PPP/tun interfaces created later inherit loose rather than strict.
+	//
+	// This is a HOST-WIDE change to a hardening setting the operator may have chosen
+	// deliberately, and nothing used to record it or put it back, so a box that had
+	// strict reverse-path filtering before vpn-ui stayed loose forever after, even
+	// once every core had been uninstalled. The value is captured on first sight and
+	// restored when the last core goes (see restoreHostSysctls).
 	for _, key := range []string{"net.ipv4.conf.all.rp_filter", "net.ipv4.conf.default.rp_filter"} {
+		if _, found := ownStateOf(ownSysctl, key); !found {
+			if prev := readSysctl(key); prev != "" && prev != "2" {
+				ownClaimPrev(ownSysctl, key, "", prev, "relaxed so policy-routed TPROXY packets are not dropped")
+			}
+		}
 		_ = exec.Command("sysctl", "-w", key+"=2").Run()
 	}
 
@@ -922,15 +963,23 @@ func (s *NftService) CollectAndResetTraffic(byProto map[string]map[string]string
 		return nil
 	}
 
-	// Accumulate traffic per (protocol, email), matching the pre-map per-protocol record shape
-	// (AddTraffic later sums by email regardless).
-	type acctKey struct{ protocol, email string }
-	// inboundId is the inbound the tunnel address belongs to: the SOURCE of
-	// these bytes, used to pick which multiplier bills them. Zero means unknown.
-	type trafficPair struct {
-		up, down  int64
+	// Accumulate traffic per (protocol, inbound, email). AddTraffic sums by email
+	// regardless, so the account total is the same however this is bucketed; the
+	// inbound is in the key so the per-inbound breakdown is not.
+	//
+	// It used to be (protocol, email) with the inbound as a FIELD, first writer wins.
+	// openvpn, openconnect and sstp may legitimately serve one account from two
+	// inbounds at two addresses, and that shape quietly filed both addresses' bytes
+	// under whichever inbound the iteration happened to reach first - a coin flip on
+	// map order, re-tossed every tick.
+	type acctKey struct {
+		protocol, email string
+		// inboundId is the inbound the tunnel address belongs to: the SOURCE of these
+		// bytes. Zero means unknown, which bills at the account's own rate and is left
+		// out of the breakdown rather than attributed to a guess.
 		inboundId int
 	}
+	type trafficPair struct{ up, down int64 }
 	traffic := make(map[acctKey]*trafficPair)
 
 	for _, raw := range result.Nftables {
@@ -963,13 +1012,11 @@ func (s *NftService) CollectAndResetTraffic(byProto map[string]map[string]string
 			continue
 		}
 
-		pair := traffic[acctKey{protocol, email}]
+		key := acctKey{protocol: protocol, email: email, inboundId: byProtoInbound[protocol][ip]}
+		pair := traffic[key]
 		if pair == nil {
 			pair = &trafficPair{}
-			traffic[acctKey{protocol, email}] = pair
-		}
-		if pair.inboundId == 0 {
-			pair.inboundId = byProtoInbound[protocol][ip]
+			traffic[key] = pair
 		}
 		if direction == "up" {
 			pair.up += c.Bytes
@@ -981,7 +1028,7 @@ func (s *NftService) CollectAndResetTraffic(byProto map[string]map[string]string
 	var out []*xray.ClientTraffic
 	for key, pair := range traffic {
 		if pair.up > 0 || pair.down > 0 {
-			out = append(out, &xray.ClientTraffic{Email: key.email, InboundId: pair.inboundId, Up: pair.up, Down: pair.down})
+			out = append(out, &xray.ClientTraffic{Email: key.email, InboundId: key.inboundId, Up: pair.up, Down: pair.down})
 		}
 	}
 	if len(out) > 0 {

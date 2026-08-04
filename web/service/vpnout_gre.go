@@ -39,12 +39,17 @@ import (
 //   - FOU needs GRO OFF on the interface that RECEIVES the encapsulated packets, or nearly
 //     every segment is lost while a trickle survives. See greOutEnsureFou.
 //
-// THE DEVICE NAME MUST NOT START WITH "gre". GreService.removeStaleLinks deletes every
-// netlink.Gretun whose name starts with greP2pPrefix ("gre") and is not in the plan it just
-// computed from the inbounds table, and it runs on EVERY traffic-job tick. An outbound
-// tunnel is not in that plan and never will be, so a name like "gre-out0" would be silently
-// deleted within seconds of coming up. Hence the "cgre" prefix (client GRE), which that
-// prefix scan does not match.
+// THE DEVICE NAME MUST NOT LOOK LIKE A SERVER-SIDE GRE NAME. GreService.removeStaleLinks
+// deletes every GRE netdev it considers its own that is not in the plan it just computed
+// from the inbounds table, and it runs on EVERY traffic-job tick. An outbound tunnel is not
+// in that plan and never will be, so a matching name would be silently deleted within
+// seconds of coming up. Hence the "cgre" prefix (client GRE).
+//
+// The rule that decides this is no longer a prefix scan: ownership is now the anchored name
+// shapes in ifaceown.go (gre<id>_<slot>_<peer>, gre<8 hex>, grecat<4 hex>) plus a link-type
+// check plus the ownership manifest. "cgre0" fails all three shapes, so it is safe for the
+// same reason an operator's own "gre1" now is. Keep any new client-side name outside those
+// shapes and add a case to ifaceown_test.go's ours-vs-theirs table.
 //
 // THE DEVICE MTU IS THE MSS CLAMP HERE, and that is why the per-encapsulation defaults are
 // copied from the server side rather than left to the kernel. The inbound path needs TWO
