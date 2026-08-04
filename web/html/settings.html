@@ -90,6 +90,13 @@
                     </template>
                     {{ template "settings/panel/service" . }}
                   </a-tab-pane>
+                  <a-tab-pane key="7" :style="{ paddingTop: '20px' }">
+                    <template #tab>
+                      <a-icon type="safety-certificate"></a-icon>
+                      <span>{{ i18n "pages.settings.sslSettings" }}</span>
+                    </template>
+                    {{ template "settings/panel/ssl" . }}
+                  </a-tab-pane>
                 </a-tabs>
               </a-col>
             </a-row>
@@ -98,9 +105,9 @@
       </a-spin>
 {{template "page/shell_end" . }}
 {{template "page/body_scripts" .}}
-<script src="{{ .base_path }}assets/qrcode/qrious2.min.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/otpauth/otpauth.umd.min.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/js/model/setting.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/qrcode/qrious2.min.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/otpauth/otpauth.umd.min.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/setting.js?{{ .asset_ver }}"></script>
 {{template "component/aSidebar" .}}
 {{template "component/aThemeSwitch" .}}
 {{template "component/aSettingListItem" .}}
@@ -135,6 +142,68 @@
       serviceLogLoading: false,
       serviceLogAuto: false,
       serviceLogTimer: null,
+      // The SSL certificate manager's whole client state. One object so the
+      // panel's dozen fields do not spread across the page's data block, and so
+      // a reset is one assignment.
+      ssl: {
+        loading: false,
+        // busy covers the two one-shot mutations (point the panel at the managed
+        // path, roll back). Kept apart from `running`, which means a background
+        // operation is in flight server-side.
+        busy: false,
+        status: null,
+        form: {
+          identifiers: [],
+          challenge: 'standalone-domain',
+          email: '',
+          staging: false,
+          listenV6: false,
+          // Where the operator's own web server serves its files from. Only read
+          // for the webroot choice, where some OTHER server answers the check.
+          webrootPath: '',
+          // Write-only: no endpoint returns it and nothing stores it, so this is
+          // blank again after every reload. See sslRequestBody.
+          cloudflareToken: '',
+          applyDisruptive: false,
+        },
+        // The issue form's open panels. Seeded once from the status: open when
+        // nothing is managed yet (it is the only thing to do), closed once a
+        // certificate exists, because at that point the answer to "it stopped
+        // working" is almost always Re-apply and not another issuance.
+        formOpen: [],
+        formSeeded: false,
+        // Set the moment the operator picks a validation option. Nothing derived
+        // from the certificate may overwrite the choice after that. See
+        // loadSslStatus.
+        challengePicked: false,
+        op: '',
+        running: false,
+        done: false,
+        failed: false,
+        summary: '',
+        steps: [],
+        stamps: [],
+        expanded: {},
+        timer: null,
+        preflightLoading: false,
+      },
+      sslConsumerColumns: [
+        { title: '{{ i18n "pages.settings.ssl.consumerService" }}', dataIndex: 'label', width: 240 },
+        { title: '{{ i18n "pages.settings.ssl.consumerImpact" }}', width: 170, scopedSlots: { customRender: 'impact' } },
+        { title: '{{ i18n "pages.settings.ssl.consumerAction" }}', dataIndex: 'action' },
+      ],
+      sslHistoryColumns: [
+        { title: '{{ i18n "pages.settings.ssl.historyWhen" }}', width: 180, scopedSlots: { customRender: 'when' } },
+        { title: '{{ i18n "pages.settings.ssl.historyNames" }}', scopedSlots: { customRender: 'names' } },
+        { title: '{{ i18n "pages.settings.ssl.historyOp" }}', dataIndex: 'op', width: 100 },
+        { title: '{{ i18n "pages.settings.ssl.historyCa" }}', dataIndex: 'ca', width: 120 },
+        { title: '{{ i18n "pages.settings.ssl.historyResult" }}', width: 190, scopedSlots: { customRender: 'result' } },
+        { title: '{{ i18n "pages.settings.ssl.historyDetail" }}', dataIndex: 'message' },
+      ],
+      sslVersionColumns: [
+        { title: '{{ i18n "pages.settings.ssl.rollbackVersion" }}', scopedSlots: { customRender: 'version' } },
+        { title: '{{ i18n "pages.settings.actions" }}', width: 150, scopedSlots: { customRender: 'rollback' } },
+      ],
       lang: LanguageManager.getLanguage(),
       inboundOptions: [],
       remarkModels: { i: 'Inbound', e: 'Email', o: 'Other' },
@@ -307,6 +376,383 @@
           await this.loadServiceState();
           await this.loadServiceLog();
         }
+      },
+      // ---------------------------------------------------------------------
+      // SSL certificate manager
+      // ---------------------------------------------------------------------
+      async loadSslStatus() {
+        this.ssl.loading = true;
+        const msg = await HttpUtil.get('/panel/setting/ssl/status');
+        this.ssl.loading = false;
+        if (!msg || !msg.success || !msg.obj) return;
+        this.ssl.status = msg.obj;
+        // Seed the form from the certificate already in use, once. Let's Encrypt
+        // meters the EXACT set of names, so [a.com] and [a.com, www.a.com] are two
+        // separate 5-per-7-days budgets: retyping the set by hand is how an
+        // operator spends a slot they thought they had.
+        if (this.ssl.status.active && !this.ssl.form.identifiers.length) {
+          const a = this.ssl.status.active;
+          this.ssl.form.identifiers = (a.identifiers || []).slice();
+          // An IP-only certificate gets the IP option PRESELECTED, never forced.
+          // Webroot serves an IP just as well, and better on a host that already
+          // runs a webserver, so an operator who has picked their situation keeps
+          // it: this status call is asynchronous, and it must not land on top of a
+          // choice they made while it was in flight.
+          if (!this.ssl.challengePicked && (a.ipAddresses || []).length && !(a.dnsNames || []).length) {
+            this.ssl.form.challenge = 'standalone-ip';
+          }
+        }
+        // Once, on the first load: an operator with nothing yet lands on an open
+        // form, an operator with a certificate lands on its status. Re-seeding on
+        // every poll would slam the panel shut under someone still typing in it.
+        if (!this.ssl.formSeeded) {
+          this.ssl.formSeeded = true;
+          if (!this.ssl.status.active) this.ssl.formOpen = ['form'];
+        }
+      },
+      // sslRequestBody is the one place the form becomes a request. The token is
+      // sent and never read back: no endpoint returns it, nothing stores it in a
+      // setting, and the service hands it to acme.sh through the environment
+      // rather than argv because /proc/<pid>/cmdline is world-readable.
+      sslRequestBody(op) {
+        const f = this.ssl.form;
+        return {
+          identifiers: f.identifiers,
+          challenge: f.challenge,
+          op: op,
+          staging: !!f.staging,
+          email: f.email,
+          listenV6: !!f.listenV6,
+          webrootPath: f.webrootPath,
+          applyDisruptive: !!f.applyDisruptive,
+          cloudflareToken: f.cloudflareToken,
+        };
+      },
+      async sslStart(op) {
+        if (this.ssl.running) return;
+        this.sslResetConsole(op);
+        const msg = await HttpUtil.post('/panel/setting/ssl/start', this.sslRequestBody(op));
+        if (!msg || !msg.success) {
+          // A refusal (drained budget, a cooldown, another run already going)
+          // started nothing, so the console is closed again rather than left
+          // spinning on a run that does not exist. The reason arrived as a toast
+          // carrying the server's own sentence, which names the limit and the
+          // time it frees.
+          this.ssl.running = false;
+          this.ssl.done = false;
+          return;
+        }
+        this.sslApplyState(msg.obj || {});
+        this.pollSsl();
+      },
+      // Recursive setTimeout, never setInterval: the operation runs server-side,
+      // so polling survives leaving the tab, and it cannot pile up requests on a
+      // slow link the way a fixed interval does.
+      pollSsl() {
+        clearTimeout(this.ssl.timer);
+        this.ssl.timer = setTimeout(async () => {
+          const msg = await HttpUtil.get('/panel/setting/ssl/run-status');
+          if (msg && msg.success && msg.obj) {
+            this.sslApplyState(msg.obj);
+            if (!msg.obj.running) {
+              // The run changed what is on disk and who is serving it, so the
+              // whole picture is re-read rather than patched.
+              await this.loadSslStatus();
+              this.$nextTick(() => this.sslScroll());
+              return;
+            }
+          }
+          this.pollSsl();
+        }, 600);
+      },
+      sslApplyState(obj) {
+        this.ssl.running = !!obj.running;
+        this.ssl.done = !!obj.done;
+        this.ssl.failed = !!obj.failed;
+        this.ssl.summary = obj.summary || '';
+        if (obj.op) this.ssl.op = obj.op;
+        this.sslApplySteps(obj.steps || []);
+      },
+      // The server streams the same growing array on every poll, so only indices
+      // never seen before get a wall-clock stamp; re-stamping would make every
+      // line jump to "now" on each tick.
+      sslApplySteps(steps) {
+        for (let i = this.ssl.stamps.length; i < steps.length; i++) {
+          this.ssl.stamps.push(this.sslTsNow());
+        }
+        this.ssl.steps = steps.map((s, i) => Object.assign({}, s, { ts: this.ssl.stamps[i] }));
+        this.$nextTick(() => this.sslScroll());
+      },
+      sslResetConsole(op) {
+        this.ssl.op = op;
+        this.ssl.steps = [];
+        this.ssl.stamps = [];
+        this.ssl.expanded = {};
+        this.ssl.done = false;
+        this.ssl.failed = false;
+        this.ssl.summary = '';
+        this.ssl.running = true;
+      },
+      // The preflight checks the ISSUE path deliberately, which is the strictest
+      // of the three and the only one that can cost anything. Checking the cheap
+      // operation would pass on a host where the expensive one is about to fail.
+      async sslPreflight() {
+        if (this.ssl.running) return;
+        this.ssl.preflightLoading = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/preflight', this.sslRequestBody('issue'));
+        this.ssl.preflightLoading = false;
+        if (!msg || !msg.success || !msg.obj) return;
+        // Not a run: nothing is executing server-side, so the console shows the
+        // verdict already complete instead of pretending something is in flight.
+        this.sslResetConsole('preflight');
+        this.ssl.running = false;
+        this.ssl.done = true;
+        this.ssl.failed = !!msg.obj.blocked;
+        this.ssl.summary = msg.obj.reason || '';
+        this.sslApplySteps(msg.obj.steps || []);
+      },
+      async sslUseManaged() {
+        this.ssl.busy = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/use-managed');
+        this.ssl.busy = false;
+        if (!msg || !msg.success) return;
+        await this.loadSslStatus();
+        // webCertFile is a stored setting, so the general panel on screen now
+        // shows the old path until it is re-read.
+        await this.getAllSetting();
+      },
+      async sslRollback(version) {
+        this.ssl.busy = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/rollback', { version: version });
+        this.ssl.busy = false;
+        if (msg && msg.success) await this.loadSslStatus();
+      },
+      sslToggleStep(i) {
+        this.$set(this.ssl.expanded, i, !this.ssl.expanded[i]);
+      },
+      sslScroll() {
+        const el = this.$refs.sslTerm;
+        if (el) el.scrollTop = el.scrollHeight;
+      },
+      sslTsNow() {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, '0');
+        return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+      },
+      sslGlyph(item) {
+        if (!item.ok) return '✗';
+        if (item.warn) return '!';
+        return '✓';
+      },
+      sslLineClass(item) {
+        if (!item.ok) return 'term-err';
+        if (item.warn) return 'term-warn';
+        return 'term-ok';
+      },
+      sslOkCount() {
+        return this.ssl.steps.filter(s => s.ok).length;
+      },
+      sslCurrentStep() {
+        const n = this.ssl.steps.length;
+        return n ? this.ssl.steps[n - 1].name : '';
+      },
+      // The step count depends on the host and the challenge and is unknown in
+      // advance, so the bar runs off an estimate that always keeps headroom and
+      // snaps to 100% only when the run has actually finished.
+      sslProgress() {
+        if (this.ssl.done && !this.ssl.running) return 100;
+        const done = this.ssl.steps.length;
+        const est = Math.max(12, done + 2);
+        return Math.min(96, Math.round((done / est) * 100));
+      },
+      // ---------------------------------------------------------------------
+      // Every translated string a Vue expression needs comes from a method here,
+      // NEVER from an i18n action pasted into the template's expression.
+      //
+      // THE TRAP, and it fails silently: in HTML text or an attribute, Go's
+      // html/template escapes an apostrophe to &#39;. The browser decodes that
+      // back to a quote before Vue ever sees it, so a translation containing one
+      // (English alone has "Let's Encrypt" a dozen times here) closes the string
+      // literal early and the expression stops parsing. The production Vue build
+      // strips compile warnings, so the render function silently becomes a no-op,
+      // Vue replaces #app with an empty comment, and the WHOLE settings page goes
+      // blank with nothing in the console. Inside a <script> block, which is where
+      // these live, Go escapes for JavaScript instead and the quote survives.
+      // ---------------------------------------------------------------------
+      sslIssueNote() {
+        return this.sslBudgetBlocked()
+          ? '{{ i18n "pages.settings.ssl.issueBlockedNote" }}'
+          : '{{ i18n "pages.settings.ssl.issueDesc" }}';
+      },
+      sslRunningTitle() {
+        const r = this.ssl.status && this.ssl.status.running;
+        return '{{ i18n "pages.settings.ssl.runningTitle" }}' + (r ? ' (' + r.op + ')' : '');
+      },
+      sslRunningDesc() {
+        const r = this.ssl.status && this.ssl.status.running;
+        return '{{ i18n "pages.settings.ssl.runningDesc" }} ' + (r ? this.sslDate(r.startedAt) : '');
+      },
+      sslImpactLabel(consumer) {
+        return consumer && consumer.disruptive
+          ? '{{ i18n "pages.settings.ssl.impactDisruptive" }}'
+          : '{{ i18n "pages.settings.ssl.impactFree" }}';
+      },
+      sslResultLabel(attempt) {
+        return attempt && attempt.success
+          ? '{{ i18n "pages.settings.ssl.resultOk" }}'
+          : '{{ i18n "pages.settings.ssl.resultFail" }}';
+      },
+      sslExemptLabel(attempt) {
+        return attempt && attempt.exempt
+          ? '{{ i18n "pages.settings.ssl.historyExempt" }}'
+          : '{{ i18n "pages.settings.ssl.historyCounted" }}';
+      },
+      sslLogTitle(item, i) {
+        if (!item || !item.log) return '';
+        return this.ssl.expanded[i]
+          ? '{{ i18n "pages.core.hideLog" }}'
+          : '{{ i18n "pages.core.showLog" }}';
+      },
+      sslConsoleLabel() {
+        const labels = {
+          issue: '{{ i18n "pages.settings.ssl.issue" }}',
+          renew: '{{ i18n "pages.settings.ssl.renew" }}',
+          reapply: '{{ i18n "pages.settings.ssl.reapply" }}',
+          preflight: '{{ i18n "pages.settings.ssl.preflight" }}',
+        };
+        return labels[this.ssl.op] || '{{ i18n "pages.settings.ssl.consoleTitle" }}';
+      },
+      // --- The three questions the default view answers -----------------------
+      sslPrimaryName() {
+        const a = this.ssl.status && this.ssl.status.active;
+        const ids = (a && a.identifiers) || [];
+        return ids.length ? ids[0] : (a && a.subject) || '';
+      },
+      // The rest of the set, quietly, under the primary name. The SET is what
+      // Let's Encrypt meters, so it is worth seeing; the individual extra names
+      // rarely are, which is why they are one muted line and not seven tags.
+      sslOtherNames() {
+        const a = this.ssl.status && this.ssl.status.active;
+        const ids = (a && a.identifiers) || [];
+        return ids.length > 1 ? ids.slice(1).join(', ') : '';
+      },
+      // Whole days, from the nanoseconds the server already computed. Never from
+      // notAfter minus now: that would disagree with the server's own renewal
+      // decision at exactly the boundary where the operator is looking.
+      sslDaysLeft() {
+        const a = this.ssl.status && this.ssl.status.active;
+        return a ? Math.floor((a.remainingNanos || 0) / 86400e9) : 0;
+      },
+      // The server's renewalDue is a fraction of the certificate's own lifetime,
+      // so a deliberately short-lived one can sit two days from expiry and still
+      // report "not due". A week or less is never a healthy state whatever the
+      // lifetime was, so the floor is here rather than in the words alone: the
+      // colour and the sentence have to agree.
+      sslHealthUrgent() {
+        const a = this.ssl.status && this.ssl.status.active;
+        return !!a && (a.renewalDue || this.sslDaysLeft() <= 7);
+      },
+      sslHealthLevel() {
+        const a = this.ssl.status && this.ssl.status.active;
+        if (!a) return '';
+        if (a.expired) return 'bad';
+        return this.sslHealthUrgent() ? 'warn' : 'ok';
+      },
+      // One plain sentence in days. The old line read "67d2h left", which is a
+      // duration an operator has to decode before it means anything.
+      sslHealthText() {
+        const a = this.ssl.status && this.ssl.status.active;
+        if (!a) return '';
+        if (a.expired) return '{{ i18n "pages.settings.ssl.expired" }}';
+        const days = this.sslDaysLeft();
+        if (days <= 0) return '{{ i18n "pages.settings.ssl.healthToday" }}';
+        if (days === 1) return '{{ i18n "pages.settings.ssl.healthTomorrow" }}';
+        const text = this.sslHealthUrgent()
+          ? '{{ i18n "pages.settings.ssl.healthSoon" }}'
+          : '{{ i18n "pages.settings.ssl.healthValid" }}';
+        return text.replace('{days}', days);
+      },
+      // --- Consent ------------------------------------------------------------
+      // The services on THIS host that can only take a new certificate by
+      // restarting. Naming them is the difference between agreeing to a category
+      // and agreeing to a consequence, and an empty list means the whole consent
+      // row is never rendered: most hosts run nothing disruptive.
+      sslDisruptiveNames() {
+        const list = (this.ssl.status && this.ssl.status.consumers) || [];
+        return list.filter(c => c && c.disruptive).map(c => c.label).join(', ');
+      },
+      sslDisruptiveLabel() {
+        return '{{ i18n "pages.settings.ssl.applyDisruptive" }} ' + this.sslDisruptiveNames();
+      },
+      sslDisruptiveConfirm() {
+        return '{{ i18n "pages.settings.ssl.disruptiveConfirm" }} ' + this.sslDisruptiveNames();
+      },
+      // A name and an IP address in one certificate. Refused by every validation
+      // option, and worth saying while the operator is typing rather than only in
+      // the run that fails: Let's Encrypt will not issue for an IP without the
+      // short-lived profile, and that profile applies to the WHOLE certificate,
+      // so one IP would quietly cut a 90-day certificate down to about six days.
+      sslMixedNames() {
+        const ids = this.ssl.form.identifiers || [];
+        return ids.some(id => this._isIp(id)) && ids.some(id => !this._isIp(id));
+      },
+      // Whether WE open the listener the CA connects to. Over DNS nothing is
+      // reached at all, and with a webroot the connection lands on the operator's
+      // own web server, so the address family we would have bound is not ours to
+      // choose in either case.
+      sslBindsListener() {
+        const c = this.ssl.form.challenge;
+        return c === 'standalone-domain' || c === 'standalone-ip';
+      },
+      // An idle terminal is a large black rectangle answering none of the three
+      // questions above it, so it does not exist until something has run.
+      sslConsoleVisible() {
+        return this.ssl.running || this.ssl.done || this.ssl.steps.length > 0;
+      },
+      // --- Budget -----------------------------------------------------------
+      // Status reports the budget for the ACTIVE certificate's identifier set,
+      // which is the set a renewal touches. With nothing managed yet the ledger
+      // was never consulted and Limit arrives as 0, so the denominator falls back
+      // to Let's Encrypt's published 5, which is the figure the ledger mirrors.
+      sslBudget() {
+        return (this.ssl.status && this.ssl.status.budget) || {};
+      },
+      sslBudgetUsed() { return this.sslBudget().used || 0; },
+      sslBudgetLimit() { return this.sslBudget().limit || 5; },
+      sslBudgetRemaining() { return Math.max(0, this.sslBudgetLimit() - this.sslBudgetUsed()); },
+      sslBudgetBlocked() { return !!this.sslBudget().blocked; },
+      sslBudgetWarn() {
+        const b = this.sslBudget();
+        return !!b.warn && !b.blocked && !!b.reason;
+      },
+      sslBudgetSet() { return this.sslBudget().setKey || ''; },
+      sslBudgetColor() {
+        if (this.sslBudgetBlocked()) return '#f5222d';
+        if (this.sslBudget().warn) return '#faad14';
+        return '';
+      },
+      // nextFreeAt carries NO omitempty, because encoding/json never omits a
+      // struct: a zero time arrives as "0001-01-01T00:00:00Z", which formats into
+      // a perfectly plausible year-1 date. It is meaningful only once something
+      // has been spent, and `used` is what says so - never the string.
+      sslNextFreeAt() {
+        const b = this.sslBudget();
+        if (!b.used || !b.nextFreeAt) return '';
+        return this.sslDate(b.nextFreeAt);
+      },
+      // --- Certificate ------------------------------------------------------
+      sslDate(v) {
+        if (!v) return '';
+        const d = new Date(v);
+        if (isNaN(d.getTime())) return String(v);
+        return IntlUtil.formatDate(d);
+      },
+      // Version directories arrive newest first as absolute paths. The basename is
+      // the sortable UTC stamp plus a random suffix, which is what makes two
+      // versions issued in the same second distinguishable.
+      sslVersionRows() {
+        const v = (this.ssl.status && this.ssl.status.versions) || [];
+        return v.map((p, i) => ({ path: p, name: p.split('/').pop(), index: i }));
       },
       async loadInboundTags() {
         const msg = await HttpUtil.get("/panel/api/inbounds/list");
@@ -664,6 +1110,14 @@
       await this.loadInboundTags();
       await this.loadServiceState();
       await this.loadServiceLog();
+      await this.loadSslStatus();
+      // An operation started before this page load is still going server-side, so
+      // pick its console back up rather than showing an idle one. The poll refills
+      // the steps from the server's own array, which holds the whole run.
+      if (this.ssl.status && this.ssl.status.running) {
+        this.sslResetConsole(this.ssl.status.running.op);
+        this.pollSsl();
+      }
       while (true) {
         await PromiseUtil.sleep(1000);
         this.saveBtnDisable = this.oldAllSetting.equals(this.allSetting);

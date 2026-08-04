@@ -121,6 +121,12 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.GET("/:id/awg-configs", read, owns, a.getAwgConfigs)
 	g.GET("/:id/gre-configs", read, owns, a.getGreConfigs)
 	g.GET("/:id/ssh-configs", read, owns, a.getSshConfigs)
+	// IKEv2 "Remote ID" (the cert SAN / IKE identity the server presents). Inbound-wide,
+	// not per-account, so this is gated like getInbound (read+owns) rather than the
+	// client-touch check the account-config getters above need. The account export calls
+	// it only when settings.serverAddr is blank, since that fallback is a server-side
+	// default-route probe a browser cannot reproduce.
+	g.GET("/:id/ikev2-remote-id", read, owns, a.getIkev2RemoteId)
 
 	// Address-plane introspection (web/controller/addressing.go). The pool, the slot
 	// and the tunnel address an account lands on are all decided by the panel and were
@@ -1058,6 +1064,14 @@ func (a *InboundController) copyInboundClients(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
+	// Mirror the copies into the accounts layer, like every other write path. Without
+	// it the copied clients existed in settings.clients and client_traffics but in no
+	// account row, so none of them appeared on the Clients page (which lists the
+	// accounts layer) until some later single-client write to the same inbound
+	// happened to reconcile it. Both inbounds are touched: the copy mints a subId back
+	// into the SOURCE for any client that had none.
+	a.syncInboundAccounts(targetID)
+	a.syncInboundAccounts(req.SourceInboundID)
 	jsonObj(c, result, nil)
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
@@ -1168,6 +1182,16 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 		return
 	}
 
+	// The email as STORED, read before the write replaces it. An edit may rename the
+	// account, and after the write there is nothing left to learn the old identity
+	// from: UpdateInboundClient rewrites the entry in place. ticket.Email holds the
+	// same thing but only for a reseller, and a rename by an admin splits the account
+	// exactly as badly.
+	previousEmail := ""
+	if stored, gerr := a.inboundService.GetInbound(inbound.Id); gerr == nil {
+		previousEmail = a.clientEmailOnInbound(stored, clientId)
+	}
+
 	needRestart, err := a.inboundService.UpdateInboundClient(inbound, clientId)
 	if err != nil {
 		if rerr := resellerService.Rollback(ticket); rerr != nil {
@@ -1195,6 +1219,23 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 			email = a.clientEmailOnInbound(dbInbound, clientId)
 		}
 	}
+	// Carry the ACCOUNT onto the new email, the same way the ledger was carried just
+	// above, and before anything applies memberships under the new key.
+	//
+	// UpdateInboundClient rewrote the one inbound this was posted against. Every OTHER
+	// inbound serving the account still carries the old email, and the account row
+	// still answers to it, so applying memberships now would find no account for the
+	// new key, mint a SECOND one, and project it alongside the old entries instead of
+	// over them: one customer, two accounts, and the old email left live and billable
+	// on every inbound but this one. Renaming first means the projection below matches
+	// in place and has nothing to append.
+	var renamed []int
+	if previousEmail != "" && email != "" && previousEmail != email {
+		var rerr error
+		if renamed, rerr = accountService.RenameAccount(previousEmail, email); rerr != nil {
+			logger.Warning("carrying the account across a client rename: ", rerr)
+		}
+	}
 	previous, perr := accountService.InboundIdsForEmail(email)
 	if perr != nil {
 		logger.Warning("reading previous memberships: ", perr)
@@ -1209,7 +1250,12 @@ func (a *InboundController) updateInboundClient(c *gin.Context) {
 	// Reconcile the inbounds it is on now AND the ones it was just removed from:
 	// a dropped membership has to rewrite that daemon's config too, or the account
 	// keeps working there until something else happens to trigger a regeneration.
-	a.reconcileForInbounds(unionInboundIds(unionInboundIds(membershipIds, previous), projected), needRestart)
+	//
+	// `renamed` is in the set for the same reason: a rename is a new RADIUS login and
+	// a new per-account routing rule on every inbound the old email was written into,
+	// and those inbounds are not otherwise in any of the three lists.
+	reconcile := unionInboundIds(unionInboundIds(membershipIds, previous), projected)
+	a.reconcileForInbounds(unionInboundIds(reconcile, renamed), needRestart)
 }
 
 // unionInboundIds merges two id lists, preserving order and dropping duplicates.
@@ -1645,7 +1691,11 @@ func (a *InboundController) delDepletedClients(c *gin.Context) {
 			u, known := usage[strings.ToLower(strings.TrimSpace(email))]
 			a.refundDeletedClient(email, u, known)
 		}
-		a.syncInboundAccountsAll(id)
+		// -1, not id. The sweep follows a depleted account onto EVERY inbound serving
+		// it (its quota is account-wide, so removing it from one and deleting its
+		// counter row would leave it live and unmetered on the rest), so reconciling
+		// only the inbound named in the route leaves the mirror stale on the others.
+		a.syncInboundAccountsAll(-1)
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.delDepletedClientsSuccess"), nil)
 		return
 	}
@@ -1655,7 +1705,8 @@ func (a *InboundController) delDepletedClients(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
-	a.syncInboundAccountsAll(id)
+	// -1 for the same reason as the reseller branch above.
+	a.syncInboundAccountsAll(-1)
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.delDepletedClientsSuccess"), nil)
 }
 
@@ -2111,6 +2162,31 @@ func (a *InboundController) getSshConfigs(c *gin.Context) {
 		return
 	}
 	jsonObj(c, configs, nil)
+}
+
+// getIkev2RemoteId resolves an ikev2 inbound's Remote ID / Server Identity
+// (Ikev2Service.serverID): the IKE identity the server presents, which is also the SAN
+// GenerateSelfSignedCert issued the server cert for. The account export already has this
+// for free from inbound.settings.serverAddr whenever it is set; this endpoint exists only
+// for the blank case, whose fallback (getServerIP's default-route probe) runs server-side
+// and cannot be reproduced in the browser.
+func (a *InboundController) getIkev2RemoteId(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "Invalid inbound ID", err)
+		return
+	}
+	inbound, err := a.inboundService.GetInbound(id)
+	if err != nil {
+		jsonMsg(c, "Inbound not found", err)
+		return
+	}
+	remoteId, err := a.ikev2Service.ResolveServerID(inbound)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, map[string]string{"remoteId": remoteId}, nil)
 }
 
 // checkIkev2Cert inspects the supplied IKEv2 server certificate's public-key type

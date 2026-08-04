@@ -671,6 +671,37 @@ body.dark .bo-theme-toggle .bo-i-moon { display:block; }
 }
 .bo-relnotes-foot .bo-icon { flex:none; }
 
+/* Post-update notice: where the pre-update database was snapshotted. A block and
+   not a -foot row because the value is a filesystem path, which is long and has no
+   spaces to break at, so it gets its own line and is allowed to wrap anywhere
+   rather than widening the dialog. Selectable: the operator's next move is to copy
+   it into an scp. */
+.bo-update-backup {
+  margin:var(--sp-3) 0 0; padding:8px 10px;
+  border:1px solid var(--border); border-radius:var(--radius-sm);
+  background:var(--surface-2); font-size:12.5px; color:var(--text-3);
+}
+.bo-update-backup-path {
+  margin-top:4px; font-family:var(--font-mono); font-size:12px;
+  color:var(--text); overflow-wrap:anywhere; user-select:all;
+}
+
+/* Backup filename picker. The preview is the dialog's answer, so it reads as a
+   result panel under the ticks rather than as another form row, and it carries the
+   monospace face because it is a filename. */
+.bo-backup-name-desc { margin:0 0 var(--sp-3); font-size:13px; color:var(--text-3); }
+.bo-backup-name-preview {
+  margin-top:var(--sp-2); padding:8px 10px;
+  border:1px solid var(--border); border-radius:var(--radius-sm);
+  background:var(--surface-2);
+}
+.bo-backup-name-label { font-size:11.5px; color:var(--text-3); }
+.bo-backup-name-file {
+  display:block; margin-top:3px;
+  font-family:var(--font-mono); font-size:12.5px;
+  color:var(--text); overflow-wrap:anywhere; user-select:all;
+}
+
 /* Donate dialog (VPN-UI tile). Each row is chain / address / copy. The address
    is the payload, so it gets the monospace face and the room: the chain label
    is fixed-width and the button is intrinsic, leaving the middle column to
@@ -1238,6 +1269,25 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 .bo-cf-field > label .ant-tag { margin-inline-end:0; font-size:11px; line-height:17px; }
 .bo-cf-hint { font-size:11.5px; color:var(--text-3); margin-top:4px; }
+
+/* A setting that belongs to the field above it rather than beside it: mtproto's ad
+   tag under mtproto's secret. The rule and the indent are the whole of it, and they
+   are what say "part of that" instead of "next thing down" - as a sibling row it
+   read as a form-level setting, which is exactly what it is not. */
+.bo-cf-nest {
+  margin-top:9px; padding-inline-start:12px;
+  border-inline-start:2px solid var(--border-strong);
+}
+/* The switch row's own separator would cut the group it is heading. */
+.bo-cf-nest > .bo-cf-switch { padding:0 0 8px; border-bottom:0; }
+/* Loud enough to stop an operator, small enough to stay inside the group. An
+   a-alert here spans the pane and so reads as a warning about the whole form. */
+.bo-cf-warnnote {
+  display:flex; gap:6px; margin-top:7px; padding:7px 9px; border-radius:6px;
+  background:var(--warn-weak); color:var(--warn);
+  font-size:11.5px; line-height:1.5;
+}
+.bo-cf-warnnote > .anticon { flex:0 0 auto; margin-top:2px; }
 /* Dimmed, not hidden: a field that vanishes as inbounds are ticked makes the
    form shift under the operator mid-edit. */
 .bo-cf-unused { opacity:.5; }
@@ -1450,4 +1500,160 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 .bo-mb-use b { color:var(--text); font-weight:600; }
 
+/* "shared": this membership's figure is the account's Xray-native remainder, not
+   this one inbound's own bytes. Deliberately a quiet label in the neutral ink and
+   NOT one of the four status hues: it qualifies a number, it does not report a
+   health state, and colouring it would put a warning on an ordinary vless account. */
+.bo-mb-shared {
+  font-size:11px; color:var(--text-3, var(--text-2)); font-style:italic;
+  white-space:nowrap;
+}
+.bo-mb-shared-note { max-width:260px; white-space:normal; color:var(--text-2); }
+
 .bo-mb-actions { flex:0 0 auto; margin-inline-start:auto; }
+
+/* ---------------------------------------------------------------------------
+ * SSL certificate manager (Panel Settings, the SSL tab)
+ *
+ * Here rather than in a <style> block inside settings/panel/ssl.html: Vue strips
+ * <style> out of a template while compiling it, and the production build has the
+ * warning about that compiled out, so such a block disappears without a trace and
+ * every rule in it is silently dead.
+ *
+ * Scoped under .settings-page, which settings.html stamps on #app, so nothing
+ * here can reach the other pages.
+ * ------------------------------------------------------------------------ */
+
+/* THE HERO: the answer to "do I have a certificate, is it healthy, is it being
+   used", in that order, in one card. The name is the largest thing on the tab
+   because it is the first thing an operator checks. */
+.settings-page .ssl-hero {
+  border:1px solid var(--border); border-radius:10px; background:var(--surface);
+  padding:18px 20px; margin-bottom:14px;
+}
+.settings-page .ssl-hero-title {
+  font-size:20px; font-weight:600; line-height:1.3; word-break:break-all;
+}
+.settings-page .ssl-hero-sub {
+  color:var(--text-2); font-size:12.5px; line-height:1.6; margin-top:4px;
+  word-break:break-word;
+}
+
+/* Health in one line. The dot inherits the line's colour, and the line always
+   carries the words as well: colour is the second channel here, never the only
+   one. */
+.settings-page .ssl-health {
+  display:flex; align-items:center; gap:8px;
+  margin-top:12px; font-size:15px; font-weight:500;
+}
+.settings-page .ssl-health-dot {
+  width:9px; height:9px; border-radius:50%; flex:none;
+  background:currentColor;
+}
+.settings-page .ssl-health-ok { color:var(--ok); }
+.settings-page .ssl-health-warn { color:var(--warn); }
+.settings-page .ssl-health-bad { color:var(--error); }
+
+.settings-page .ssl-flags { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.settings-page .ssl-flags .ant-tag { margin:0; }
+
+.settings-page .ssl-inuse {
+  display:flex; align-items:center; gap:8px; margin-top:12px;
+  color:var(--ok); font-size:13px;
+}
+
+.settings-page .ssl-alert { margin:12px 0; }
+.settings-page .ssl-alert-btn { margin-top:10px; }
+.settings-page .ssl-alert-list { margin:4px 0 0; padding-inline-start:18px; }
+
+.settings-page .ssl-actions { margin-top:8px; }
+
+/* The disruptive consent, beside the buttons it changes. A row rather than a
+   line in a form, because agreeing to it disconnects live users. */
+.settings-page .ssl-disruptive {
+  border:1px solid var(--border); border-radius:8px; background:var(--surface);
+  padding:10px 14px; margin-bottom:12px;
+}
+.settings-page .ssl-disruptive-sub {
+  color:var(--text-2); font-size:12px; line-height:1.5;
+  margin-top:4px; padding-inline-start:24px;
+}
+
+.settings-page .ssl-console { margin-bottom:14px; }
+.settings-page .ssl-form { margin-bottom:14px; }
+.settings-page .ssl-form-actions { padding:4px 20px; }
+.settings-page .ssl-form-alert { margin:8px 20px 0; }
+
+/* THE VALIDATION CHOICE as four situations to recognise, not four protocols to
+   know. Each is a card the whole width of the form so the sub-line has room to
+   say what the operator is agreeing to. */
+.settings-page .ssl-choices { padding:14px 20px 4px; }
+.settings-page .ssl-choices-label { font-weight:600; margin-bottom:10px; }
+.settings-page .ssl-choices-group { display:flex; flex-direction:column; gap:8px; }
+.settings-page .ssl-choice {
+  display:flex; align-items:flex-start; gap:6px; margin:0;
+  padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+  background:var(--surface); white-space:normal;
+}
+.settings-page .ssl-choice.ant-radio-wrapper-checked {
+  border-color:var(--accent); background:var(--accent-weak);
+}
+.settings-page .ssl-choice > span:last-child {
+  display:flex; flex-direction:column; gap:3px; padding-inline-end:0;
+}
+.settings-page .ssl-choice-title { font-weight:500; line-height:1.4; }
+.settings-page .ssl-choice-sub {
+  color:var(--text-2); font-size:12.5px; line-height:1.5;
+}
+
+.settings-page .ssl-advanced { background:transparent; }
+
+.settings-page .ssl-details { margin-bottom:8px; }
+.settings-page .ssl-section-title { font-weight:600; margin:22px 0 2px; }
+.settings-page .ssl-details .ssl-section-title:first-child { margin-top:0; }
+.settings-page .ssl-section-sub {
+  color:var(--text-2); font-size:12.5px; line-height:1.5; margin-bottom:8px;
+}
+.settings-page .ssl-paths { line-height:1.8; word-break:break-all; }
+.settings-page .ssl-budget {
+  display:flex; flex-wrap:wrap; align-items:center; gap:6px 24px;
+}
+.settings-page .ssl-empty { margin:10px; }
+.settings-page .ssl-refresh { margin-top:16px; text-align:right; }
+.settings-page .ssl-warn-text { color:var(--warn); }
+
+/* Certificate facts as a two-column definition list: label left, value right,
+   wrapping the value rather than the label so a long SAN list cannot push the
+   column out. */
+.settings-page .ssl-kv {
+  display:grid; grid-template-columns:minmax(120px, 180px) 1fr;
+  gap:6px 16px; font-size:13px;
+}
+.settings-page .ssl-kv dt { margin:0; color:var(--text-2); }
+.settings-page .ssl-kv dd { margin:0; word-break:break-word; }
+
+.settings-page .ssl-mono {
+  font-family:var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size:12px;
+}
+
+.settings-page .ssl-budget-count { font-size:22px; font-weight:600; line-height:1; }
+
+/* The action hierarchy made visual. The two free actions are normal-sized
+   buttons in the card at the top; the one that spends metered budget is small,
+   quiet, and at the bottom of a form the operator had to open. They are NOT
+   equivalent and they are deliberately not styled as if they were. Each row
+   carries its consequence in the note beside it, since a disabled antd control
+   opens no tooltip and a reason only in a tooltip is a reason nobody reads. */
+.settings-page .ssl-action {
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 12px; padding:10px 0;
+}
+.settings-page .ssl-action-note {
+  flex:1 1 320px; min-width:220px; color:var(--text-2);
+  font-size:12.5px; line-height:1.5;
+}
+.settings-page .ssl-action-last {
+  border-top:1px dashed var(--border); margin-top:6px; padding-top:12px;
+}
+
+.settings-page .ssl-term .term-body { height:320px; max-height:320px; }

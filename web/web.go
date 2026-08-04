@@ -235,10 +235,23 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	engine.Use(func(c *gin.Context) {
 		c.Set("base_path", basePath)
 	})
+	// A year is only safe because the URL carries a token derived from the asset
+	// bytes (see assetFingerprint): a changed file means a changed URL, so nothing
+	// cached under the old one is ever wanted again.
+	//
+	// Debug mode is the exception. There the assets are read from the working tree
+	// on every request so an edit shows up without a restart, but the token is
+	// fixed at start and cannot follow those edits, so a long max-age would freeze
+	// the browser on whatever it loaded first. That is the shape of bug this whole
+	// mechanism exists to prevent, so debug does not cache at all.
+	assetCacheControl := "max-age=31536000"
+	if config.IsDebug() {
+		assetCacheControl = "no-store"
+	}
 	engine.Use(func(c *gin.Context) {
 		uri := c.Request.RequestURI
 		if strings.HasPrefix(uri, assetsBasePath) {
-			c.Header("Cache-Control", "max-age=31536000")
+			c.Header("Cache-Control", assetCacheControl)
 		}
 	})
 
@@ -258,6 +271,10 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	}
 	engine.SetFuncMap(funcMap)
 	engine.Use(locale.LocalizerMiddleware())
+
+	// Publish the token the templates stamp on every asset URL. Done before the
+	// templates are registered so the first page served already carries it.
+	config.SetAssetVersion(assetFingerprint())
 
 	// set static files and template
 	if config.IsDebug() {
@@ -313,6 +330,13 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 // startTask schedules background jobs (Xray checks, traffic jobs, cron
 // jobs) which the panel relies on for periodic maintenance and monitoring.
 func (s *Server) startTask() {
+	// Before ANY Init* below touches the host: work out what on this box was already
+	// here and what vpn-ui put here, and write it down. The Init* calls create netdevs
+	// and rewrite shared config files, and the reconcilers that follow delete whatever
+	// they believe is theirs, so the ownership record has to exist first. See
+	// service/ownership.go.
+	service.OwnSynthesize()
+
 	// Generate or load RADIUS shared secret and start embedded RADIUS server
 	radiusSecret := s.getOrCreateRadiusSecret()
 	if radiusSecret != "" {
@@ -424,6 +448,30 @@ func (s *Server) startTask() {
 	s.cron.AddJob("@weekly", job.NewPeriodicTrafficResetJob("weekly"))
 	// Run once a month, midnight, first of month
 	s.cron.AddJob("@monthly", job.NewPeriodicTrafficResetJob("monthly"))
+
+	// Renew the managed TLS certificate when it comes due. This is the only renewal
+	// scheduler on the box: acme.sh's own cron is deliberately not installed, because
+	// two of them racing for port 80 fail validation and failed validations are the
+	// metered kind. See job.SSLRenewSchedule for why six hours and not a day.
+	//
+	// Registered here rather than below the Telegram block on purpose: that block
+	// RETURNS early on a bad tgbot runtime (see the AddJob error path), and a renewal
+	// that silently stops happening because somebody mistyped a cron string in a
+	// completely unrelated setting is exactly the kind of failure nobody notices
+	// until TLS is already dead.
+	sslRenewJob := job.NewCheckSSLRenewJob()
+	s.cron.AddJob(job.SSLRenewSchedule, sslRenewJob)
+	go func() {
+		// cron's first "@every" tick is one whole interval away, so without this a box
+		// that reboots more often than the interval would never renew at all. Bound to
+		// the server context rather than a bare sleep: a SIGHUP restart builds a whole
+		// new Server (main.go:340), and this must not fire into the next one.
+		select {
+		case <-time.After(job.SSLRenewStartupDelay):
+			sslRenewJob.Run()
+		case <-s.ctx.Done():
+		}
+	}()
 
 	// LDAP sync scheduling
 	if ldapEnabled, _ := s.settingService.GetLdapEnable(); ldapEnabled {

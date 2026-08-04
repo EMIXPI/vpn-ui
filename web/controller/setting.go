@@ -27,6 +27,7 @@ type SettingController struct {
 	userService    service.UserService
 	panelService   service.PanelService
 	systemdService service.SystemdService
+	sslService     service.SSLService
 }
 
 // NewSettingController creates a new SettingController and initializes its routes.
@@ -68,6 +69,22 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	// Writes a systemd unit as root: escalation-class, so no permission bit stands
 	// in for it.
 	g.POST("/service", requireSuperAdmin(), a.saveService)
+
+	// The SSL certificate manager. Reading rides the PermPanelSettings gate above;
+	// every route that ACTS carries requireSuperAdmin() inline, for the same reason
+	// saveService does and the reason spelled out at core.go:44-49. Driving acme.sh
+	// as a subprocess and then writing the files this webserver loads as its own TLS
+	// identity is running code as root on the host, and no permission bit stands in
+	// for that. Handlers are in ssl.go; the gating stays here, where the group is.
+	g.GET("/ssl/status", a.sslStatus)
+	g.GET("/ssl/run-status", a.sslRunStatus)
+	// A POST only because it carries the identifier list. It contacts no CA and
+	// changes nothing, so it is a read.
+	g.POST("/ssl/preflight", a.sslPreflight)
+	g.GET("/ssl/consumers", a.sslConsumers)
+	g.POST("/ssl/start", requireSuperAdmin(), a.sslStart)
+	g.POST("/ssl/use-managed", requireSuperAdmin(), a.sslUseManaged)
+	g.POST("/ssl/rollback", requireSuperAdmin(), a.sslRollback)
 }
 
 // serviceStatus returns the current systemd unit state for the panel.

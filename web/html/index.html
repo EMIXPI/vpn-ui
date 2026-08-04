@@ -683,6 +683,13 @@
     <p class="bo-relnotes-foot" v-if="updatedModal.from && updatedModal.from !== updatedModal.to">
       {{ i18n "pages.index.updateDoneFrom" }} <span class="num">v[[ updatedModal.from ]]</span>
     </p>
+    <!-- Where the database the old binary was running on ended up. Behind a v-if
+         because the snapshot is best-effort and does not block the update: a line
+         naming no file would read as a promise the panel did not keep. -->
+    <div class="bo-update-backup" v-if="updatedModal.backup">
+      <div>{{ i18n "pages.index.updateDoneBackup" }} <span class="num">v[[ updatedModal.from ]]</span></div>
+      <div class="bo-update-backup-path">[[ updatedModal.backup ]]</div>
+    </div>
   </a-modal>
 
   <!-- Donate dialog (VPN-UI tile). The addresses are rendered server-side from
@@ -969,7 +976,7 @@
           <template #title>{{ i18n "pages.index.exportDatabase" }}</template>
           <template #description>{{ i18n "pages.index.exportDatabaseDesc" }}</template>
         </a-list-item-meta>
-        <a-button @click="exportDatabase()" type="primary" icon="download" />
+        <a-button @click="openBackupName()" type="primary" icon="download" />
       </a-list-item>
       <a-list-item class="ant-backup-list-item">
         <a-list-item-meta>
@@ -986,6 +993,39 @@
         <a-button @click="importForeignDatabase()" type="primary" icon="import" />
       </a-list-item>
     </a-list>
+  </a-modal>
+  <!-- Names the .db before it is downloaded. A dialog rather than a rename
+       afterwards because the download is a plain navigation (see exportDatabase),
+       so Content-Disposition is the only thing that can name the file and the
+       ticks have to reach the server as query params.
+
+       The preview is the point of the dialog, not decoration: unticking every box
+       is a legitimate choice and it produces a bare vpn-ui.db, which reads as a
+       bug unless the resulting name is on screen while you tick. -->
+  <a-modal id="backup-name-modal" v-model="backupNameModal.visible"
+    title='{{ i18n "pages.index.backupNameTitle" }}' :closable="true"
+    :class="themeSwitcher.currentTheme" :width="isMobile ? '95%' : 440"
+    ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}'
+    @ok="exportDatabase()" @cancel="() => backupNameModal.hide()">
+    <p class="bo-backup-name-desc">{{ i18n "pages.index.backupNameDesc" }}</p>
+    <a-checkbox-group v-model="backupNameModal.parts" :style="{ width: '100%' }">
+      <div class="bo-cf-ib" :class="{ on: backupNameModal.parts.includes('panelName') }">
+        <a-checkbox value="panelName">{{ i18n "pages.index.backupNamePanel" }}</a-checkbox>
+      </div>
+      <div class="bo-cf-ib" :class="{ on: backupNameModal.parts.includes('domain') }">
+        <a-checkbox value="domain">{{ i18n "pages.index.backupNameDomain" }}</a-checkbox>
+      </div>
+      <div class="bo-cf-ib" :class="{ on: backupNameModal.parts.includes('date') }">
+        <a-checkbox value="date">{{ i18n "pages.index.backupNameDate" }}</a-checkbox>
+      </div>
+      <div class="bo-cf-ib" :class="{ on: backupNameModal.parts.includes('time') }">
+        <a-checkbox value="time">{{ i18n "pages.index.backupNameTime" }}</a-checkbox>
+      </div>
+    </a-checkbox-group>
+    <div class="bo-backup-name-preview">
+      <span class="bo-backup-name-label">{{ i18n "pages.index.backupNamePreview" }}</span>
+      <span class="bo-backup-name-file">[[ backupFilename ]]</span>
+    </div>
   </a-modal>
   <!-- CPU History Modal -->
   <a-modal id="cpu-history-modal" v-model="cpuHistoryModal.visible" :closable="true"
@@ -1667,6 +1707,28 @@
     },
   };
 
+  // Which components the downloaded .db is named after. Held as the names the
+  // server reads off the query string, so nothing has to be translated between
+  // the tick and the request.
+  //
+  // All four to start with: the picker exists to let an operator take parts AWAY
+  // from the full name, so the default has to be the full name.
+  const backupNameModal = {
+    visible: false,
+    parts: ['panelName', 'domain', 'date', 'time'],
+    show() {
+      this.visible = true;
+    },
+    hide() {
+      this.visible = false;
+    },
+  };
+
+  // The order the components appear in, which is the SERVER's order and not the
+  // order they were ticked in. Kept beside the state so the preview and the
+  // request cannot disagree about it.
+  const BACKUP_NAME_ORDER = ['panelName', 'domain', 'date', 'time'];
+
   const customGeoColumns = [
     { title: '{{ i18n "pages.index.customGeoExtColumn" }}', key: 'extDat', scopedSlots: { customRender: 'extDat' }, ellipsis: true },
     { title: '{{ i18n "pages.index.customGeoLastUpdated" }}', key: 'lastUpdatedAt', scopedSlots: { customRender: 'lastUpdatedAt' }, width: 160 },
@@ -1692,6 +1754,7 @@
       logModal,
       xraylogModal,
       backupModal,
+      backupNameModal,
       loadingTip: '{{ i18n "loading"}}',
       showAlert: false,
       showIp: false,
@@ -1741,7 +1804,9 @@
       updateModal: { visible: false },
       // Opened only by the server's one-shot post-update record; see
       // announceUpdateResult().
-      updatedModal: { visible: false, from: '', to: '' },
+      // `backup` is where the pre-update DB snapshot landed, empty when there
+      // isn't one.
+      updatedModal: { visible: false, from: '', to: '', backup: '' },
       // `copied` is the index of the row showing its "copied" confirmation, or
       // -1 for none. An index rather than a boolean so two rows carrying the
       // SAME address (several chains share one) confirm independently.
@@ -1804,6 +1869,31 @@
       // which is usually just the IP the admin typed.
       serverLabel() {
         return this.serverName || this.status.hostname || '{{ .host }}';
+      },
+      // The name /getDb is about to send back, assembled the way the server does
+      // it (BuildBackupFilename in web/service/server.go): the stem, then the
+      // ticked components joined by "_".
+      //
+      // The panel name and the domain arrive already sanitized from the server so
+      // the two cannot disagree on what a space or a unicode label becomes. Date
+      // and time are the browser's clock while the file carries the server's, so
+      // those digits can differ by a timezone. That is fine for what this is for:
+      // showing WHICH parts appear, and above all that unticking every box is a
+      // real choice that really does yield a bare vpn-ui.db.
+      backupFilename() {
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        const values = {
+          panelName: '{{ .backup_panel_name }}',
+          domain: '{{ .backup_domain }}',
+          date: '' + now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()),
+          time: pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()),
+        };
+        const picked = BACKUP_NAME_ORDER
+          .filter(part => this.backupNameModal.parts.includes(part))
+          .map(part => values[part])
+          .filter(Boolean);
+        return 'vpn-ui' + (picked.length ? '_' + picked.join('_') : '') + '.db';
       },
       // "Ubuntu 24.04 - kernel 6.8.0-31-generic", degrading gracefully when the
       // backend has not supplied a field.
@@ -2271,6 +2361,7 @@
           if (!obj || !obj.updated) return;
           this.updatedModal.from = obj.from || '';
           this.updatedModal.to = obj.to || '';
+          this.updatedModal.backup = obj.backupPath || '';
           this.updatedModal.visible = true;
         } catch (e) { /* nothing to announce */ }
       },
@@ -3060,8 +3151,22 @@
       openBackup() {
         backupModal.show();
       },
+      openBackupName() {
+        backupNameModal.show();
+      },
+      // Navigation, not an XHR: the response is a file the browser saves itself,
+      // and its name comes from the server's Content-Disposition. That is why the
+      // ticks travel as query params instead of a request body.
+      //
+      // All four are always sent, unticked ones included as false. An absent flag
+      // means "no picker was involved" server-side, so omitting the false ones
+      // would silently turn all-unticked back into the default dated name.
       exportDatabase() {
-        window.location = basePath + 'panel/api/server/getDb';
+        backupNameModal.hide();
+        const query = BACKUP_NAME_ORDER
+          .map(part => part + '=' + (backupNameModal.parts.includes(part) ? 'true' : 'false'))
+          .join('&');
+        window.location = basePath + 'panel/api/server/getDb?' + query;
       },
       importDatabase() {
         const fileInput = document.createElement('input');
