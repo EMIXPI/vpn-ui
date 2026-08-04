@@ -168,21 +168,38 @@ func (j *XrayTrafficJob) Run() {
 		"gre":         j.radiusService.GetSessions("gre"),
 	}
 	// Which inbound each tunnel address belongs to, so every collected record names
-	// the SOURCE of its bytes. The traffic multiplier bills at the rate of the
-	// inbound the traffic actually came from, and one account can now be served on
-	// several inbounds with different rates; without this it would fall back to the
-	// max across the account's memberships and over-bill the cheaper ones.
+	// the SOURCE of its bytes. Two things read it: the traffic multiplier, which
+	// must bill at the rate of the inbound the traffic actually came from, and the
+	// per-inbound breakdown, which files the bytes under that inbound's membership.
+	//
+	// It comes from the SESSION, which knows: the address was handed out of one
+	// inbound's pool, and the daemon that authenticated it named its inbound (or the
+	// panel resolved it from the address). It used to come from
+	// SingleInboundIdByEmail, which answers by scanning settings for the account and
+	// deliberately returns 0 when two inbounds of the protocol serve it -- so a
+	// multi-inbound account lost its multiplier entirely, and there was nothing to
+	// attribute its usage with either.
+	//
+	// SingleInboundIdByEmail is kept as the fallback for an address the session store
+	// cannot place (a panel restarted mid-session, before the first interim re-adds
+	// it), where its one answer is better than none.
 	vpnInbounds := make(map[string]map[string]int, len(vpnSessions))
 	for protocol, ipToEmail := range vpnSessions {
 		if len(ipToEmail) == 0 {
 			continue
 		}
-		idByEmail := j.inboundService.SingleInboundIdByEmail(protocol)
-		if len(idByEmail) == 0 {
-			continue
+		byIP := j.radiusService.GetSessionInbounds(protocol)
+		if byIP == nil {
+			byIP = map[string]int{}
 		}
-		byIP := make(map[string]int, len(ipToEmail))
+		var idByEmail map[string]int
 		for ip, email := range ipToEmail {
+			if byIP[ip] != 0 {
+				continue
+			}
+			if idByEmail == nil {
+				idByEmail = j.inboundService.SingleInboundIdByEmail(protocol)
+			}
 			if id := idByEmail[service.AccountKeyOf(email)]; id != 0 {
 				byIP[ip] = id
 			}
@@ -216,11 +233,12 @@ func (j *XrayTrafficJob) Run() {
 	// The relay counters remain a real fallback for an account Xray does not track at all
 	// (no socks user, so no record in any tick), which is what those tallies exist for.
 	//
-	// Both relays report per account with no inbound, so their records are stamped
-	// with the source inbound here for the traffic multiplier, the same way the nft
-	// path is above. Neither can be ambiguous in practice (one account is served by
-	// one relay inbound per protocol), and SingleInboundIdByEmail returns 0 if it
-	// somehow is, which falls back to the max across memberships.
+	// Both relays now name their own inbound: telemt scrapes per inbound and the SSH
+	// gateway counts per listener, so each record arrives already stamped. The stamp
+	// below is the fallback for a record that still carries none, and it skips any
+	// that does (see stampSourceInbound). SingleInboundIdByEmail returns 0 when two
+	// inbounds of the protocol serve the account, which falls back to the max
+	// multiplier across memberships and contributes nothing to the breakdown.
 	clientTraffics = appendUnrecorded(clientTraffics, stampSourceInbound(
 		j.mtprotoService.CollectTraffic(), j.inboundService.SingleInboundIdByEmail("mtproto")))
 	clientTraffics = appendUnrecorded(clientTraffics, stampSourceInbound(

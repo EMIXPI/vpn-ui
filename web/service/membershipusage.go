@@ -1,0 +1,497 @@
+package service
+
+import (
+	"sort"
+	"time"
+
+	"github.com/mhsanaei/3x-ui/v2/database"
+	"github.com/mhsanaei/3x-ui/v2/database/model"
+	"github.com/mhsanaei/3x-ui/v2/logger"
+	"github.com/mhsanaei/3x-ui/v2/xray"
+
+	"gorm.io/gorm"
+)
+
+// Per-inbound traffic attribution.
+//
+// client_traffics is unchanged and stays the ONE authoritative counter: one row per
+// account, email unique panel-wide, still what RADIUS, the rbridge sink, the
+// depletion sweep and every daemon read. Everything here is a BREAKDOWN written
+// alongside it from the same deltas, into the membership row that already exists
+// for the pair (see model.AccountInbound).
+//
+// The bug it fixes: an account on two inbounds had exactly one counter row, hanging
+// off whichever inbound created it first, so the panel showed 100% of its usage
+// under that inbound and 0 under every other one. Nothing was lost (the account
+// total was always right); the split was fiction.
+
+// membershipUsageKey is one bucket of the breakdown: this account's bytes on THIS
+// inbound. The email is normalized (accountKey) for the same reason identity is
+// compared that way everywhere else - the collected record carries whatever
+// spelling the daemon reported.
+type membershipUsageKey struct {
+	inboundId int
+	emailKey  string
+}
+
+// membershipUsageDelta is one tick's worth of one bucket. up/down are BILLED bytes
+// and allTime is RAW, matching how the account row is written, so the breakdown and
+// the total stay comparable column for column.
+type membershipUsageDelta struct{ up, down, allTime int64 }
+
+func (d *membershipUsageDelta) add(up, down, allTime int64) {
+	d.up += up
+	d.down += down
+	d.allTime += allTime
+}
+
+// addTo records a delta under its key, creating the bucket on first use.
+func addTo(deltas map[membershipUsageKey]*membershipUsageDelta, inboundId int, email string, up, down, allTime int64) {
+	// Zero means "source unknown", which is not an inbound and must never be
+	// attributed to one. Those bytes still reach the account total; they are simply
+	// absent from the breakdown. Attributing them to a guess (the home inbound, the
+	// lowest membership) is exactly the fiction this file exists to remove.
+	if inboundId == 0 {
+		return
+	}
+	key := membershipUsageKey{inboundId: inboundId, emailKey: accountKey(email)}
+	if key.emailKey == "" {
+		return
+	}
+	d := deltas[key]
+	if d == nil {
+		d = &membershipUsageDelta{}
+		deltas[key] = d
+	}
+	d.add(up, down, allTime)
+}
+
+// addMembershipTraffic folds one tick's deltas into the membership rows.
+//
+// Best-effort, and deliberately outside the caller's error path: the authoritative
+// counter has already been written by the time this runs, so failing the tick here
+// would roll back real billing to protect a display figure.
+//
+// A delta whose membership row does not exist updates nothing and is dropped, which
+// is wanted rather than a miss to fix with an insert. account_inbounds is owned by
+// ApplyMemberships and SyncInboundAccounts; a row conjured here would be a
+// membership the projection never made, and the next sync would delete it anyway.
+func addMembershipTraffic(tx *gorm.DB, deltas map[membershipUsageKey]*membershipUsageDelta) {
+	if len(deltas) == 0 || tx == nil {
+		return
+	}
+	for key, d := range deltas {
+		if d.up == 0 && d.down == 0 && d.allTime == 0 {
+			continue
+		}
+		// COALESCE rather than a bare add: the columns arrive with DEFAULT 0 so
+		// AutoMigrate fills existing rows, but a hand-edited or restored database can
+		// still hold a NULL, and NULL + n is NULL in SQLite - it would silently blank
+		// the membership's whole history instead of adding to it.
+		err := tx.Exec(`
+			UPDATE account_inbounds
+			SET up = COALESCE(up, 0) + ?, down = COALESCE(down, 0) + ?, all_time = COALESCE(all_time, 0) + ?
+			WHERE inbound_id = ?
+			  AND account_id IN (SELECT id FROM accounts WHERE LOWER(TRIM(email)) = ?)`,
+			d.up, d.down, d.allTime, key.inboundId, key.emailKey).Error
+		if err != nil {
+			logger.Warning("per-inbound usage: cannot attribute traffic to inbound ", key.inboundId, " for ", key.emailKey, ": ", err)
+		}
+	}
+}
+
+// resetMembershipUsage zeroes the breakdown for the given accounts, and is the
+// mirror of a reset on client_traffics.
+//
+// up/down go and all_time stays, exactly as the account row behaves: a reset clears
+// what counts against the quota and must not rewind the lifetime record. Called
+// wherever client_traffics.up/down are zeroed, so the breakdown cannot drift into
+// claiming more than the account has used.
+func resetMembershipUsage(tx *gorm.DB, emails []string) {
+	if tx == nil || len(emails) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		if key := accountKey(email); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	err := tx.Exec(`
+		UPDATE account_inbounds
+		SET up = 0, down = 0
+		WHERE account_id IN (SELECT id FROM accounts WHERE LOWER(TRIM(email)) IN (?))`,
+		keys).Error
+	if err != nil {
+		logger.Warning("per-inbound usage: cannot reset the breakdown: ", err)
+	}
+}
+
+// countedByPanel reports whether bytes from this protocol can name the inbound they
+// entered through.
+//
+// True for the nine pool VPN protocols (one nft counter per tunnel address, and an
+// address belongs to exactly one inbound's pool) and for the two relays (telemt and
+// the in-binary SSH gateway tally per account inside one inbound's daemon).
+//
+// False for everything Xray counts, and that is a property of the core rather than a
+// gap here: the stat is named "user>>><email>>>>traffic>>>{up,down}" (xray/api.go)
+// with no inbound component, so an account on vless AND trojan gets ONE number
+// covering both and there is nothing to split it by.
+func countedByPanel(p model.Protocol) bool { return isVpnProtocol(p) || isRelayProtocol(p) }
+
+// membershipUsageRow is one membership's share, joined to the identity it belongs to.
+type membershipUsageRow struct {
+	InboundId int
+	Email     string
+	Up        int64
+	Down      int64
+	AllTime   int64
+}
+
+// accountUsageSplit is one account's usage, already divided.
+type accountUsageSplit struct {
+	// byInbound is the share of each inbound that could account for its own bytes.
+	byInbound map[int]membershipUsageRow
+	// pooled is what no inbound could claim: the account total minus every share
+	// above. It is the Xray-native remainder, and is shown against those inbounds
+	// marked Shared rather than being split between them.
+	pooled xray.ClientTraffic
+	// hasMemberships distinguishes "nothing has been attributed yet" from "this
+	// account is not in the accounts layer at all". The second falls back to the
+	// legacy rendering, so a panel whose accounts migration never ran looks exactly
+	// as it did before.
+	hasMemberships bool
+	// email is the spelling the accounts table stores, kept because identity is
+	// MATCHED case-insensitively but must be DISPLAYED as the operator typed it.
+	email string
+}
+
+// attachClientStats replaces each inbound's preloaded ClientStats with the accounts
+// that inbound actually SERVES, each carrying that inbound's share of the usage.
+//
+// Two bugs die here. ClientStats was a has-many on client_traffics.inbound_id, and
+// there is exactly ONE row per account (email is unique panel-wide), so:
+//
+//   - the account appeared only under its home inbound and was MISSING from every
+//     other inbound serving it, and
+//   - the whole account's usage was rendered as that one inbound's, with the rest
+//     showing nothing.
+//
+// The association is left on the model so Preload("ClientStats") keeps working for
+// the callers that want the raw rows (sub/subService.go), but every list the panel
+// renders comes through here instead.
+func (s *InboundService) attachClientStats(db *gorm.DB, inbounds []*model.Inbound) error {
+	if len(inbounds) == 0 {
+		return nil
+	}
+
+	// The whole table, not a WHERE IN over the emails found below. One scan beats
+	// thousands of bound parameters (SQLite has a hard limit on those), it is what
+	// the Clients page already does for the same data (see ListAccounts), and these
+	// callers are loading every inbound anyway.
+	var traffics []xray.ClientTraffic
+	if err := db.Find(&traffics).Error; err != nil {
+		return err
+	}
+	byEmail := make(map[string]*xray.ClientTraffic, len(traffics))
+	for i := range traffics {
+		byEmail[accountKey(traffics[i].Email)] = &traffics[i]
+	}
+
+	var shares []membershipUsageRow
+	if err := db.Table("account_inbounds").
+		Select("account_inbounds.inbound_id AS inbound_id, accounts.email AS email, " +
+			"COALESCE(account_inbounds.up, 0) AS up, COALESCE(account_inbounds.down, 0) AS down, " +
+			"COALESCE(account_inbounds.all_time, 0) AS all_time").
+		Joins("JOIN accounts ON accounts.id = account_inbounds.account_id").
+		Scan(&shares).Error; err != nil {
+		return err
+	}
+
+	splits := make(map[string]*accountUsageSplit, len(byEmail))
+	for _, share := range shares {
+		key := accountKey(share.Email)
+		if key == "" {
+			continue
+		}
+		split := splits[key]
+		if split == nil {
+			split = &accountUsageSplit{byInbound: map[int]membershipUsageRow{}}
+			splits[key] = split
+		}
+		split.hasMemberships = true
+		split.email = share.Email
+		split.byInbound[share.InboundId] = share
+	}
+
+	// What is left after every attributable inbound took its share. Floored at zero:
+	// the two sides are written by different statements in the same tick and a reset
+	// clears them independently, so a momentary negative is possible and reads far
+	// worse than a zero.
+	for key, split := range splits {
+		total := byEmail[key]
+		if total == nil {
+			continue
+		}
+		var up, down, allTime int64
+		for _, share := range split.byInbound {
+			up += share.Up
+			down += share.Down
+			allTime += share.AllTime
+		}
+		split.pooled = xray.ClientTraffic{
+			Up:      max64(total.Up-up, 0),
+			Down:    max64(total.Down-down, 0),
+			AllTime: max64(total.AllTime-allTime, 0),
+		}
+	}
+
+	for _, inbound := range inbounds {
+		inbound.ClientStats = s.clientStatsFor(inbound, byEmail, splits)
+	}
+	return nil
+}
+
+// clientStatsFor builds one inbound's rendered rows.
+func (s *InboundService) clientStatsFor(
+	inbound *model.Inbound,
+	byEmail map[string]*xray.ClientTraffic,
+	splits map[string]*accountUsageSplit,
+) []xray.ClientTraffic {
+	attributable := countedByPanel(inbound.Protocol)
+
+	stats := make([]xray.ClientTraffic, 0, 8)
+	seen := map[string]bool{}
+	add := func(email string) {
+		key := accountKey(email)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		total := byEmail[key]
+		if total == nil {
+			// No quota row means no account to show. Not an error: a settings entry
+			// can briefly exist without one, and inventing a row here would put a
+			// client on the page with a quota and an expiry nobody set.
+			return
+		}
+		// Up/Down/AllTime are left exactly as client_traffics holds them: the
+		// account's own totals, which is what the quota bars and the depletion
+		// checks must keep comparing against. Only the Inbound* fields below are
+		// this inbound's slice.
+		row := *total
+		// The inbound this row is being RENDERED under, not the account's home
+		// inbound. The page passes it straight back as the :id of
+		// /resetClientTraffic and /:id/delClient, and the home inbound is frequently
+		// one the caller has no grant on, which failed the ownership check on an
+		// inbound they were looking at.
+		row.InboundId = inbound.Id
+
+		split := splits[key]
+		switch {
+		case split == nil || !split.hasMemberships:
+			// Not in the accounts layer, so there is nothing to attribute with.
+			// Render what the has-many used to: the whole account under its home
+			// inbound, nothing anywhere else. This is the panel whose accounts
+			// migration has not run (or failed), and it must look untouched.
+			row.InboundId = total.InboundId
+			if total.InboundId == inbound.Id {
+				row.InboundUp, row.InboundDown, row.InboundAllTime = total.Up, total.Down, total.AllTime
+			}
+		case attributable:
+			share := split.byInbound[inbound.Id]
+			row.InboundUp, row.InboundDown, row.InboundAllTime = share.Up, share.Down, share.AllTime
+		default:
+			// Xray-native: the remainder, pooled across every such inbound serving
+			// the account, flagged so the page can say so instead of implying this
+			// one inbound moved all of it.
+			row.InboundUp = split.pooled.Up
+			row.InboundDown = split.pooled.Down
+			row.InboundAllTime = split.pooled.AllTime
+			row.Shared = true
+		}
+		stats = append(stats, row)
+	}
+
+	// settings.clients first and in its own order, because that is the order the
+	// page lists clients in, then the memberships that have not been spliced into
+	// settings yet. Mirrors inboundAccountEmails, inlined because that one queries
+	// per inbound and this runs over every inbound in the panel.
+	if clients, ok := parseSettingsClients(inbound.Settings); ok {
+		for _, entry := range clients {
+			email, _ := entry["email"].(string)
+			add(email)
+		}
+	}
+	// Sorted, so two identical panels render the same list. Map order is random and
+	// these rows land at the end of a table an operator reads top to bottom.
+	extra := make([]string, 0, 4)
+	for key, split := range splits {
+		if _, serves := split.byInbound[inbound.Id]; !serves || seen[key] {
+			continue
+		}
+		extra = append(extra, split.email)
+	}
+	sort.Strings(extra)
+	for _, email := range extra {
+		add(email)
+	}
+	return stats
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// -----------------------------------------------------------------------------
+// Backfill
+// -----------------------------------------------------------------------------
+
+// membershipUsageMigratedKey is the setting that records the backfill has run.
+const membershipUsageMigratedKey = "membershipUsageBackfilledAt"
+
+// MigrationMembershipUsage seeds the per-inbound breakdown from the usage that
+// exists today.
+//
+// There is no historical split to recover: until this release every byte was
+// counted against one account-wide row, so the honest backfill is to put the whole
+// of it on the membership that row already named (client_traffics.inbound_id, the
+// account's home inbound) and let new ticks divide correctly from here. It FREEZES
+// today's wrong attribution as the historical bucket rather than inventing a better
+// looking one; dividing evenly across memberships would be making data up.
+//
+// Operators need telling, because an account that has been split across two
+// inbounds all along will keep showing all its history under one of them.
+//
+// Runs on every start (not from MigrateDB, which only the `migrate` subcommand and
+// the DB-import path reach) and guards itself with a setting, so a panel that has
+// been running the split for weeks is never re-flattened.
+func (s *AccountService) MigrationMembershipUsage() {
+	db := database.GetDB()
+	if db == nil {
+		return
+	}
+
+	var settingService SettingService
+	// getSetting rather than getString: getString demands the key be in
+	// defaultValueMap and errors otherwise, so the ordinary "never run" case would
+	// take an error path on every start.
+	if setting, err := settingService.getSetting(membershipUsageMigratedKey); err == nil && setting != nil && setting.Value != "" {
+		return
+	}
+
+	seeded := 0
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var memberships []model.AccountInbound
+		if err := tx.Order("inbound_id ASC").Find(&memberships).Error; err != nil {
+			return err
+		}
+		if len(memberships) == 0 {
+			// Nothing to seed. Still flagged as done: a panel with no accounts layer
+			// yet gets its memberships created with zeroed counters by
+			// ApplyMemberships, which is already correct.
+			return nil
+		}
+		byAccount := map[int][]int{}
+		for _, m := range memberships {
+			byAccount[m.AccountId] = append(byAccount[m.AccountId], m.InboundId)
+		}
+
+		var accounts []model.Account
+		if err := tx.Select("id", "email").Find(&accounts).Error; err != nil {
+			return err
+		}
+		idByEmail := make(map[string]int, len(accounts))
+		for _, account := range accounts {
+			idByEmail[accountKey(account.Email)] = account.Id
+		}
+
+		// Which inbounds still exist. An account whose home inbound was deleted is
+		// common (nothing prunes client_traffics.inbound_id when its inbound goes),
+		// and seeding a membership that is not there would drop the history.
+		var liveIds []int
+		if err := tx.Model(&model.Inbound{}).Pluck("id", &liveIds).Error; err != nil {
+			return err
+		}
+		live := make(map[int]bool, len(liveIds))
+		for _, id := range liveIds {
+			live[id] = true
+		}
+
+		var traffics []xray.ClientTraffic
+		if err := tx.Find(&traffics).Error; err != nil {
+			return err
+		}
+
+		for _, traffic := range traffics {
+			if traffic.Up == 0 && traffic.Down == 0 && traffic.AllTime == 0 {
+				continue
+			}
+			accountId, ok := idByEmail[accountKey(traffic.Email)]
+			if !ok {
+				continue
+			}
+			inboundIds := byAccount[accountId]
+			if len(inboundIds) == 0 {
+				continue
+			}
+			sort.Ints(inboundIds)
+
+			// The home inbound if it is really a membership and really still exists,
+			// otherwise the lowest live one. Ascending order makes that deterministic
+			// rather than "whichever the database returned first".
+			target := 0
+			for _, id := range inboundIds {
+				if id == traffic.InboundId && live[id] {
+					target = id
+					break
+				}
+			}
+			if target == 0 {
+				for _, id := range inboundIds {
+					if live[id] {
+						target = id
+						break
+					}
+				}
+			}
+			if target == 0 {
+				continue
+			}
+
+			if err := tx.Model(&model.AccountInbound{}).
+				Where("account_id = ? AND inbound_id = ?", accountId, target).
+				Updates(map[string]any{
+					"up":       traffic.Up,
+					"down":     traffic.Down,
+					"all_time": traffic.AllTime,
+				}).Error; err != nil {
+				return err
+			}
+			seeded++
+		}
+		return nil
+	})
+	if err != nil {
+		// Rolled back, the flag stays unset, and the next start retries. The panel is
+		// unaffected either way: the breakdown is a display figure and every
+		// enforcement path still reads client_traffics.
+		logger.Warning("MigrationMembershipUsage - seeding the per-inbound breakdown failed, will retry on the next start: ", err)
+		return
+	}
+
+	if err := settingService.setString(membershipUsageMigratedKey, time.Now().Format(time.RFC3339)); err != nil {
+		logger.Warning("MigrationMembershipUsage - could not set the migrated flag: ", err)
+		return
+	}
+	if seeded > 0 {
+		logger.Infof("MigrationMembershipUsage - seeded the per-inbound breakdown for %d account(s); their existing usage is filed under the inbound they were created on", seeded)
+	}
+}
