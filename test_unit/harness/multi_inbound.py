@@ -1138,6 +1138,12 @@ def _wait_account_enabled(panel, sc, log, timeout: int = 90) -> tuple[bool, str]
             continue
         time.sleep(10)
         row = panel.get_client_traffics(EMAIL) or {}
+        # The ACCOUNT row as well, because getClientTraffics is not authoritative
+        # here: it reconciles `enable` in memory from GetClientByEmail
+        # (inbound.go:4452), which for a multi-inbound account picks an arbitrary
+        # membership, so it can report enabled while the account row is not.
+        rows = (panel.list_accounts(search=EMAIL) or {}).get("rows") or []
+        acct = next((r for r in rows if (r.get("email") or "").lower() == EMAIL), {})
         off = []
         for proto in ORDER:
             ib = _inbound_of(sc, proto)
@@ -1146,9 +1152,10 @@ def _wait_account_enabled(panel, sc, log, timeout: int = 90) -> tuple[bool, str]
             entry = panel.get_client(ib.inbound_id, EMAIL)
             if entry and not entry.get("enable"):
                 off.append(proto)
-        if row.get("enable") and not off:
+        if acct.get("enable") and row.get("enable") and not off:
             return True, ""
-        last = (f"client_traffics.enable={row.get('enable')}, "
+        last = (f"account.enable={acct.get('enable')}, "
+                f"client_traffics.enable={row.get('enable')}, "
                 f"memberships still off: {off[:6]}")
         log(f"   (waiting for the account to come back on: {last})")
     return False, last
@@ -1261,6 +1268,19 @@ def _desync_check(cA, sc, panel, phase, ready, log) -> None:
         st_live.status, st_live.detail = Status.ERROR, str(e)[:250]
     log(f"-> single-inbound-disable-live-effect [{st_live.status.value}] {st_live.detail}")
 
+    # The account comes back on before the next check, which is the whole reason that
+    # check exists: it asks whether ONE membership can go dark on its own, and the
+    # projection renders the AND of the account flag and the membership flag. Leave
+    # the account down from the disable above and all 18 render disabled no matter
+    # what the switch does, so the assertion would fail against correct code.
+    ok, why = _wait_account_enabled(panel, sc, log)
+    if not ok:
+        st_pre = phase.add(SubTest("per-membership-toggle-precondition"))
+        st_pre.status = Status.ERROR
+        st_pre.detail = f"the account would not come back on, so the switch is untestable: {why}"
+        log(f"-> per-membership-toggle-precondition [error] {st_pre.detail}")
+        return
+
     # The per-inbound switch, on its own terms. It is a DIFFERENT question from the
     # account-wide disable above, it has its own route and its own column
     # (account_inbounds.enable), and the projection renders the AND of the two. What
@@ -1276,6 +1296,17 @@ def _desync_check(cA, sc, panel, phase, ready, log) -> None:
         return
     tib = _inbound_of(sc, target)
     try:
+        # The ACCOUNT row IMMEDIATELY before the switch. _wait_account_enabled above
+        # judges readiness partly from getClientTraffics, and that endpoint
+        # reconciles `enable` in memory from GetClientByEmail (inbound.go:4452),
+        # picking an arbitrary membership for a multi-inbound account. So it can
+        # report an enabled account that is not enabled. This read is the accounts
+        # layer's own answer, and it is what says whether the switch lowered the
+        # account or merely found it already down.
+        rows_before = (panel.list_accounts(search=EMAIL) or {}).get("rows") or []
+        before = next((r for r in rows_before
+                       if (r.get("email") or "").lower() == EMAIL), {})
+        log(f"   (account row immediately BEFORE the switch: enable={before.get('enable')})")
         panel.set_membership_enable(tib.inbound_id, EMAIL, False)
         time.sleep(20)
         states = {}
@@ -1308,6 +1339,7 @@ def _desync_check(cA, sc, panel, phase, ready, log) -> None:
                 later[proto] = bool(entry.get("enable"))
         dark_later = sorted(p for p, on in later.items() if not on)
         st2.log = (f"switched {target} off\n"
+                   f"  ACCOUNT row BEFORE : enable={before.get('enable')}\n"
                    f"  memberships @+20s : {states}\n"
                    f"  memberships @+35s : {later}\n"
                    f"  ACCOUNT row       : enable={acct.get('enable')} "
