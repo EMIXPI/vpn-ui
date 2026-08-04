@@ -186,6 +186,20 @@ func (s *L2tpService) GenerateAllConfigs() error {
 // to its own inbound's pool. A single shared PPP options file carries a
 // protocol-level nas_identifier (see GeneratePPPOptions).
 func (s *L2tpService) GenerateXl2tpdConfig(inbounds []*model.Inbound) error {
+	// xl2tpd.conf is the DISTRO's file on a host that already ran xl2tpd, and we
+	// replace it wholesale. Recorded (and copied to /etc/vpn-ui/backups/ on the first
+	// overwrite) so uninstall gives the operator theirs back instead of leaving our
+	// render behind. See ownership.go. It belongs on the WRITE, not in the builder:
+	// the builder also feeds the config editor's read-only preview.
+	ownPrepareHostFile("/etc/xl2tpd/xl2tpd.conf", "l2tp")
+	return s.writeFile("/etc/xl2tpd/xl2tpd.conf",
+		applyCoreConfigOverride("l2tp", 0, "xl2tpd.conf", s.buildXl2tpdConfig(inbounds)))
+}
+
+// buildXl2tpdConfig renders the body. Split from the write so the config editor can show
+// the operator the GENERATED text they are diverging from, which reading the file back
+// cannot do: what is on disk already has their override merged into it.
+func (s *L2tpService) buildXl2tpdConfig(inbounds []*model.Inbound) string {
 	var b strings.Builder
 	b.WriteString("[global]\n")
 	b.WriteString("port = 1701\n\n")
@@ -229,7 +243,7 @@ func (s *L2tpService) GenerateXl2tpdConfig(inbounds []*model.Inbound) error {
 	b.WriteString("length bit = yes\n")
 	b.WriteString("flow bit = yes\n\n")
 
-	return s.writeFile("/etc/xl2tpd/xl2tpd.conf", b.String())
+	return b.String()
 }
 
 // GeneratePPPOptions writes the single shared PPP options file
@@ -238,9 +252,21 @@ func (s *L2tpService) GenerateXl2tpdConfig(inbounds []*model.Inbound) error {
 // server maps each account to its inbound by username. DNS/MTU are taken from the
 // representative (first) inbound — all L2TP inbounds share these link options.
 func (s *L2tpService) GeneratePPPOptions(inbound *model.Inbound) error {
-	settings, err := s.parseSettings(inbound)
+	body, err := s.buildPPPOptions(inbound)
 	if err != nil {
 		return err
+	}
+	// Same as xl2tpd.conf: a host file we overwrite, backed up on first sight.
+	ownPrepareHostFile("/etc/ppp/options.xl2tpd", "l2tp")
+	return s.writeFile("/etc/ppp/options.xl2tpd",
+		applyCoreConfigOverride("l2tp", 0, "options.xl2tpd", body))
+}
+
+// buildPPPOptions renders the body; see buildXl2tpdConfig for why it is split out.
+func (s *L2tpService) buildPPPOptions(inbound *model.Inbound) (string, error) {
+	settings, err := s.parseSettings(inbound)
+	if err != nil {
+		return "", err
 	}
 
 	mtu := settings.Mtu
@@ -281,7 +307,7 @@ func (s *L2tpService) GeneratePPPOptions(inbound *model.Inbound) error {
 	b.WriteString("plugin radius.so\n")
 	b.WriteString("radius-config-file /etc/ppp/radius/l2tp.conf\n")
 
-	return s.writeFile("/etc/ppp/options.xl2tpd", b.String())
+	return b.String(), nil
 }
 
 // getDisabledEmails returns a set of client emails that are disabled in the
@@ -391,6 +417,11 @@ func (s *L2tpService) GenerateIPsecConfig(inbounds []*model.Inbound) error {
 	b.WriteString("    left=%defaultroute\n")
 	b.WriteString("    right=%any\n")
 
+	// The host libreswan's own two files. ipsec.secrets is the painful one: it holds
+	// every PSK the operator configured, and we replace it with a single line, so
+	// before this recorded a backup an install silently destroyed their IPsec
+	// credentials with no way back. See ownership.go.
+	ownPrepareHostFile("/etc/ipsec.conf", "l2tp")
 	if err := s.writeFile("/etc/ipsec.conf", b.String()); err != nil {
 		return err
 	}
@@ -399,6 +430,7 @@ func (s *L2tpService) GenerateIPsecConfig(inbounds []*model.Inbound) error {
 	escapedPsk := strings.ReplaceAll(psks[0], `\`, `\\`)
 	escapedPsk = strings.ReplaceAll(escapedPsk, `"`, `\"`)
 	secrets := fmt.Sprintf(": PSK \"%s\"\n", escapedPsk)
+	ownPrepareHostFile("/etc/ipsec.secrets", "l2tp")
 	if err := s.writeFileMode("/etc/ipsec.secrets", secrets, 0600); err != nil {
 		return err
 	}
@@ -454,6 +486,23 @@ func (s *L2tpService) SetupAllTproxy() error {
 // so an id-scoped secret can't match a dynamic road warrior (mirrors libreswan's
 // `: PSK "..."`). MODP1024 is listed for Win7's DH-group-2-only built-in client.
 func (s *L2tpService) writeL2tpSwanctlConn(inbounds []*model.Inbound) error {
+	confPath := swanctlConfDir + "/l2tp.conf"
+	body := s.buildL2tpSwanctlConn(inbounds)
+	// An empty body means no enabled inbound wants IPsec. The file is REMOVED rather
+	// than emptied, and no override is applied to it: charon includes conf.d/*.conf, so
+	// leaving a stub behind would keep a dead connection loaded.
+	if body == "" {
+		_ = os.Remove(confPath)
+		return nil
+	}
+	_ = os.MkdirAll(swanctlConfDir, 0755)
+	return os.WriteFile(confPath,
+		[]byte(applyCoreConfigOverride("l2tp", 0, "l2tp.conf", body)), 0600)
+}
+
+// buildL2tpSwanctlConn renders the body, or "" when no enabled inbound needs IPsec.
+// See buildXl2tpdConfig for why the render is split from the write.
+func (s *L2tpService) buildL2tpSwanctlConn(inbounds []*model.Inbound) string {
 	psk := ""
 	for _, ib := range inbounds {
 		if !ib.Enable {
@@ -464,15 +513,12 @@ func (s *L2tpService) writeL2tpSwanctlConn(inbounds []*model.Inbound) error {
 			break
 		}
 	}
-	confPath := swanctlConfDir + "/l2tp.conf"
 	if psk == "" {
-		_ = os.Remove(confPath)
-		return nil
+		return ""
 	}
 	esc := strings.ReplaceAll(psk, `\`, `\\`)
 	esc = strings.ReplaceAll(esc, `"`, `\"`)
 
-	_ = os.MkdirAll(swanctlConfDir, 0755)
 	var b strings.Builder
 	b.WriteString("# Auto-generated by vpn-ui L2TP service (IKEv1 transport on shared charon) - do not edit\n")
 	b.WriteString("connections {\n")
@@ -508,7 +554,7 @@ func (s *L2tpService) writeL2tpSwanctlConn(inbounds []*model.Inbound) error {
 	b.WriteString(fmt.Sprintf("        secret = \"%s\"\n", esc))
 	b.WriteString("    }\n")
 	b.WriteString("}\n")
-	return os.WriteFile(confPath, []byte(b.String()), 0600)
+	return b.String()
 }
 
 // RestartServices (re)launches xl2tpd as a panel-managed child process and, when any

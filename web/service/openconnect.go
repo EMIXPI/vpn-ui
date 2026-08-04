@@ -221,10 +221,18 @@ func (s *OcservService) generateServerConfig(inbound *model.Inbound) error {
 	}
 
 	dir := s.configDir(inbound.Id)
+	// /etc/ocserv is recorded before we implicitly create it, because a distro ocserv
+	// owns that directory: its ocserv.conf, its certificates and its ocpasswd live
+	// there, and uninstall used to remove the whole thing. We only ever own
+	// /etc/ocserv/server-<id> inside it.
+	ownPrepareDir("/etc/ocserv", "openconnect")
+	ownPrepareDir(dir, "openconnect")
 	os.MkdirAll(dir, 0755)
+	ownPrepareDir("/var/run/ocserv", "openconnect")
 	os.MkdirAll("/var/run/ocserv", 0755)
 
-	conf := s.buildServerConfig(inbound, settings)
+	conf := applyCoreConfigOverride("openconnect", inbound.Id, "ocserv.conf",
+		s.buildServerConfig(inbound, settings))
 	return s.writeFile(fmt.Sprintf("%s/ocserv.conf", dir), conf)
 }
 

@@ -453,6 +453,10 @@ func (s *Ikev2Service) writeStrongswanConf(inbounds []*model.Inbound) error {
 	b.WriteString("    }\n")
 	b.WriteString("}\n")
 
+	// Backed up before the first overwrite, exactly as in charon.go's twin of this
+	// function: on a host with its own strongSwan these two files are theirs, and
+	// swanctl.conf in particular loses every connection they had defined in it.
+	ownPrepareHostFile("/etc/strongswan.conf", "ikev2")
 	if err := os.WriteFile("/etc/strongswan.conf", []byte(b.String()), 0600); err != nil {
 		return fmt.Errorf("write /etc/strongswan.conf: %w", err)
 	}
@@ -462,6 +466,7 @@ func (s *Ikev2Service) writeStrongswanConf(inbounds []*model.Inbound) error {
 	_ = os.MkdirAll(swanctlX509, 0755)
 	_ = os.MkdirAll(swanctlX509CA, 0755)
 	_ = os.MkdirAll(swanctlPrivate, 0700)
+	ownPrepareHostFile(swanctlDir+"/swanctl.conf", "ikev2")
 	return os.WriteFile(swanctlDir+"/swanctl.conf", []byte("include conf.d/*.conf\n"), 0600)
 }
 
@@ -616,6 +621,18 @@ func (s *Ikev2Service) serverID(settings *ikev2Settings) string {
 	return "vpn-ui"
 }
 
+// ResolveServerID is serverID for callers outside this file (the account-export "Remote
+// ID" endpoint) that only have the inbound, not an already-parsed settings struct. Kept
+// as a thin wrapper rather than exporting serverID/ikev2Settings themselves, since those
+// stay package-private like every other protocol's settings shape.
+func (s *Ikev2Service) ResolveServerID(inbound *model.Inbound) (string, error) {
+	settings, err := s.parseSettings(inbound)
+	if err != nil {
+		return "", err
+	}
+	return s.serverID(settings), nil
+}
+
 // ikev2PoolName is the swanctl pool name for an eap-tls inbound's local address pool.
 func ikev2PoolName(base string) string { return base + "-pool" }
 
@@ -702,6 +719,17 @@ func (s *Ikev2Service) InspectServerCert(inbound *model.Inbound) (keyType, warni
 // writeConnConf writes /etc/swanctl/conf.d/ikev2-<id>.conf: one connection definition
 // for the inbound, keyed by its auth mode.
 func (s *Ikev2Service) writeConnConf(inbound *model.Inbound, settings *ikev2Settings) error {
+	base := s.certBaseName(inbound.Id)
+	_ = os.MkdirAll(swanctlConfDir, 0755)
+	return os.WriteFile(swanctlConfDir+"/"+base+".conf",
+		[]byte(applyCoreConfigOverride("ikev2", inbound.Id, base+".conf",
+			s.buildConnConf(inbound, settings))), 0600)
+}
+
+// buildConnConf renders the body. Split from the write so the config editor can show the
+// operator the GENERATED text they are diverging from; the file on disk already has
+// their override merged in.
+func (s *Ikev2Service) buildConnConf(inbound *model.Inbound, settings *ikev2Settings) string {
 	base := s.certBaseName(inbound.Id)
 	id := s.serverID(settings)
 
@@ -797,8 +825,7 @@ func (s *Ikev2Service) writeConnConf(inbound *model.Inbound, settings *ikev2Sett
 		b.WriteString("}\n")
 	}
 
-	_ = os.MkdirAll(swanctlConfDir, 0755)
-	return os.WriteFile(swanctlConfDir+"/"+base+".conf", []byte(b.String()), 0600)
+	return b.String()
 }
 
 // SetupRouting prepares the host so IKEv2 client traffic is TPROXY-redirected into

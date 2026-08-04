@@ -421,8 +421,17 @@ func (s *OpenVpnService) generateServerConfigs(inbound *model.Inbound, preserveL
 	}
 
 	dir := s.configDir(inbound.Id)
+	// Recorded before each MkdirAll so uninstall can tell a directory we created from
+	// one the distro's openvpn package owns. /etc/openvpn/server is the case that
+	// matters: on Debian/Ubuntu/Fedora it is the distro's own server-config directory
+	// and the panel only ever mkdir's it (nothing is written inside), yet uninstall
+	// used to delete it whole, taking the operator's server configs with it.
+	ownPrepareDir("/etc/openvpn", "openvpn")
+	ownPrepareDir(dir, "openvpn")
 	os.MkdirAll(dir, 0755)
+	ownPrepareDir("/var/run/openvpn", "openvpn")
 	os.MkdirAll("/var/run/openvpn", 0755)
+	ownPrepareDir("/etc/openvpn/server", "openvpn")
 	os.MkdirAll("/etc/openvpn/server", 0755)
 
 	// Path to the running panel binary, used as OpenVPN's auth/connect/disconnect
@@ -445,7 +454,8 @@ func (s *OpenVpnService) generateServerConfigs(inbound *model.Inbound, preserveL
 			continue
 		}
 		confPath := fmt.Sprintf("%s/server-%s.conf", dir, proto)
-		conf := s.buildServerConfig(inbound, settings, proto, ports[proto], binaryPath)
+		conf := applyCoreConfigOverride("openvpn", inbound.Id, "server-"+proto+".conf",
+			s.buildServerConfig(inbound, settings, proto, ports[proto], binaryPath))
 		if err := s.writeFile(confPath, conf); err != nil {
 			return err
 		}

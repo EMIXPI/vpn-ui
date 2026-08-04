@@ -347,7 +347,8 @@ func (s *SstpService) generateServerConfig(inbound *model.Inbound) error {
 	dir := s.configDir(inbound.Id)
 	os.MkdirAll(dir, 0755)
 
-	conf := s.buildServerConfig(inbound, settings)
+	conf := applyCoreConfigOverride("sstp", inbound.Id, "accel-ppp.conf",
+		s.buildServerConfig(inbound, settings))
 	if err := s.writeFile(fmt.Sprintf("%s/accel-ppp.conf", dir), conf); err != nil {
 		return err
 	}
