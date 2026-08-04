@@ -643,11 +643,13 @@ func TestShadowsocksLegacyMethodKeepsTheSharedPassword(t *testing.T) {
 	}
 }
 
-// MTProto's three transports are per-CLIENT booleans the accounts layer does not
-// model. A membership created by ticking an inbound has no entry to inherit them
-// from, so all three arrived false: an account that exists, is listed, and cannot
-// connect in any transport.
-func TestMtprotoMembershipGetsItsModes(t *testing.T) {
+// The SECRET is the whole of what an MTProto membership needs: it is the credential,
+// and without one the account is created, listed on the inbound, and silently dropped
+// from the proxy config. The transports used to be per-client booleans that this path
+// had to seed too (a membership has no entry to inherit them from, so all three
+// arrived false and the account could not connect in any transport); they belong to
+// the inbound now, which every membership joins already configured.
+func TestMtprotoMembershipGetsItsSecret(t *testing.T) {
 	svc := newAccountsDB(t)
 	vless := seedInboundWithClients(t, model.VLESS, 46361, []map[string]any{
 		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
@@ -663,24 +665,23 @@ func TestMtprotoMembershipGetsItsModes(t *testing.T) {
 	if entry == nil {
 		t.Fatal("the account was not projected onto the mtproto inbound")
 	}
-	for _, mode := range []string{"modeClassic", "modeSecure", "modeTls"} {
-		if entry[mode] != true {
-			t.Errorf("%s = %v, want true: a new mtproto membership with every mode off "+
-				"cannot connect in any transport", mode, entry[mode])
+	secret, _ := entry["secret"].(string)
+	if secret == "" {
+		t.Fatalf("no secret minted for the mtproto membership: %v", entry["secret"])
+	}
+	// The dead per-client mode keys must not be invented: writing them back would
+	// resurrect a shape nothing reads and make a legacy inbound look migrated.
+	for _, mode := range []string{"modeClassic", "modeSecure", "modeTls", "tlsDomain"} {
+		if _, has := entry[mode]; has {
+			t.Errorf("%s was written onto the membership entry; it belongs to the inbound now", mode)
 		}
 	}
-	if entry["secret"] == nil || entry["secret"] == "" {
-		t.Errorf("no secret minted for the mtproto membership: %v", entry["secret"])
-	}
-	// An operator turning a mode off must stick: the defaults are for a BRAND NEW
-	// membership, never re-applied over a stored choice.
-	entry["modeTls"] = false
-	writeClients(t, mt.Id, []map[string]any{entry})
+	// Re-projection keeps the credential the customer already holds.
 	if _, err := svc.ApplyMemberships("bob@example.com", []int{vless.Id, mt.Id}, nil, true); err != nil {
 		t.Fatalf("second ApplyMemberships: %v", err)
 	}
-	if got := clientEntry(t, mt.Id, "bob@example.com")["modeTls"]; got != false {
-		t.Errorf("modeTls = %v after re-projection, want the operator's false to stick", got)
+	if got, _ := clientEntry(t, mt.Id, "bob@example.com")["secret"].(string); got != secret {
+		t.Errorf("secret = %q after re-projection, want the stored %q", got, secret)
 	}
 }
 

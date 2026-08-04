@@ -11,6 +11,7 @@ import (
 
 	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
+	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/util/common"
 
 	"gorm.io/gorm"
@@ -274,7 +275,6 @@ func projectAccountOntoInbound(inbound *model.Inbound, account *model.Account, m
 			fresh["created_at"] = now
 		}
 		fresh["updated_at"] = now
-		seedProtocolDefaults(fresh, inbound.Protocol)
 		list = append(list, fresh)
 	}
 
@@ -286,45 +286,23 @@ func projectAccountOntoInbound(inbound *model.Inbound, account *model.Account, m
 	return string(out), nil
 }
 
-// seedProtocolDefaults fills in the per-protocol fields a BRAND NEW membership has
-// nowhere to inherit, for the protocols where an absent field does not mean "the
-// default" but "switched off".
+// There is deliberately no per-protocol seeding on the fresh-entry path any more.
 //
-// The accounts layer models only what every protocol shares (identity, credential,
-// quota, expiry, enable). Everything else rides in the passed-through part of the
-// entry, which works because a membership normally starts from a real client entry
-// somebody filled in. A membership created by ticking an inbound on the Clients
-// page has no such entry, so those fields are simply absent.
+// It existed for exactly one case: MTProto's three transports were per-client
+// booleans, and a membership created by ticking an inbound on the Clients page has no
+// stored entry to inherit from, so all three decoded to false and the account was
+// created, listed, and could not connect in ANY transport. Those booleans (with the
+// FakeTLS domain and the device cap) now belong to the INBOUND (mtprotoSettings in
+// web/service/mtproto.go), which every membership joins already configured, so there
+// is nothing left for a fresh entry to be missing. The ad tag is still per-client and
+// still needs no seeding, for the opposite reason: absent decodes to "no tag", which
+// is the right default and the one an operator has to opt out of.
 //
-// For most protocols absent is harmless: a missing vless `flow` is the protocol
-// default, a missing naive `username` falls back to the email. MTProto is the one
-// where it is fatal. Its three transports are per-client booleans, and absent
-// decodes to false for all three, so the account was created, appeared on the
-// inbound, and could not connect in ANY transport. The values here are the same
-// ones the panel's own new-client form uses (Inbound.MtprotoSettings.MtprotoUser,
-// web/assets/js/model/inbound.js:6104), so an account provisioned by membership is
-// indistinguishable from one added through the inbound form.
-//
-// Called ONLY on the fresh-entry path, never on re-projection, for the same reason
-// the created_at stamp above is: renderClientEntry is what the migration's
-// round-trip verification renders through, and inventing a field there would make
-// every stored entry lacking it fail to match and roll the whole pass back. The
-// write path may add defaults; the render path may not.
-func seedProtocolDefaults(entry map[string]any, protocol model.Protocol) {
-	if protocol != model.MTPROTO {
-		return
-	}
-	for key, value := range map[string]any{
-		"modeClassic": true,
-		"modeSecure":  true,
-		"modeTls":     true,
-		"tlsDomain":   "www.google.com",
-	} {
-		if _, has := entry[key]; !has {
-			entry[key] = value
-		}
-	}
-}
+// If a protocol ever needs this again, note the constraint that shaped it: seeding may
+// only happen HERE, on the write path, never inside renderClientEntry. That function
+// is also what the migration's round-trip verification renders through, and inventing
+// a field there makes every stored entry lacking it fail to match and rolls the whole
+// pass back.
 
 // removeAccountFromInbound drops an account's entry from an inbound's settings.
 //
@@ -1167,4 +1145,184 @@ func (s *AccountService) ProjectAccount(tx *gorm.DB, accountId int) ([]int, erro
 	}
 
 	return touched, nil
+}
+
+// -----------------------------------------------------------------------------
+// Rename and removal: keeping the accounts layer in step with a settings write
+// -----------------------------------------------------------------------------
+
+// RenameAccount carries an existing account row onto a new email instead of
+// leaving the old one behind.
+//
+// Without it a rename SPLITS the customer in two. UpdateInboundClient rewrites the
+// one inbound it was posted against, and the controller then applies memberships
+// under the NEW email: no account answers to that key, so a SECOND account row is
+// created, and projectAccountOntoInbound matches on the new email, fails on every
+// other member inbound, and APPENDS. The old email is left as a live, working,
+// billable account on all of them, listed under a customer who no longer exists.
+// resellerService.RenameClient already does this for the ledger; this is the same
+// carry-over for the accounts layer.
+//
+// The settings entries move first, so the account row and the blobs are never
+// briefly disagreeing about which key names the customer, and so the projection
+// that follows matches in place rather than appending.
+//
+// Returns the inbound ids whose settings changed, for the caller's reconcile: a
+// renamed account is a new RADIUS login and a new per-account routing rule, so every
+// daemon serving it has to be regenerated.
+func (s *AccountService) RenameAccount(oldEmail, newEmail string) ([]int, error) {
+	oldKey, newKey := accountKey(oldEmail), accountKey(newEmail)
+	// A case-only change still has to reach the settings (the stored spelling is what
+	// the core and RADIUS carry), but it is not a change of identity, so the account
+	// row already answers to it.
+	if oldKey == "" || newKey == "" || oldKey == newKey {
+		return nil, nil
+	}
+
+	var touched []int
+	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		var account model.Account
+		err := tx.Where("LOWER(TRIM(email)) = ?", oldKey).First(&account).Error
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
+				// Nothing mirrored under the old key. The ordinary caller's
+				// SyncInboundAccounts will create the account under the new one.
+				return nil
+			}
+			return err
+		}
+
+		// An account already holding the new key is NOT merged into and NOT deleted.
+		// Both rows are live customers with their own quota, credentials and
+		// memberships, and picking one silently moves the other's traffic. The
+		// duplicate-email check is what is supposed to stop this reaching here, so
+		// arriving is a bug worth a log line rather than a data-destroying repair.
+		var clash int64
+		if err := tx.Model(&model.Account{}).
+			Where("LOWER(TRIM(email)) = ? AND id != ?", newKey, account.Id).
+			Count(&clash).Error; err != nil {
+			return err
+		}
+		if clash > 0 {
+			logger.Warningf("RenameAccount - %q is already an account; the rename from %q was left alone rather than merging two live customers", newEmail, oldEmail)
+			return nil
+		}
+
+		changed, err := renameInSettings(tx, oldKey, newEmail)
+		if err != nil {
+			return err
+		}
+		touched = changed
+
+		return tx.Model(&model.Account{}).Where("id = ?", account.Id).
+			Update("email", newEmail).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return touched, nil
+}
+
+// renameInSettings rewrites the email of every stored client entry that resolves to
+// oldKey, across every inbound, leaving the rest of each entry untouched.
+//
+// Every inbound is scanned rather than just the account's memberships: settings.clients
+// is the source of truth and the membership table is the mirror, so an entry the
+// mirror does not know about is exactly the one a rename must not strand.
+func renameInSettings(tx *gorm.DB, oldKey string, newEmail string) ([]int, error) {
+	var inbounds []*model.Inbound
+	if err := tx.Model(&model.Inbound{}).Select("id", "settings").
+		Order("id ASC").Find(&inbounds).Error; err != nil {
+		return nil, err
+	}
+
+	var touched []int
+	for _, inbound := range inbounds {
+		var root map[string]any
+		if err := json.Unmarshal([]byte(inbound.Settings), &root); err != nil || root == nil {
+			// Not this function's blob to report on: it is renaming one account, and
+			// failing the whole rename over an unrelated malformed inbound would leave
+			// the customer split, which is the thing it exists to prevent.
+			continue
+		}
+		list, _ := root["clients"].([]any)
+		changed := false
+		for _, item := range list {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			email, _ := entry["email"].(string)
+			if accountKey(email) != oldKey {
+				continue
+			}
+			entry["email"] = newEmail
+			entry["updated_at"] = time.Now().Unix() * 1000
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		out, err := json.MarshalIndent(root, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Model(&model.Inbound{}).Where("id = ?", inbound.Id).
+			Update("settings", string(out)).Error; err != nil {
+			return nil, err
+		}
+		touched = append(touched, inbound.Id)
+	}
+	return touched, nil
+}
+
+// DropMembership takes an account off ONE inbound in the accounts layer, and is the
+// mirror of a client entry being removed from that inbound's settings.
+//
+// A membership that outlives its settings entry is not inert: it RESURRECTS the
+// client. ProjectAccount treats memberships as the source and appends the account to
+// any member inbound whose blob does not carry it, so the next projection from any
+// cause - an unrelated edit, a membership change, a core uninstall - puts the
+// deleted customer back on the inbound they were removed from, live and serving.
+//
+// Called from the delete paths themselves rather than left to each caller, because
+// the callers are exactly where it kept being forgotten: the LDAP sync job and the
+// reseller cascade both delete clients and neither reconciles the mirror afterwards.
+//
+// The account row goes only when the membership removed was its LAST one, and it is
+// found by accountKey rather than by an exact match, because the settings spelling
+// and the accounts spelling are written by different paths.
+func (s *AccountService) DropMembership(tx *gorm.DB, inboundId int, email string) error {
+	key := accountKey(email)
+	if tx == nil || key == "" {
+		return nil
+	}
+
+	var account model.Account
+	if err := tx.Where("LOWER(TRIM(email)) = ?", key).First(&account).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil // nothing mirrored for this email
+		}
+		return err
+	}
+
+	if err := tx.Where("account_id = ? AND inbound_id = ?", account.Id, inboundId).
+		Delete(&model.AccountInbound{}).Error; err != nil {
+		return err
+	}
+
+	// Counted for THIS account only, not through pruneOrphanAccounts: that one reads
+	// "no memberships anywhere" as "every account is an orphan" and empties the whole
+	// table, which is right where it is called (straight after removing an inbound's
+	// last membership) and catastrophic here, on a path that runs for every ordinary
+	// client delete.
+	var left int64
+	if err := tx.Model(&model.AccountInbound{}).
+		Where("account_id = ?", account.Id).Count(&left).Error; err != nil {
+		return err
+	}
+	if left > 0 {
+		return nil
+	}
+	return tx.Where("id = ?", account.Id).Delete(&model.Account{}).Error
 }
