@@ -544,10 +544,28 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 // reading the stored membership. A membership that does not exist yet is enabled:
 // it is about to be created by the same sync, and nothing has switched it off.
 func (s *AccountService) membershipEnabledFor(tx *gorm.DB, accountId, inboundId int) bool {
+	// A FRESH session, not the caller's *gorm.DB. This runs deep inside a
+	// transaction that has already issued a Where, an Update and, through
+	// ProjectAccount, one query per member inbound. Building the lookup on that
+	// same statement risks inheriting leftover conditions, and here a WHERE that
+	// silently stops matching reads as "no membership" -> enabled, which is the
+	// permissive answer. pruneOrphanAccounts documents the same hazard.
+	db := tx.Session(&gorm.Session{NewDB: true})
 	var membership model.AccountInbound
-	if err := tx.Where("account_id = ? AND inbound_id = ?", accountId, inboundId).
-		First(&membership).Error; err != nil {
+	err := db.Where("account_id = ? AND inbound_id = ?", accountId, inboundId).
+		First(&membership).Error
+	if err == gorm.ErrRecordNotFound {
+		// No membership row yet: the sync that is creating it is the one asking, so
+		// the entry it carries IS the account's intent. Mirror it as normal.
 		return true
+	}
+	if err != nil {
+		// Cannot tell. Answer "disabled" so the caller PRESERVES the stored account
+		// flag rather than letting one entry lower it. The two ways to be wrong are
+		// not equal: preserving costs a stale flag until the next write, while
+		// guessing "enabled" lets a single disabled entry switch the account off and
+		// take every other inbound down with it.
+		return false
 	}
 	return MembershipEnabled(&membership)
 }

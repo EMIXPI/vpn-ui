@@ -969,3 +969,60 @@ func TestMembershipEnableAfterAnEnableCycle(t *testing.T) {
 		t.Errorf("the account flag was lowered by a per-membership switch: %+v", a)
 	}
 }
+
+// The per-inbound switch on a WIDE account: switching one membership off must leave
+// the other sixteen serving and must not lower the account flag.
+//
+// The two-inbound versions above cover the same rule, but nothing exercised it at
+// the width the panel actually reaches. Width is what stresses membershipEnabledFor:
+// it runs inside a transaction that has already issued a Where, an Update and one
+// query per member inbound, so the more memberships an account has, the more
+// statement state exists for that lookup to trip over. A lookup that stops matching
+// reads as "no membership" -> enabled, the guard never fires, and one entry's
+// enable:false is mirrored onto the ACCOUNT, whose next projection switches every
+// membership off. This passes both with and without the fresh-session lookup, so it
+// is a guard on the invariant at scale, not a reproduction of a known failure.
+func TestMembershipEnableOnAWideAccount(t *testing.T) {
+	svc := newAccountsDB(t)
+	vless := seedInboundWithClients(t, model.VLESS, 47701, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": "bob@example.com", "enable": true},
+	})
+	ids := []int{vless.Id}
+	// One inbound per protocol, as wide as the E2E account, avoiding a second
+	// membership of any protocol ValidateMembershipSet refuses.
+	for i, proto := range []model.Protocol{
+		model.VMESS, model.Trojan, model.ANYTLS, model.TUIC, model.NAIVE,
+		model.L2TP, model.PPTP, model.OPENVPN, model.OPENCONNECT, model.SSTP,
+		model.IKEV2, model.SSH, model.WGC, model.AWG, model.GRE, model.MTPROTO,
+	} {
+		ib := seedInboundWithClients(t, proto, 47702+i, []map[string]any{})
+		ids = append(ids, ib.Id)
+	}
+	svc.MigrationAccounts()
+	if _, err := svc.ApplyMemberships("bob@example.com", ids, nil, true); err != nil {
+		t.Fatalf("spread across %d inbounds: %v", len(ids), err)
+	}
+	for _, id := range ids {
+		if got := clientEntry(t, id, "bob@example.com")["enable"]; got != true {
+			t.Fatalf("precondition: inbound %d reads enable=%v", id, got)
+		}
+	}
+
+	if _, err := svc.SetMembershipEnable("bob@example.com", vless.Id, false); err != nil {
+		t.Fatalf("SetMembershipEnable: %v", err)
+	}
+
+	off := []int{}
+	for _, id := range ids {
+		if clientEntry(t, id, "bob@example.com")["enable"] != true {
+			off = append(off, id)
+		}
+	}
+	if len(off) != 1 || off[0] != vless.Id {
+		t.Errorf("switching inbound %d off disabled %d of %d memberships (%v), want exactly [%d]",
+			vless.Id, len(off), len(ids), off, vless.Id)
+	}
+	if a := accountsInDB(t); len(a) != 1 || !a[0].Enable {
+		t.Errorf("the ACCOUNT flag was lowered by a per-inbound switch: %+v", a)
+	}
+}
