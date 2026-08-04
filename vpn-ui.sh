@@ -635,9 +635,25 @@ obtain_letsencrypt_cert() {
         #   --standalone           an IP identifier cannot use DNS-01 (nothing to put a
         #                          TXT record on) and tls-alpn-01 wants TCP 443, which
         #                          is not where this panel listens.
-        #   --days 3               acme.sh's renewal arithmetic assumes 90 days; a
-        #                          160-hour certificate has to be told otherwise.
-        issue_args+=(--standalone --server letsencrypt --cert-profile shortlived --days 3)
+        #   --days -2              acme.sh's renewal arithmetic assumes 90 days; a
+        #                          160-hour certificate has to be told otherwise. The
+        #                          value is NEGATIVE on purpose, and the sign changes
+        #                          which branch acme.sh takes, not just the number:
+        #                            positive N -> _calc_next_renew_time (acme.sh:1978)
+        #                                          returns create + N*86400 - 86400,
+        #                                          i.e. renewal at creation + (N-1) days;
+        #                            negative N -> a different branch (acme.sh:5976)
+        #                                          returns expiry + N*86400, i.e. renewal
+        #                                          N days BEFORE expiry.
+        #                          This used to read `--days 3`, which meant renewal every
+        #                          TWO days: ~3.5 issuances per 7-day window against a hard
+        #                          cap of 5 new certificates per exact name set per 7 days,
+        #                          with no override form. `-2` renews at 4.67 days of age
+        #                          on a 160-hour cert, ~1.5 per week, and still leaves two
+        #                          days for a daily cron to catch it. acme.sh prints a hint
+        #                          recommending exactly this for short-lived CAs
+        #                          (acme.sh:6037).
+        issue_args+=(--standalone --server letsencrypt --cert-profile shortlived --days -2)
         # Not cosmetic. acme.sh's standalone server is a bare `socat TCP-LISTEN`
         # unless forced, which comes up IPv6-only, and Let's Encrypt's IPv4 fetch
         # then gets connection-refused with nothing in the log to explain it.

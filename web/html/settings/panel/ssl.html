@@ -1,0 +1,484 @@
+{{define "settings/panel/ssl"}}
+<!-- The SSL certificate manager.
+
+     THE SHAPE OF THIS PAGE, and why it is this shape. The default view answers
+     three questions and offers one button: do I have a certificate, is it
+     healthy, and is the panel actually serving it. Everything that only matters
+     while diagnosing (issuer, key algorithm, chain length, the ledger, past
+     attempts, older versions) sits behind the single Details disclosure at the
+     bottom. Nothing was dropped, it was ranked: an operator opening this tab
+     wants a working certificate, not an inventory.
+
+     The styling lives in assets/css/components.css under `.settings-page`, NOT in
+     a <style> block here. Vue treats <style> as a forbidden tag inside a template
+     and strips it while compiling, and the production build has the warning about
+     it compiled out, so the block silently disappears and every rule in it is dead.
+
+     Every translated string a Vue expression touches comes from a METHOD in
+     settings.html, never from an i18n action pasted into the expression. English
+     alone says "Let's Encrypt" a dozen times here, Go escapes that apostrophe to
+     &#39;, the browser decodes it back to a quote before Vue sees it, the
+     expression stops parsing and the whole settings page renders blank with an
+     empty console.
+-->
+
+<!-- ====================================================================
+     1. THE THREE QUESTIONS.
+     ==================================================================== -->
+<div class="ssl-hero" v-if="ssl.status">
+
+    <!-- Nothing managed yet. The form below opens by itself in this state, so
+         this says what is missing and then gets out of the way. -->
+    <template v-if="!ssl.status.active">
+        <div class="ssl-hero-title">{{ i18n "pages.settings.ssl.noneTitle" }}</div>
+        <div class="ssl-hero-sub">{{ i18n "pages.settings.ssl.noneDesc" }}</div>
+    </template>
+
+    <template v-else>
+        <!-- Q1: what have I got. The primary name large, the rest quiet beneath
+             it: the set matters (it is what the budget meters), the individual
+             extra names rarely do. -->
+        <div class="ssl-hero-title">[[ sslPrimaryName() ]]</div>
+        <div class="ssl-hero-sub" v-if="sslOtherNames()">[[ sslOtherNames() ]]</div>
+
+        <!-- Q2: is it healthy. One sentence in days, not a timestamp to subtract
+             from today. Colour is the second channel and never the only one. -->
+        <div class="ssl-health" :class="'ssl-health-' + sslHealthLevel()">
+            <span class="ssl-health-dot"></span>[[ sslHealthText() ]]
+        </div>
+
+        <!-- The three states that change what the certificate is actually worth.
+             Rare, so they cost nothing when they are absent, and each one is the
+             difference between a working TLS handshake and a browser error. -->
+        <div class="ssl-flags"
+            v-if="ssl.status.active.staging || ssl.status.active.selfSigned || !ssl.status.active.keyMatchesLeaf">
+            <a-tag v-if="ssl.status.active.staging" color="red">{{ i18n "pages.settings.ssl.stagingTag" }}</a-tag>
+            <a-tag v-if="ssl.status.active.selfSigned" color="orange">{{ i18n "pages.settings.ssl.selfSigned" }}</a-tag>
+            <a-tag v-if="!ssl.status.active.keyMatchesLeaf" color="red">{{ i18n "pages.settings.ssl.keyMismatch" }}</a-tag>
+        </div>
+
+        <!-- Q3, and the single most confusing state this feature can be in: the
+             certificate renews perfectly and the panel keeps serving something
+             else, because webCertFile still names a file no renewal touches.
+             Loud, and it carries its own one-click fix. -->
+        <div v-if="ssl.status.usedByPanel" class="ssl-inuse">
+            <a-icon type="check-circle"></a-icon>
+            <span>{{ i18n "pages.settings.ssl.usedByPanel" }}</span>
+        </div>
+        <a-alert v-else type="warning" show-icon class="ssl-alert"
+            message='{{ i18n "pages.settings.ssl.notUsedTitle" }}'>
+            <template slot="description">
+                <div>{{ i18n "pages.settings.ssl.notUsedDesc" }}</div>
+                <a-button type="primary" size="small" :loading="ssl.busy" class="ssl-alert-btn"
+                    @click="sslUseManaged">
+                    <a-icon type="link"></a-icon>{{ i18n "pages.settings.ssl.useManaged" }}
+                </a-button>
+            </template>
+        </a-alert>
+
+        <!-- ============================================================
+             2. THE ACTION HIERARCHY, and it is not three equal buttons.
+
+             Re-apply is primary and first: it runs install plus fan-out only,
+             never contacts a CA, costs no budget and cannot fail a rate limit,
+             and it fixes the common case (a service holding a stale copy).
+             Renew is next, exempt from the limits. Issuing is neither of these,
+             so it does not live up here at all: it is the last row of the form
+             below, behind a confirmation that states what is left.
+             ============================================================ -->
+        <div class="ssl-actions">
+            <div class="ssl-action">
+                <a-button type="primary" :loading="ssl.running && ssl.op === 'reapply'"
+                    :disabled="ssl.running" @click="sslStart('reapply')">
+                    <a-icon type="sync"></a-icon>{{ i18n "pages.settings.ssl.reapply" }}
+                </a-button>
+                <span class="ssl-action-note">{{ i18n "pages.settings.ssl.reapplyDesc" }}</span>
+            </div>
+
+            <div class="ssl-action">
+                <a-button :loading="ssl.running && ssl.op === 'renew'" :disabled="ssl.running"
+                    @click="sslStart('renew')">
+                    <a-icon type="reload"></a-icon>{{ i18n "pages.settings.ssl.renew" }}
+                </a-button>
+                <span class="ssl-action-note">{{ i18n "pages.settings.ssl.renewDesc" }}</span>
+            </div>
+        </div>
+    </template>
+</div>
+
+<!-- Stock Windows will not fetch a missing issuer, and the error it shows the
+     user names credentials, not chains. That is worth an alert on the main
+     screen rather than a grey line in a table nobody opened. -->
+<a-alert v-if="ssl.status && ssl.status.active && !ssl.status.active.hasIntermediates" type="warning" show-icon
+    class="ssl-alert" message='{{ i18n "pages.settings.ssl.chainWarnTitle" }}'
+    description='{{ i18n "pages.settings.ssl.chainWarn" }}'></a-alert>
+
+<!-- BLOCKED BUDGET. The whole explanation goes in the page, never only in a
+     tooltip on the disabled button: a disabled antd control opens no tooltip at
+     all, so a tooltip-only reason is a reason nobody can read. -->
+<a-alert v-if="sslBudgetBlocked()" type="error" show-icon class="ssl-alert"
+    message='{{ i18n "pages.settings.ssl.budgetBlockedTitle" }}'>
+    <template slot="description">
+        <ul class="ssl-alert-list">
+            <li>{{ i18n "pages.settings.ssl.budgetBlockedLimit" }}</li>
+            <li>{{ i18n "pages.settings.ssl.budgetBlockedUsed" }}: <b>[[ sslBudgetUsed() ]]</b></li>
+            <li v-if="sslNextFreeAt()">{{ i18n "pages.settings.ssl.budgetNextFree" }}: <b>[[ sslNextFreeAt() ]]</b></li>
+            <li>{{ i18n "pages.settings.ssl.budgetSafeNow" }}</li>
+        </ul>
+    </template>
+</a-alert>
+
+<!-- One short of the limit. The server already wrote the sentence, with the same
+     wall-clock time, so it is shown rather than paraphrased. -->
+<a-alert v-else-if="sslBudgetWarn()" type="warning" show-icon class="ssl-alert"
+    :message="ssl.status.budget.reason"></a-alert>
+
+<!-- THE DISRUPTIVE CONSENT, next to the buttons it changes rather than buried in
+     a form, and only on hosts that actually run something disruptive. It names
+     the real services found here, so the operator agrees to a consequence and
+     not to a category. Opt-in, and absent means false: nothing here can
+     disconnect anyone by omission. -->
+<div class="ssl-disruptive" v-if="sslDisruptiveNames()">
+    <a-popconfirm v-if="!ssl.form.applyDisruptive" placement="topLeft"
+        :overlay-class-name="themeSwitcher.currentTheme" :title="sslDisruptiveConfirm()"
+        ok-text='{{ i18n "sure" }}' cancel-text='{{ i18n "cancel" }}'
+        @confirm="ssl.form.applyDisruptive = true">
+        <a-checkbox :checked="false">[[ sslDisruptiveLabel() ]]</a-checkbox>
+    </a-popconfirm>
+    <a-checkbox v-else :checked="true" @change="ssl.form.applyDisruptive = false">
+        [[ sslDisruptiveLabel() ]]
+    </a-checkbox>
+    <div class="ssl-disruptive-sub">{{ i18n "pages.settings.ssl.applyDisruptiveDesc" }}</div>
+</div>
+
+<!-- Both strings come from methods, never from a translated literal pasted into
+     this expression. See the note at the top of the file. -->
+<a-alert v-if="ssl.status && ssl.status.running" type="info" show-icon class="ssl-alert"
+    :message="sslRunningTitle()" :description="sslRunningDesc()"></a-alert>
+
+<!-- ====================================================================
+     LIVE PROGRESS, and only once something has run. An idle terminal is a
+     large black rectangle that answers none of the three questions above,
+     so it is not rendered at all until there is progress to show.
+
+     Same terminal as the core setup console (assets/css/terminal.css), fed by a
+     recursive setTimeout poll rather than setInterval: the run is server-side, so
+     polling survives navigation and works through gzip and reverse proxies that
+     would buffer a stream (core.html:980-984).
+     ==================================================================== -->
+<div class="ssl-console" v-if="sslConsoleVisible()">
+    <div class="term ssl-term">
+        <div class="term-bar">
+            <a-icon type="code" class="term-bar-icon"></a-icon>
+            <span class="term-bar-title">vpn-ui · [[ sslConsoleLabel() ]]</span>
+            <span class="term-count" v-if="ssl.steps.length">[[ sslOkCount() ]]/[[ ssl.steps.length ]]</span>
+        </div>
+        <div class="term-progress">
+            <div class="term-progress-bar"
+                :class="{ warn: !ssl.running && ssl.done && ssl.failed, done: !ssl.running && ssl.done && !ssl.failed }"
+                :style="{ width: sslProgress() + '%' }"></div>
+        </div>
+        <div class="term-body" ref="sslTerm">
+            <div v-for="(item, i) in ssl.steps" :key="i" class="term-step">
+                <div class="term-line" :class="[sslLineClass(item), item.log ? 'term-clickable' : '']"
+                    @click="item.log && sslToggleStep(i)" :title="sslLogTitle(item, i)">
+                    <span class="term-glyph">[[ sslGlyph(item) ]]</span>
+                    <span class="term-name">[[ item.name ]]</span>
+                    <span class="term-msg" v-if="item.msg">[[ item.msg ]]</span>
+                    <a-icon v-if="item.log" :type="ssl.expanded[i] ? 'up' : 'down'" class="term-toggle"></a-icon>
+                    <span class="term-ts">[[ item.ts ]]</span>
+                </div>
+                <pre v-if="item.log && ssl.expanded[i]" class="term-steplog">[[ item.log ]]</pre>
+            </div>
+
+            <div v-if="ssl.running" class="term-status">
+                <span class="term-pct">[[ sslProgress() ]]%</span>
+                <span class="term-cur" v-if="sslCurrentStep()">⟳ [[ sslCurrentStep() ]]</span>
+            </div>
+
+            <div v-if="!ssl.running && ssl.done" class="term-status term-status-done">
+                <span class="term-summary">[[ ssl.summary ]]</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ====================================================================
+     3. THE GUIDED FORM. What to cover, how this server can be checked, where
+        to reach you. Three questions, and the switches only a power user
+        wants are one disclosure away.
+
+     Open by itself when nothing is managed yet, closed once a certificate
+     exists: at that point the answer to "my certificate is broken" is almost
+     always Re-apply above, not another issuance.
+     ==================================================================== -->
+<a-collapse v-model="ssl.formOpen" class="ssl-form">
+    <a-collapse-panel key="form" header='{{ i18n "pages.settings.ssl.formTitle" }}'>
+
+        <a-setting-list-item paddings="small">
+            <template #title>{{ i18n "pages.settings.ssl.identifiers" }}</template>
+            <template #description>{{ i18n "pages.settings.ssl.identifiersDesc" }}</template>
+            <template #control>
+                <a-select mode="tags" v-model="ssl.form.identifiers" :token-separators="[',', ' ']"
+                    placeholder="example.com" :style="{ width: '100%' }"
+                    :dropdown-class-name="themeSwitcher.currentTheme"></a-select>
+            </template>
+        </a-setting-list-item>
+
+        <!-- A set that mixes a name with an IP address is refused by every
+             validation option, so it is said here, while the operator is still
+             typing, rather than only in a failed run afterwards. An IP makes the
+             whole certificate short-lived, and that would silently apply to the
+             name in it as well. -->
+        <a-alert v-if="sslMixedNames()" type="warning" show-icon class="ssl-form-alert"
+            message='{{ i18n "pages.settings.ssl.mixedNames" }}'></a-alert>
+
+        <!-- THE VALIDATION CHOICE, framed by the operator's SITUATION rather than
+             by the protocol's name. Nobody knows what HTTP-01 is; everybody knows
+             whether something else already answers port 80 on their box. The
+             protocol each one maps to is an implementation detail and stays one. -->
+        <div class="ssl-choices">
+            <div class="ssl-choices-label">{{ i18n "pages.settings.ssl.challenge" }}</div>
+            <a-radio-group v-model="ssl.form.challenge" class="ssl-choices-group"
+                @change="ssl.challengePicked = true">
+                <a-radio class="ssl-choice" value="standalone-domain">
+                    <span class="ssl-choice-title">{{ i18n "pages.settings.ssl.challengeHttp" }}</span>
+                    <span class="ssl-choice-sub">{{ i18n "pages.settings.ssl.challengeHttpDesc" }}</span>
+                </a-radio>
+                <a-radio class="ssl-choice" value="webroot">
+                    <span class="ssl-choice-title">{{ i18n "pages.settings.ssl.challengeWebroot" }}</span>
+                    <span class="ssl-choice-sub">{{ i18n "pages.settings.ssl.challengeWebrootDesc" }}</span>
+                </a-radio>
+                <a-radio class="ssl-choice" value="cloudflare-dns">
+                    <span class="ssl-choice-title">{{ i18n "pages.settings.ssl.challengeDns" }}</span>
+                    <span class="ssl-choice-sub">{{ i18n "pages.settings.ssl.challengeDnsDesc" }}</span>
+                </a-radio>
+                <a-radio class="ssl-choice" value="standalone-ip">
+                    <span class="ssl-choice-title">{{ i18n "pages.settings.ssl.challengeIp" }}</span>
+                    <span class="ssl-choice-sub">{{ i18n "pages.settings.ssl.challengeIpDesc" }}</span>
+                </a-radio>
+            </a-radio-group>
+        </div>
+
+        <a-setting-list-item v-if="ssl.form.challenge === 'webroot'" paddings="small">
+            <template #title>{{ i18n "pages.settings.ssl.webrootPath" }}</template>
+            <template #description>{{ i18n "pages.settings.ssl.webrootPathDesc" }}</template>
+            <template #control>
+                <a-input v-model="ssl.form.webrootPath" placeholder="/var/www/html"></a-input>
+            </template>
+        </a-setting-list-item>
+
+        <!-- Password-style, and deliberately write-only: the token is never
+             returned by any endpoint, so there is nothing to render back. -->
+        <a-setting-list-item v-if="ssl.form.challenge === 'cloudflare-dns'" paddings="small">
+            <template #title>{{ i18n "pages.settings.ssl.cfToken" }}</template>
+            <template #description>{{ i18n "pages.settings.ssl.cfTokenDesc" }}</template>
+            <template #control>
+                <a-input-password v-model="ssl.form.cloudflareToken" autocomplete="new-password"
+                    placeholder="••••••••••••"></a-input-password>
+            </template>
+        </a-setting-list-item>
+
+        <a-setting-list-item paddings="small">
+            <template #title>{{ i18n "pages.settings.ssl.email" }}</template>
+            <template #description>{{ i18n "pages.settings.ssl.emailDesc" }}</template>
+            <template #control>
+                <a-input v-model="ssl.form.email" placeholder="admin@example.com"></a-input>
+            </template>
+        </a-setting-list-item>
+
+        <!-- The two power-user switches. Neither is part of getting a working
+             certificate, and one of them (staging) produces a certificate that
+             nothing trusts, so neither belongs on the path of least resistance. -->
+        <a-collapse :bordered="false" class="ssl-advanced">
+            <a-collapse-panel key="advanced" header='{{ i18n "pages.settings.ssl.advanced" }}'>
+                <a-setting-list-item paddings="small">
+                    <template #title>{{ i18n "pages.settings.ssl.staging" }}</template>
+                    <template #description>{{ i18n "pages.settings.ssl.stagingDesc" }}</template>
+                    <template #control>
+                        <a-switch v-model="ssl.form.staging"></a-switch>
+                    </template>
+                </a-setting-list-item>
+
+                <!-- Only when THIS panel is the thing being connected to. Over DNS
+                     nothing is reached at all, and with a webroot the connection
+                     lands on the other server's listener, not on ours. -->
+                <a-setting-list-item v-if="sslBindsListener()" paddings="small">
+                    <template #title>{{ i18n "pages.settings.ssl.listenV6" }}</template>
+                    <template #description>{{ i18n "pages.settings.ssl.listenV6Desc" }}</template>
+                    <template #control>
+                        <a-switch v-model="ssl.form.listenV6"></a-switch>
+                    </template>
+                </a-setting-list-item>
+            </a-collapse-panel>
+        </a-collapse>
+
+        <div class="ssl-form-actions">
+            <div class="ssl-action">
+                <a-button size="small" :loading="ssl.preflightLoading" :disabled="ssl.running"
+                    @click="sslPreflight">
+                    <a-icon type="safety"></a-icon>{{ i18n "pages.settings.ssl.preflight" }}
+                </a-button>
+                <span class="ssl-action-note">{{ i18n "pages.settings.ssl.preflightDesc" }}</span>
+            </div>
+
+            <div class="ssl-action ssl-action-last">
+                <!-- A popconfirm on a DISABLED button never opens, so the blocked
+                     case is carried by the alert in the page above (and by the note
+                     to the right here), never by this confirmation. -->
+                <a-popconfirm v-if="!sslBudgetBlocked()" placement="topLeft"
+                    :overlay-class-name="themeSwitcher.currentTheme" ok-text='{{ i18n "sure" }}'
+                    cancel-text='{{ i18n "cancel" }}' @confirm="sslStart('issue')">
+                    <!-- Inline styles, not a class: ant portals a popconfirm's
+                         overlay to document.body, outside #app, so a rule scoped
+                         under .settings-page would never match it. -->
+                    <template slot="title">
+                        <div :style="{ maxWidth: '340px' }">
+                            <div :style="{ fontWeight: 600 }">{{ i18n "pages.settings.ssl.issueConfirm" }}</div>
+                            <div :style="{ marginTop: '4px' }">{{ i18n "pages.settings.ssl.issueConfirmBudget" }}</div>
+                            <div :style="{ marginTop: '4px' }">
+                                {{ i18n "pages.settings.ssl.issueRemaining" }}: <b>[[ sslBudgetRemaining() ]]</b>
+                            </div>
+                        </div>
+                    </template>
+                    <!-- Small, ghost and in the danger hue in every state. A
+                         primary-ghost variant was tried and is unreadable here:
+                         the dark theme gives ghost buttons the near-black ink
+                         meant for FILLED accent surfaces (rgb(7,26,22) on the
+                         page background), so the label all but disappears. -->
+                    <a-button size="small" type="danger" ghost :disabled="ssl.running">
+                        {{ i18n "pages.settings.ssl.issue" }}
+                    </a-button>
+                </a-popconfirm>
+                <a-button v-else size="small" type="danger" ghost disabled>
+                    {{ i18n "pages.settings.ssl.issue" }}
+                </a-button>
+                <span class="ssl-action-note">[[ sslIssueNote() ]]</span>
+            </div>
+        </div>
+    </a-collapse-panel>
+</a-collapse>
+
+<!-- ====================================================================
+     4. DETAILS. One disclosure, closed by default, holding everything that is
+        a diagnostic rather than an answer: the certificate's own fields, the
+        managed paths, the ledger, who else serves it, what was tried and how
+        to go back.
+     ==================================================================== -->
+<a-collapse class="ssl-details">
+    <a-collapse-panel key="details" header='{{ i18n "pages.settings.ssl.detailsTitle" }}'>
+
+        <template v-if="ssl.status && ssl.status.active">
+            <div class="ssl-section-title">{{ i18n "pages.settings.ssl.currentTitle" }}</div>
+            <dl class="ssl-kv">
+                <dt>{{ i18n "pages.settings.ssl.subject" }}</dt>
+                <dd>[[ ssl.status.active.subject || '-' ]]</dd>
+                <dt>{{ i18n "pages.settings.ssl.issuer" }}</dt>
+                <dd>[[ ssl.status.active.issuer || '-' ]]</dd>
+                <dt>{{ i18n "pages.settings.ssl.sans" }}</dt>
+                <dd>
+                    <a-tag v-for="id in (ssl.status.active.identifiers || [])" :key="id">[[ id ]]</a-tag>
+                </dd>
+                <dt>{{ i18n "pages.settings.ssl.key" }}</dt>
+                <dd>[[ ssl.status.active.keyAlgorithm ]] [[ ssl.status.active.keyBits ]]-bit</dd>
+                <dt>{{ i18n "pages.settings.ssl.validFrom" }}</dt>
+                <dd>[[ sslDate(ssl.status.active.notBefore) ]]</dd>
+                <dt>{{ i18n "pages.settings.ssl.validUntil" }}</dt>
+                <dd>[[ sslDate(ssl.status.active.notAfter) ]]</dd>
+                <dt>{{ i18n "pages.settings.ssl.chain" }}</dt>
+                <dd>
+                    [[ ssl.status.active.chainLength ]]
+                    <span v-if="ssl.status.active.hasIntermediates">{{ i18n "pages.settings.ssl.chainFull" }}</span>
+                    <span v-else class="ssl-warn-text">{{ i18n "pages.settings.ssl.chainLeafOnly" }}</span>
+                </dd>
+            </dl>
+        </template>
+
+        <div class="ssl-section-title">{{ i18n "pages.settings.ssl.storePaths" }}</div>
+        <div class="ssl-section-sub">{{ i18n "pages.settings.ssl.storePathsDesc" }}</div>
+        <div class="ssl-mono ssl-paths" v-if="ssl.status">
+            <div>[[ ssl.status.certPath ]]</div>
+            <div>[[ ssl.status.keyPath ]]</div>
+        </div>
+
+        <!-- The ledger in full. The blocked and nearly-blocked cases do NOT wait
+             here for someone to open a disclosure: they are alerts in the page
+             above. This is the count for an operator who wants the count. -->
+        <div class="ssl-section-title">{{ i18n "pages.settings.ssl.budgetTitle" }}</div>
+        <div class="ssl-section-sub">{{ i18n "pages.settings.ssl.budgetDesc" }}</div>
+        <div class="ssl-budget">
+            <div>
+                <span class="ssl-budget-count" :style="{ color: sslBudgetColor() }">
+                    [[ sslBudgetUsed() ]] / [[ sslBudgetLimit() ]]
+                </span>
+                <div class="ssl-section-sub">{{ i18n "pages.settings.ssl.budgetUsed" }}</div>
+            </div>
+            <div class="ssl-mono" v-if="sslBudgetSet()">
+                {{ i18n "pages.settings.ssl.budgetFor" }} [[ sslBudgetSet() ]]
+            </div>
+            <div class="ssl-section-sub" v-else>{{ i18n "pages.settings.ssl.budgetNone" }}</div>
+        </div>
+
+        <div class="ssl-section-title">{{ i18n "pages.settings.ssl.consumersTitle" }}</div>
+        <div class="ssl-section-sub">{{ i18n "pages.settings.ssl.consumersDesc" }}</div>
+        <template v-if="ssl.status && ssl.status.consumers && ssl.status.consumers.length">
+            <a-table :columns="sslConsumerColumns" bordered :row-key="(r, i) => i"
+                :data-source="ssl.status.consumers" :scroll="isMobile ? {} : { x: 200 }" :pagination="false"
+                :indent-size="0"
+                :locale='{ filterConfirm: `{{ i18n "confirm" }}`, filterReset: `{{ i18n "reset" }}` }'>
+                <template slot="impact" slot-scope="text, consumer">
+                    <a-tag :color="consumer.disruptive ? 'red' : 'green'">[[ sslImpactLabel(consumer) ]]</a-tag>
+                </template>
+            </a-table>
+        </template>
+        <a-empty v-else description='{{ i18n "pages.settings.ssl.consumersEmpty" }}' class="ssl-empty"></a-empty>
+
+        <div class="ssl-section-title">{{ i18n "pages.settings.ssl.historyTitle" }}</div>
+        <template v-if="ssl.status && ssl.status.attempts && ssl.status.attempts.length">
+            <a-table :columns="sslHistoryColumns" bordered :row-key="(r, i) => i"
+                :data-source="ssl.status.attempts" :scroll="isMobile ? {} : { x: 200 }"
+                :pagination="{ pageSize: 10, hideOnSinglePage: true }" :indent-size="0"
+                :locale='{ filterConfirm: `{{ i18n "confirm" }}`, filterReset: `{{ i18n "reset" }}` }'>
+                <template slot="when" slot-scope="text, attempt">[[ sslDate(attempt.at) ]]</template>
+                <template slot="names" slot-scope="text, attempt">
+                    <span class="ssl-mono">[[ (attempt.identifiers || []).join(', ') ]]</span>
+                </template>
+                <template slot="result" slot-scope="text, attempt">
+                    <a-tag :color="attempt.success ? 'green' : 'red'">[[ sslResultLabel(attempt) ]]</a-tag>
+                    <a-tag :color="attempt.exempt ? 'blue' : ''">[[ sslExemptLabel(attempt) ]]</a-tag>
+                </template>
+            </a-table>
+        </template>
+        <a-empty v-else description='{{ i18n "pages.settings.ssl.historyEmpty" }}' class="ssl-empty"></a-empty>
+
+        <div class="ssl-section-title">{{ i18n "pages.settings.ssl.rollbackTitle" }}</div>
+        <div class="ssl-section-sub">{{ i18n "pages.settings.ssl.rollbackDesc" }}</div>
+        <template v-if="ssl.status && ssl.status.versions && ssl.status.versions.length">
+            <a-table :columns="sslVersionColumns" bordered :row-key="r => r.path" :data-source="sslVersionRows()"
+                :scroll="isMobile ? {} : { x: 200 }" :pagination="false" :indent-size="0"
+                :locale='{ filterConfirm: `{{ i18n "confirm" }}`, filterReset: `{{ i18n "reset" }}` }'>
+                <template slot="version" slot-scope="text, row">
+                    <span class="ssl-mono">[[ row.name ]]</span>
+                    <a-tag v-if="row.index === 0" color="blue" :style="{ marginLeft: '8px' }">{{ i18n "pages.settings.ssl.rollbackNewest" }}</a-tag>
+                </template>
+                <template slot="rollback" slot-scope="text, row">
+                    <a-popconfirm placement="topRight" :overlay-class-name="themeSwitcher.currentTheme"
+                        title='{{ i18n "pages.settings.ssl.rollbackConfirm" }}' ok-text='{{ i18n "sure" }}'
+                        cancel-text='{{ i18n "cancel" }}' @confirm="sslRollback(row.path)">
+                        <a-button size="small" :disabled="ssl.running || ssl.busy">
+                            <a-icon type="rollback"></a-icon>{{ i18n "pages.settings.ssl.rollback" }}
+                        </a-button>
+                    </a-popconfirm>
+                </template>
+            </a-table>
+        </template>
+        <a-empty v-else description='{{ i18n "pages.settings.ssl.rollbackEmpty" }}' class="ssl-empty"></a-empty>
+
+        <div class="ssl-refresh">
+            <a-button size="small" :loading="ssl.loading" @click="loadSslStatus">
+                <a-icon type="reload"></a-icon>{{ i18n "pages.settings.ssl.refresh" }}
+            </a-button>
+        </div>
+    </a-collapse-panel>
+</a-collapse>
+{{end}}
