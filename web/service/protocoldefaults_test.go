@@ -218,6 +218,11 @@ var uiSettingsBlobs = map[model.Protocol]string{
 }`,
 
 	model.MTPROTO: `{
+  "modeClassic": true,
+  "modeSecure": true,
+  "modeTls": true,
+  "tlsDomain": "www.google.com",
+  "userLimit": 0,
   "clients": []
 }`,
 
@@ -466,6 +471,27 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		unmarshalDefaults(t, model.MTPROTO, &s)
 		if s.Clients == nil {
 			t.Error("clients must be an empty array, not absent")
+		}
+		// All three modes on is the constructor's value. An inbound created through
+		// the API with none of them would be refused by validateMtprotoSettings and,
+		// were it stored anyway, would render per-account mode entries that telemt
+		// reads as "unrestricted".
+		if !s.ModeClassic || !s.ModeSecure || !s.ModeTls {
+			t.Errorf("modes: %v %v %v, want all three on", s.ModeClassic, s.ModeSecure, s.ModeTls)
+		}
+		if s.TlsDomain != "www.google.com" {
+			t.Errorf("tlsDomain: %q, want the default", s.TlsDomain)
+		}
+		// No ad tag is seeded, because the tag is per CLIENT. A fresh inbound whose
+		// settings carried adtagEnable would be read by nothing and would only make
+		// the two levels look interchangeable.
+		if s.Clients != nil && len(s.Clients) > 0 {
+			t.Error("the defaults seeded a client")
+		}
+		// An explicit 0 (no device cap), not an absent key, which effectiveUserLimit
+		// reads as the legacy single device.
+		if s.UserLimit == nil || *s.UserLimit != 0 {
+			t.Errorf("userLimit must be an explicit 0 (no limit), got %v", s.UserLimit)
 		}
 	})
 }

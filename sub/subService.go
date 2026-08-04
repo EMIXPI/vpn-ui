@@ -336,18 +336,6 @@ func mtprotoSecretFor(secret, mode, tlsDomain string) string {
 	}
 }
 
-func mtprotoModeEnabled(c model.Client, mode string) bool {
-	switch mode {
-	case "classic":
-		return c.ModeClassic
-	case "secure":
-		return c.ModeSecure
-	case "tls":
-		return c.ModeTls
-	}
-	return false
-}
-
 // encodeURIComponentGo replicates JS encodeURIComponent. url.QueryEscape is NOT a
 // substitute: it escapes ! * ' ( ) and encodes space as '+' rather than %20. Each
 // UTF-8 byte is percent-encoded, so walk bytes.
@@ -378,6 +366,16 @@ func (s *SubService) genMtprotoLink(inbound *model.Inbound, email string) string
 	}
 	c := clients[idx]
 
+	// The modes and the FakeTLS domain belong to the INBOUND, not the subscriber's client
+	// entry: telemt applies one FakeTLS domain per process and writes its mode map from
+	// the inbound's set, so a link built off the old per-client keys would offer
+	// transports the proxy refuses. Resolved through the panel's own reader rather than a
+	// local struct so an inbound still in the pre-move shape (a restored backup, an API
+	// write, the window before the startup lift runs) yields the same links here as the
+	// config the daemon is given. Unparseable settings resolve to no mode and no link,
+	// which is what a decode error produced before.
+	proxy := service.MtprotoInboundPolicyOf(inbound.Settings)
+
 	type endpoint struct {
 		host string
 		port int
@@ -396,12 +394,12 @@ func (s *SubService) genMtprotoLink(inbound *model.Inbound, email string) string
 	var links []string
 	for _, ep := range endpoints {
 		for _, mode := range mtprotoModeOrder {
-			if !mtprotoModeEnabled(c, mode) {
+			if !proxy.ModeEnabled(mode) {
 				continue
 			}
 			links = append(links, "tg://proxy?server="+encodeURIComponentGo(ep.host)+
 				"&port="+strconv.Itoa(ep.port)+
-				"&secret="+mtprotoSecretFor(c.Secret, mode, c.TlsDomain))
+				"&secret="+mtprotoSecretFor(c.Secret, mode, proxy.TlsDomain))
 		}
 	}
 	return strings.Join(links, "\n")

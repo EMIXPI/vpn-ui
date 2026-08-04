@@ -307,11 +307,20 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 		}
 
 	case model.MTPROTO:
-		// Inbound.MtprotoSettings. The inbound owns nothing but its port: modes, the
-		// FakeTLS domain, the device cap, the ad tag and the external proxy list are all
-		// PER-ACCOUNT, because the proxy keys them off the authenticated secret rather
-		// than the socket. So there is exactly one inbound-level key.
+		// Inbound.MtprotoSettings. The proxy's policy is the INBOUND's: telemt applies
+		// the FakeTLS domain process-wide, and its mode map has to be spelled out per
+		// account or a missing entry reads as "no restriction". The secret, the link
+		// endpoints and the ad tag stay per-account, so none of them is seeded here.
+		//
+		// All three modes on and userLimit 0 (no device cap) are the values
+		// Inbound.MtprotoSettings' constructor uses, so an inbound created through the
+		// API matches one created in the form.
 		return []settingDefault{
+			def("modeClassic", true),
+			def("modeSecure", true),
+			def("modeTls", true),
+			def("tlsDomain", "www.google.com"),
+			def("userLimit", 0),
 			def("clients", noClients()),
 		}
 
@@ -483,6 +492,14 @@ func NormalizeInboundSettings(inbound *model.Inbound) error {
 	if inbound == nil {
 		return nil
 	}
+	// MTProto only, and BEFORE the defaults on purpose: a body written against the old
+	// field names carries its connection modes, FakeTLS domain and device cap on its
+	// CLIENTS, and filling the inbound-level defaults over that would both lose them and
+	// make the blob look already-migrated to the startup lift. See
+	// liftMtprotoSettingsBlob. A no-op for every other protocol and for a body already
+	// in the current shape, which is every body the panel's own form sends.
+	inbound.Settings = liftMtprotoSettingsBlob(inbound.Protocol, inbound.Settings)
+
 	filled, err := FillSettingsDefaults(inbound.Protocol, inbound.Settings)
 	if err != nil {
 		return err

@@ -225,18 +225,29 @@ type ResellerClient struct {
 
 // Inbound represents an Xray inbound configuration with traffic statistics and settings.
 type Inbound struct {
-	Id                   int                  `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`                                                    // Unique identifier
-	UserId               int                  `json:"-"`                                                                                               // Associated user ID
-	Up                   int64                `json:"up" form:"up"`                                                                                    // Upload traffic in bytes
-	Down                 int64                `json:"down" form:"down"`                                                                                // Download traffic in bytes
-	Total                int64                `json:"total" form:"total"`                                                                              // Total traffic limit in bytes
-	AllTime              int64                `json:"allTime" form:"allTime" gorm:"default:0"`                                                         // All-time traffic usage
-	Remark               string               `json:"remark" form:"remark"`                                                                            // Human-readable remark
-	Enable               bool                 `json:"enable" form:"enable" gorm:"index:idx_enable_traffic_reset,priority:1"`                           // Whether the inbound is enabled
-	ExpiryTime           int64                `json:"expiryTime" form:"expiryTime"`                                                                    // Expiration timestamp
-	TrafficReset         string               `json:"trafficReset" form:"trafficReset" gorm:"default:never;index:idx_enable_traffic_reset,priority:2"` // Traffic reset schedule
-	LastTrafficResetTime int64                `json:"lastTrafficResetTime" form:"lastTrafficResetTime" gorm:"default:0"`                               // Last traffic reset timestamp
-	ClientStats          []xray.ClientTraffic `gorm:"foreignKey:InboundId;references:Id" json:"clientStats" form:"clientStats"`                        // Client traffic statistics
+	Id                   int    `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`                                                    // Unique identifier
+	UserId               int    `json:"-"`                                                                                               // Associated user ID
+	Up                   int64  `json:"up" form:"up"`                                                                                    // Upload traffic in bytes
+	Down                 int64  `json:"down" form:"down"`                                                                                // Download traffic in bytes
+	Total                int64  `json:"total" form:"total"`                                                                              // Total traffic limit in bytes
+	AllTime              int64  `json:"allTime" form:"allTime" gorm:"default:0"`                                                         // All-time traffic usage
+	Remark               string `json:"remark" form:"remark"`                                                                            // Human-readable remark
+	Enable               bool   `json:"enable" form:"enable" gorm:"index:idx_enable_traffic_reset,priority:1"`                           // Whether the inbound is enabled
+	ExpiryTime           int64  `json:"expiryTime" form:"expiryTime"`                                                                    // Expiration timestamp
+	TrafficReset         string `json:"trafficReset" form:"trafficReset" gorm:"default:never;index:idx_enable_traffic_reset,priority:2"` // Traffic reset schedule
+	LastTrafficResetTime int64  `json:"lastTrafficResetTime" form:"lastTrafficResetTime" gorm:"default:0"`                               // Last traffic reset timestamp
+	// ClientStats is the accounts this inbound SERVES, each with this inbound's share
+	// of their usage. Filled by InboundService.attachClientStats, which is what every
+	// list the panel renders goes through.
+	//
+	// The has-many is still declared, because a handful of callers legitimately want
+	// the raw rows (sub/subService.go preloads it for the subscription header), but it
+	// must not be trusted as the answer to "who is on this inbound". It joins on
+	// client_traffics.inbound_id, which is the account's HOME inbound and nothing
+	// more: email is unique panel-wide so there is exactly ONE row per account, and
+	// the preload therefore listed each account under a single inbound, holding the
+	// whole account's traffic, absent from every other inbound serving it.
+	ClientStats []xray.ClientTraffic `gorm:"foreignKey:InboundId;references:Id" json:"clientStats" form:"clientStats"`
 
 	// SortOrder is where this inbound sits in the panel's list, and nothing else. It
 	// never reaches Xray, no protocol reads it, and the panel behaves identically
@@ -447,18 +458,38 @@ type Client struct {
 
 	// MTProto Proxy per-account settings. Every client posted to the panel is
 	// normalized through THIS struct, so a field missing here is silently dropped no
-	// matter what the UI sent: which for mtproto means an account with no secret and
-	// no modes, filtered out of the generated config, leaving the daemon refusing to
-	// start with "No users configured". All are omitempty so no other protocol's
-	// client JSON grows a single byte.
+	// matter what the UI sent: which for mtproto means an account with no secret,
+	// filtered out of the generated config, leaving the daemon refusing to start with
+	// "No users configured". All are omitempty so no other protocol's client JSON
+	// grows a single byte.
+	//
+	// The mode/domain/cap four moved onto the inbound (mtprotoSettings in
+	// web/service/mtproto.go) and nothing in this binary reads them for behaviour any
+	// more. They are NOT free to delete, for two separate reasons:
+	//
+	//   - They are a DOWNGRADE MIRROR, kept current on every pass by
+	//     MtprotoService.MirrorInboundSettingsToClients. The previous binary reads the
+	//     modes, the domain and the cap only from here, and drops any account whose mode
+	//     set is empty, so an operator who rolls back would find every account created
+	//     since the upgrade unable to connect with nothing in the log saying why.
+	//   - Removing a field from this struct does not just stop it being written, it makes
+	//     an OLD export or an old API body fail to round-trip through the add path,
+	//     silently dropping keys the operator can still see in their backup file.
+	//
+	// omitempty stays: these are mtproto-only, and without it every other protocol's
+	// client JSON would grow four keys. It does mean an add re-marshalled through this
+	// struct drops a mirrored false, which the next mirror pass puts back.
+	//
+	// The ad tag was NOT part of that move and is live: telemt keys ad tags per user,
+	// so each account carries its own.
 	Secret        string                `json:"secret,omitempty"`        // 32-hex credential (identity is Email)
-	ModeClassic   bool                  `json:"modeClassic,omitempty"`   // accept this account's bare secret
-	ModeSecure    bool                  `json:"modeSecure,omitempty"`    // accept its "dd" secret
-	ModeTls       bool                  `json:"modeTls,omitempty"`       // accept its "ee" (FakeTLS) secret
-	TlsDomain     string                `json:"tlsDomain,omitempty"`     // SNI its FakeTLS link fronts
+	ModeClassic   bool                  `json:"modeClassic,omitempty"`   // downgrade mirror of mtprotoSettings.ModeClassic
+	ModeSecure    bool                  `json:"modeSecure,omitempty"`    // downgrade mirror of mtprotoSettings.ModeSecure
+	ModeTls       bool                  `json:"modeTls,omitempty"`       // downgrade mirror of mtprotoSettings.ModeTls
+	TlsDomain     string                `json:"tlsDomain,omitempty"`     // downgrade mirror of mtprotoSettings.TlsDomain
 	AdtagEnable   bool                  `json:"adtagEnable,omitempty"`   // credit sponsored channels to Adtag
-	Adtag         string                `json:"adtag,omitempty"`         // 32 hex from @MTProxybot
-	UserLimit     *int                  `json:"userLimit,omitempty"`     // max devices (distinct IPs); nil=absent, 0=no limit
+	Adtag         string                `json:"adtag,omitempty"`         // 32 hex from @MTProxybot; one tagged account retags the whole inbound
+	UserLimit     *int                  `json:"userLimit,omitempty"`     // downgrade mirror of mtprotoSettings.UserLimit
 	ExternalProxy []ClientExternalProxy `json:"externalProxy,omitempty"` // alternate link endpoints (links only)
 
 	// GRE per-account peer slots, one entry per peer the account may connect from, sized to
@@ -638,6 +669,28 @@ type AccountInbound struct {
 	// overlaying onto it makes that class of loss impossible, including for
 	// protocol fields added after this code was written.
 	Extra string `json:"-" gorm:"column:extra"`
+
+	// Up/Down/AllTime are this membership's SHARE of the account's usage: the bytes
+	// that entered through THIS inbound. They are a breakdown, never the truth.
+	//
+	// client_traffics stays the authoritative counter and is written exactly as it
+	// was: it is the row RADIUS, the rbridge sink, the depletion sweep and every
+	// daemon read, and quota enforcement must not move onto a column added here.
+	// These are written alongside it from the same deltas, so they SUM TO IT, minus
+	// whatever could not be attributed. Never sum them to answer "how much has this
+	// account used".
+	//
+	// The gap is real and is not a bug: a collected record with no source inbound
+	// (every Xray-native protocol, whose counter is named "user>>><email>>>>traffic"
+	// with no inbound component) reaches the account total and is deliberately left
+	// out of the breakdown rather than attributed to a guess. See attachClientStats
+	// for how the remainder is shown.
+	//
+	// Up/Down are BILLED bytes (multiplier applied) and AllTime is RAW, matching
+	// client_traffics column for column, so the two can be compared directly.
+	Up      int64 `json:"up" gorm:"column:up;default:0"`
+	Down    int64 `json:"down" gorm:"column:down;default:0"`
+	AllTime int64 `json:"allTime" gorm:"column:all_time;default:0"`
 
 	CreatedAt int64 `json:"createdAt" gorm:"autoCreateTime:milli"`
 }
