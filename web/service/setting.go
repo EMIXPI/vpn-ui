@@ -114,6 +114,9 @@ var defaultValueMap = map[string]string{
 	// restart and cleared by the first super admin to be told about it. See
 	// SettingService.TakePanelUpdatedFrom.
 	"panelUpdatedFrom": "",
+	// Where that update's pre-swap database snapshot was written, so the notice can
+	// point the operator at it. Cleared alongside panelUpdatedFrom.
+	"panelUpdateBackupPath": "",
 	// Marks that the one-time grant of PermAccessOverview to the admins who
 	// predate that bit has run. See AdminService.MigrationOverviewAccess.
 	"overviewAccessBackfilled": "false",
@@ -125,6 +128,13 @@ var defaultValueMap = map[string]string{
 	// row, every read of an undeclared key comes back as a failure, and the reader can
 	// no longer tell "no tunnels configured" from "the settings table is unreadable".
 	"vpnOutbounds": "",
+	// Operator edits to the generated daemon configs, as a JSON object keyed
+	// "<core>:<inboundId>:<file>"; see web/service/coreconfig.go. ONE declared key
+	// holds them ALL for the same reason as the two above, only more sharply: a
+	// per-file key (openvpn:12:server-udp.conf) is not knowable up front, and
+	// getString treats a key missing from this map as an ERROR rather than as unset,
+	// so every read before the first save would come back as a failure.
+	"coreConfigOverrides": "",
 }
 
 // SettingService provides business logic for application settings management.
@@ -451,6 +461,30 @@ func (s *SettingService) TakePanelUpdatedFrom() string {
 		logger.Warning("panel update: clearing panelUpdatedFrom failed:", err)
 	}
 	return from
+}
+
+// SetPanelUpdateBackupPath records where the pre-update database snapshot landed,
+// so the binary that comes up can tell the operator their old data is still there.
+//
+// Empty is a meaningful value and must still be written: the snapshot is
+// best-effort, and skipping the write on failure would leave the PREVIOUS update's
+// path in place to be announced as this one's.
+func (s *SettingService) SetPanelUpdateBackupPath(path string) error {
+	return s.setString("panelUpdateBackupPath", path)
+}
+
+// TakePanelUpdateBackupPath returns the pre-update snapshot's path and clears the
+// record, for the same reason TakePanelUpdatedFrom does: the notice is delivered
+// once, and it is the companion of that flag.
+func (s *SettingService) TakePanelUpdateBackupPath() string {
+	path, err := s.getString("panelUpdateBackupPath")
+	if err != nil || path == "" {
+		return ""
+	}
+	if err := s.setString("panelUpdateBackupPath", ""); err != nil {
+		logger.Warning("panel update: clearing panelUpdateBackupPath failed:", err)
+	}
+	return path
 }
 
 // provisionedNone is the sentinel written when the host is deliberately

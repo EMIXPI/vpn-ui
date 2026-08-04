@@ -1158,6 +1158,128 @@ func (s *ServerService) GetDb() ([]byte, error) {
 	return fileContents, nil
 }
 
+// BackupNameOptions selects which components a backup filename carries. A struct
+// rather than positional bools because the two callers disagree on the set: the
+// download picker never offers Version, and the pre-update snapshot never wants
+// Domain.
+type BackupNameOptions struct {
+	Date      bool // 20060102
+	Time      bool // 150405
+	PanelName bool // the serverName setting, with the overview's own fallbacks
+	Domain    bool // the webDomain setting, or the host the browser reached us on
+	Version   bool // the version of the running panel
+}
+
+const (
+	// backupNameStem is what a backup is called before any component is added, and
+	// is the whole answer when the operator ticks nothing.
+	backupNameStem = "vpn-ui"
+	// backupNameComponentMax caps a free-text component. serverName and webDomain
+	// are operator-typed and unbounded, while most filesystems stop at 255 bytes
+	// for the whole name.
+	backupNameComponentMax = 32
+)
+
+// backupNameDisallowed matches everything the download's filename gate rejects
+// (see isValidFilename in web/controller/server.go).
+var backupNameDisallowed = regexp.MustCompile(`[^a-zA-Z0-9_\-.]+`)
+
+// BuildBackupFilename assembles the name a .db backup is offered under: the stem
+// plus the requested components joined by "_", in a fixed order so two backups of
+// the same panel sort next to each other. Everything false gives a bare
+// "vpn-ui.db", which is the point of the picker's all-unticked case.
+//
+// host is the browser's Host header and is only ever a last resort, for the panel
+// name and the domain alike. Callers with no request behind them (the pre-update
+// snapshot) pass "".
+func (s *ServerService) BuildBackupFilename(opts BackupNameOptions, host string) string {
+	now := time.Now()
+
+	var parts []string
+	add := func(value string) {
+		// A component that sanitizes to nothing is DROPPED, not kept as an empty
+		// slot: a server labelled entirely in Persian must not name its backup
+		// "vpn-ui__20260804.db".
+		if value = sanitizeBackupNamePart(value); value != "" {
+			parts = append(parts, value)
+		}
+	}
+
+	if opts.Version {
+		add(config.GetVersion())
+	}
+	if opts.PanelName {
+		add(s.backupPanelName(host))
+	}
+	if opts.Domain {
+		add(s.backupDomain(host))
+	}
+	if opts.Date {
+		add(now.Format("20060102"))
+	}
+	if opts.Time {
+		add(now.Format("150405"))
+	}
+
+	name := backupNameStem
+	if len(parts) > 0 {
+		name += "_" + strings.Join(parts, "_")
+	}
+	return name + ".db"
+}
+
+// BackupNameParts returns the sanitized panel-name and domain components, for the
+// picker's live preview. The browser can work out the date and time for itself but
+// not these two, and recomputing them here keeps one implementation of the
+// fallback chains: the server remains the authority on the name it actually sends.
+func (s *ServerService) BackupNameParts(host string) (string, string) {
+	return sanitizeBackupNamePart(s.backupPanelName(host)), sanitizeBackupNamePart(s.backupDomain(host))
+}
+
+// backupPanelName resolves what "panel name" means here: the operator's own label,
+// falling back exactly the way the overview's identity tile does (serverName, else
+// the machine's hostname, else the host the browser reached us on).
+//
+// config.GetName() is deliberately not consulted. It is a compile-time literal
+// that still reads "x-ui" and names the upstream project, not this install.
+func (s *ServerService) backupPanelName(host string) string {
+	var settingService SettingService
+	if name, err := settingService.GetServerName(); err == nil && name != "" {
+		return name
+	}
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		return hostname
+	}
+	return extractHostname(host)
+}
+
+// backupDomain resolves the domain component: the webDomain setting, or else the
+// host the browser reached the panel on. That fallback is not invented here, it is
+// the one an unset subDomain already takes in GetDefaultSettings.
+func (s *ServerService) backupDomain(host string) string {
+	var settingService SettingService
+	if domain, err := settingService.GetWebDomain(); err == nil && domain != "" {
+		return domain
+	}
+	return extractHostname(host)
+}
+
+// sanitizeBackupNamePart reduces one component to the characters a filename may
+// carry here. Runs of anything else collapse to nothing rather than to a filler,
+// so "My Panel" becomes "MyPanel": an underscore is the SEPARATOR, and injecting
+// one would read as an extra component.
+//
+// Dots are stripped from both ends because a component made only of them is a path
+// fragment, and the pre-update snapshot joins this name onto a directory. What
+// survives is ASCII, so the length cap can cut on a byte boundary safely.
+func sanitizeBackupNamePart(part string) string {
+	part = strings.Trim(backupNameDisallowed.ReplaceAllString(part, ""), ".")
+	if len(part) > backupNameComponentMax {
+		part = strings.TrimRight(part[:backupNameComponentMax], ".")
+	}
+	return part
+}
+
 func (s *ServerService) ImportDB(file multipart.File) error {
 	// Check if the file is a SQLite database
 	isValidDb, err := database.IsSQLiteDB(file)

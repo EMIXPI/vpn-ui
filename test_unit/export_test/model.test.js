@@ -43,10 +43,11 @@ console.log("model: email-identity clients expose .id");
 
 // Both protocols whose identity is the email rather than a username/password.
 const CASES = [
+  // The secret, the ad tag and the external-proxy list are all an mtproto account
+  // owns: the modes, the FakeTLS domain and the device cap are the inbound's.
   { name: "MtprotoUser", cls: Inbound.MtprotoSettings.MtprotoUser,
     stored: { email: "alice@t", id: "alice@t", secret: "a".repeat(32), enable: true,
-              modeClassic: true, modeSecure: false, modeTls: false,
-              tlsDomain: "www.google.com", userLimit: 0, externalProxy: [] } },
+              adtagEnable: false, adtag: "", externalProxy: [] } },
   { name: "WgUser", cls: Inbound.WgcSettings.WgUser,
     stored: { email: "bob@t", id: "bob@t", enable: true,
               privKey: "k", pubKey: "p", psk: "" } },
@@ -112,6 +113,68 @@ for (const { label, stored, wantUser } of NAIVE_CASES) {
 // it did before the field existed.
 ok(new Inbound.NaiveSettings.Naive().username === "",
    "naive: a newly constructed client defaults to no username");
+
+// An MTProto inbound stored before the modes, the FakeTLS domain and the device cap
+// moved off its clients carries none of them at the root. This form POSTS BACK what it
+// read, so resolving them to the fresh-inbound defaults here would widen an operator's
+// narrower set to all three modes and no device cap the first time anyone opened the
+// inbound and pressed Save, with nothing left to recover it from.
+//
+// The resolution must be the backend's, byte for byte: deriveMtprotoPolicy in
+// web/service/mtproto.go, which the panel-side lift and the subscription links also go
+// through. These cases are the same ones pinned in web/service/mtproto_compat_test.go.
+console.log("");
+console.log("model: mtproto legacy per-client settings resolve onto the inbound");
+
+const MTPROTO_LEGACY_CASES = [
+  {
+    label: "union, first FakeTLS domain, largest cap",
+    stored: { clients: [
+      { email: "alice", secret: "a".repeat(32), modeClassic: true, modeSecure: true, userLimit: 4 },
+      { email: "bob", secret: "b".repeat(32), modeTls: true, tlsDomain: "www.cloudflare.com", userLimit: 2 },
+    ] },
+    want: { modeClassic: true, modeSecure: true, modeTls: true, tlsDomain: "www.cloudflare.com", userLimit: 4 },
+  },
+  {
+    // One account predates the move, one was added after it and carries nothing. An
+    // absent per-client cap means ONE device, so the explicit 3 still wins.
+    label: "mixed old and new clients",
+    stored: { clients: [
+      { email: "alice", secret: "a".repeat(32), modeSecure: true, userLimit: 3 },
+      { email: "bob", secret: "b".repeat(32) },
+    ] },
+    want: { modeClassic: false, modeSecure: true, modeTls: false, tlsDomain: "www.google.com", userLimit: 3 },
+  },
+  {
+    // Nothing to preserve: fall back to the fresh-inbound values rather than to a
+    // modeless inbound, which telemt reads as "no restriction".
+    label: "no accounts at all",
+    stored: { clients: [] },
+    want: { modeClassic: true, modeSecure: true, modeTls: true, tlsDomain: "www.google.com", userLimit: 0 },
+  },
+  {
+    // Already migrated: read straight off the root, an explicit false included.
+    label: "current shape is read verbatim",
+    stored: { modeClassic: false, modeSecure: true, modeTls: false, tlsDomain: "a.example", userLimit: 2,
+              clients: [{ email: "alice", secret: "a".repeat(32) }] },
+    want: { modeClassic: false, modeSecure: true, modeTls: false, tlsDomain: "a.example", userLimit: 2 },
+  },
+];
+
+for (const { label, stored, want } of MTPROTO_LEGACY_CASES) {
+  const live = Inbound.MtprotoSettings.fromJson(stored);
+  for (const key of Object.keys(want)) {
+    ok(live[key] === want[key],
+       `mtproto (${label}): ${key} is ${JSON.stringify(want[key])} (got ${JSON.stringify(live[key])})`);
+  }
+  // What the form would send back. It must be the resolved shape, not the legacy one:
+  // that save is what makes the resolution permanent.
+  const posted = live.toJson();
+  ok(posted.modeClassic === want.modeClassic && posted.modeSecure === want.modeSecure &&
+     posted.modeTls === want.modeTls && posted.tlsDomain === want.tlsDomain &&
+     posted.userLimit === want.userLimit,
+     `mtproto (${label}): a save posts the resolved values, not the legacy ones`);
+}
 
 // ---- verdict ------------------------------------------------------------
 console.log("");

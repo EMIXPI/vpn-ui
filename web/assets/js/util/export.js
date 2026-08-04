@@ -15,6 +15,10 @@ const AccountExport = {
   // link from the backend (server-minted keys / panel-host endpoint).
   async buildCards(app, targets) {
     const cards = [];
+    // One Remote ID fetch per blank-serverAddr ikev2 inbound, not per account: several
+    // eap-mschapv2 accounts commonly share one inbound and the value is inbound-wide, so
+    // a bulk export of all of them should not repeat the same round-trip per account.
+    const remoteIdCache = {};
     for (const t of targets) {
       // One malformed account must not abort the whole export — guard each card
       // and skip (with a console note) any that throws while being built.
@@ -26,8 +30,7 @@ const AccountExport = {
         const client = clients.find(c => c.email === t.email);
         if (!client) continue;
 
-        const server = (inbound.listen && inbound.listen !== '0.0.0.0')
-          ? inbound.listen : location.hostname;
+        const server = dbInbound.address;
 
         // xray protocols produce a share link; VPN protocols return ''.
         let link = '';
@@ -70,6 +73,36 @@ const AccountExport = {
         const uuid = (!vpnUserPass && !isWgc && !isAwg && !isGre && !isMtproto && client.id
           && client.id !== client.password && client.id !== client.email) ? client.id : '';
 
+        // IKEv2 Remote ID / Server Identity: the exact value a client's "Remote ID" field
+        // must hold, because it IS the IKE identity the server presents (Ikev2Service.
+        // serverID, web/service/ikev2.go) and GenerateSelfSignedCert picks the cert SAN
+        // via that same chain, so this and the SAN always match by construction. Every
+        // other protocol leaves it '', and the .filter(Boolean) in txt()/pdf() drops the
+        // row for them. A configured serverAddr is free (already in inbound.settings); a
+        // blank one falls back server-side to a default-route probe a browser cannot
+        // reproduce, so only that case costs a fetch (see remoteIdCache above).
+        let remoteId = '';
+        if (proto === Protocols.IKEV2) {
+          const configured = (inbound.settings && inbound.settings.serverAddr)
+            ? String(inbound.settings.serverAddr).trim() : '';
+          if (configured) {
+            remoteId = configured;
+          } else if (Object.prototype.hasOwnProperty.call(remoteIdCache, dbInbound.id)) {
+            remoteId = remoteIdCache[dbInbound.id];
+          } else {
+            remoteId = await AccountExport._fetchRemoteId(dbInbound.id);
+            remoteIdCache[dbInbound.id] = remoteId;
+          }
+        }
+
+        // psk and eap-tls both authenticate independently of the per-account id/password
+        // (see AccountExport._hideUserPass), so those two rows would otherwise show a
+        // generated username/password that does nothing next to the PSK/cert that is the
+        // actual credential. The values stay on the card (something else may read it);
+        // only txt()/pdf() are told to skip the rows, via the same .filter(Boolean) that
+        // already drops absent ones.
+        const hideUserPass = AccountExport._hideUserPass(dbInbound, inbound);
+
         const base = {
           remark: dbInbound.remark || inbound.remark || '',
           protocol: AccountExport._protocolLabel(dbInbound, inbound),
@@ -81,6 +114,12 @@ const AccountExport = {
           password: client.password || '',
           uuid: uuid,
           psk: AccountExport._psk(dbInbound, inbound, client),
+          // NOT part of the connExtProxy fan-out below: Remote ID is inbound-wide and
+          // tied to the cert, not per-endpoint, so the per-endpoint Object.assign must
+          // never overwrite it (inbound.js's own comment on Ikev2Settings.externalProxy
+          // confirms externalProxy and serverAddr are distinct concepts).
+          remoteId: remoteId,
+          hideUserPass: hideUserPass,
           expiry: AccountExport._expiryText(client.expiryTime),
           used: used,
           total: client.totalGB > 0 ? SizeFormatter.sizeFormat(client.totalGB) : '∞',
@@ -91,14 +130,14 @@ const AccountExport = {
         };
 
         // MTProto: LINK-ONLY. Server/port/username/secret all live inside each tg://
-        // link, so those rows are dropped. One account yields one link PER ENABLED MODE
-        // (and per external-proxy endpoint); emit a card each so the PDF draws a QR per
-        // mode and the TXT lists them individually. An account with every mode off
-        // produces no links and so no card, it has nothing to hand out.
+        // link, so those rows are dropped. One account yields one link PER MODE THE
+        // INBOUND ACCEPTS (and per external-proxy endpoint); emit a card each so the PDF
+        // draws a QR per mode and the TXT lists them individually. The modes and the
+        // FakeTLS domain are the inbound's, hence the settings argument.
         if (isMtproto) {
           const mtAddr = (inbound.listen && inbound.listen !== '0.0.0.0') ? inbound.listen : location.hostname;
           let mtLinks = [];
-          try { mtLinks = (typeof client.links === 'function') ? (client.links(mtAddr, inbound.port) || []) : []; }
+          try { mtLinks = (typeof client.links === 'function') ? (client.links(mtAddr, inbound.port, inbound.settings) || []) : []; }
           catch (e) { mtLinks = []; }
           const modeLabel = { classic: 'MTProto - Classic', secure: 'MTProto - DD(Secure)', tls: 'MTProto - FakeTLS(EE)' };
           for (const l of mtLinks) {
@@ -121,6 +160,11 @@ const AccountExport = {
           if (!devices.length) { cards.push(base); continue; }
           for (const dev of devices) {
             cards.push(Object.assign({}, base, {
+              // The printed "Server" row must agree with THIS device's own Endpoint= line;
+              // without it, the row still showed the inbound's default address once an
+              // external proxy was set, disagreeing with the attached .conf right below it.
+              server: dev.host || base.server,
+              port: dev.port ? String(dev.port) : base.port,
               remark: base.remark + (dev.remark ? ' (' + dev.remark + ')' : ''),
               qr: dev.config || '',
               configText: dev.config || '',
@@ -137,6 +181,10 @@ const AccountExport = {
           if (!devices.length) { cards.push(base); continue; }
           for (const dev of devices) {
             cards.push(Object.assign({}, base, {
+              // See isWgc above: keep the printed "Server" row in sync with this device's
+              // own Endpoint=.
+              server: dev.host || base.server,
+              port: dev.port ? String(dev.port) : base.port,
               remark: base.remark + (dev.remark ? ' (' + dev.remark + ')' : ''),
               qr: dev.config || '',
               configText: dev.config || '',
@@ -178,7 +226,7 @@ const AccountExport = {
         // set, emit one card per endpoint so the exported credentials show the relay host
         // instead of the panel host.
         const connExtProxy = (proto === Protocols.L2TP || proto === Protocols.PPTP
-          || proto === Protocols.OPENCONNECT || proto === Protocols.SSTP || proto === Protocols.IKEV2);
+          || proto === Protocols.OPENVPN || proto === Protocols.OPENCONNECT || proto === Protocols.SSTP || proto === Protocols.IKEV2);
         if (connExtProxy) {
           const eps = (inbound.settings && Array.isArray(inbound.settings.externalProxy))
             ? inbound.settings.externalProxy.filter(e => e && String(e.dest || '').trim() !== '') : [];
@@ -212,6 +260,19 @@ const AccountExport = {
     } catch (e) {
       if (typeof console !== 'undefined') console.warn('export: config fetch failed', endpoint, inboundId, email, e);
       return [];
+    }
+  },
+
+  // _fetchRemoteId resolves an ikev2 inbound's Remote ID server-side. Only called when
+  // settings.serverAddr is blank (see buildCards): that fallback is a default-route probe
+  // (Ikev2Service.getServerIP) that only makes sense to run on the server.
+  async _fetchRemoteId(inboundId) {
+    try {
+      const msg = await HttpUtil.get('/panel/api/inbounds/' + inboundId + '/ikev2-remote-id');
+      return (msg && msg.success && msg.obj && msg.obj.remoteId) ? msg.obj.remoteId : '';
+    } catch (e) {
+      if (typeof console !== 'undefined') console.warn('export: remote id fetch failed', inboundId, e);
+      return '';
     }
   },
 
@@ -309,6 +370,14 @@ const AccountExport = {
         : (s.ipsec !== undefined ? !!s.ipsec : true);
       return ipsecOn ? (s.ipsecPsk || s.psk || '') : '';
     }
+    // IKEv2 (psk auth mode): one shared secret for every device on the inbound, like
+    // L2TP's ipsecPsk. Without this branch a psk-mode account exported with NEITHER a
+    // password NOR a PSK, i.e. no usable credential at all (Go's own subscription card
+    // already includes it; see genConnectionCard's ikev2 case in sub/subService.go).
+    if ((dbInbound.protocol || '').toLowerCase() === Protocols.IKEV2) {
+      const s = inbound.settings || {};
+      return s.authMode === 'psk' ? (s.psk || '') : '';
+    }
     // GRE: the IPsec PSK is per INBOUND (shared by its accounts), like L2TP's.
     if ((dbInbound.protocol || '').toLowerCase() === Protocols.GRE) {
       const s = inbound.settings || {};
@@ -323,6 +392,21 @@ const AccountExport = {
     return '';
   },
 
+  // _hideUserPass reports whether an ikev2 account's Username/Password rows are
+  // meaningless and should not be rendered. psk mode authenticates with one shared
+  // secret at the IKE layer (auth = psk on both sides, web/service/ikev2.go
+  // writeConnConf); eap-tls authenticates with a client certificate checked against the
+  // inbound's CA, with the account identity wildcarded (`eap_id = %any`). Neither mode
+  // ever looks at the per-account id/password: the ikev2Client struct that carries them
+  // has no certificate field, so eap-tls clients bring their own cert rather than one
+  // tied to an account. Only eap-mschapv2 (the default) actually authenticates with
+  // this id/password via RADIUS, so it is the one mode that keeps the rows.
+  _hideUserPass(dbInbound, inbound) {
+    if ((dbInbound.protocol || '').toLowerCase() !== Protocols.IKEV2) return false;
+    const mode = inbound.settings && inbound.settings.authMode;
+    return mode === 'psk' || mode === 'eap-tls';
+  },
+
   _expiryText(expiryTime) {
     if (!expiryTime || expiryTime === 0) return '∞';
     if (expiryTime < 0) {
@@ -331,6 +415,50 @@ const AccountExport = {
     }
     try { return IntlUtil.formatDate(expiryTime); }
     catch (e) { return new Date(expiryTime).toLocaleString(); }
+  },
+
+  // --- filename ----------------------------------------------------------------
+
+  // The name the download actually lands under. Every caller passes free text (an
+  // account's email, an inbound's remark) and both renderers below hand it straight
+  // to the browser as a download name, so whatever is in it is what hits the disk:
+  // a remark can carry a path separator, and either can carry a character Windows
+  // refuses outright.
+  //
+  // A DENYLIST, deliberately, and this is the part worth reading. The obvious move
+  // is to copy the ALLOWED set from sanitizeBackupNamePart in web/service/server.go,
+  // and it is wrong here. That set is narrow because a .db backup's name goes out in
+  // a Content-Disposition header and has to satisfy isValidFilename
+  // (web/controller/server.go). This name is handed to a browser download, which has
+  // no such gate. An allowlist quietly rewrites the address the file is named after:
+  // without "@", bob@example.com becomes bobexample.com, which is both not the email
+  // and indistinguishable from an account genuinely called bobexample.com; without
+  // "+", the common bob+vpn@example.com and bob@example.com collapse onto one file.
+  //
+  // So drop only what a filesystem actually rejects: the two path separators, ":"
+  // (Windows and older macOS), the Windows-reserved *?"<>|, control characters, and
+  // leading or trailing dots and spaces (a leading dot hides the file on unix;
+  // Windows silently strips either from the end, so a name ending in one is not the
+  // name that lands). Everything else, "@" and non-ASCII alike, is legal on Linux,
+  // macOS and Windows and stays: a Persian-addressed account is named after its own
+  // address rather than being flattened into the stem.
+  //
+  // The SHAPE is still sanitizeBackupNamePart's, and for its reasons: drop rather
+  // than substitute, trim the ends, cap, fall back to a stem. The cap is 64 rather
+  // than that function's 32 because there the number bounds ONE component of a name
+  // that can carry five of them; here the component IS the whole name, and
+  // truncating an email to 32 loses the very thing the name is for.
+  //
+  // stem is what survives when nothing else does. Rarer now that the set is this
+  // wide, but a name of nothing but dots or slashes still reduces to '' and would
+  // otherwise be offered as a bare ".txt" with no name at all.
+  _safeName(name, stem) {
+    let out = String(name === undefined || name === null ? '' : name)
+      .replace(/[\/\\:*?"<>|\x00-\x1f\x7f]+/g, '')
+      .replace(/^[.\s]+/, '')
+      .replace(/[.\s]+$/, '');
+    if (out.length > 64) out = out.slice(0, 64).replace(/[.\s]+$/, '');
+    return out || stem || 'accounts';
   },
 
   // --- TXT -------------------------------------------------------------------
@@ -347,10 +475,14 @@ const AccountExport = {
       const rows = [
         line('Server', c.server ? (c.server + ':' + c.port) : ''),
         line('Protocol', c.protocol + (c.network ? ' / ' + c.network : '')),
-        line('Username', c.username),
-        line('Password', c.password),
+        // hideUserPass (ikev2 psk/eap-tls): the id/password on the card are real values,
+        // just not ones the server ever checks; feed line() '' so it drops the row
+        // exactly like an absent one, per AccountExport._hideUserPass.
+        line('Username', c.hideUserPass ? '' : c.username),
+        line('Password', c.hideUserPass ? '' : c.password),
         line('UUID', c.uuid),
         line('PSK', c.psk),
+        line('Remote ID', c.remoteId),
         line('Expiry', c.expiry),
         line('Traffic', c.used + ' / ' + c.total),
         line('Status', c.enable ? 'Enabled' : 'Disabled'),
@@ -366,7 +498,8 @@ const AccountExport = {
       return [bars, title, dash, body, bars].join('\n');
     });
     const header = 'VPN Accounts — ' + cards.length + ' account(s)\nGenerated ' + new Date().toLocaleString() + '\n\n';
-    FileManager.downloadTextFile(header + blocks.join('\n\n') + '\n', (filename || 'accounts') + '.txt', { type: 'text/plain' });
+    FileManager.downloadTextFile(header + blocks.join('\n\n') + '\n',
+      AccountExport._safeName(filename, 'accounts') + '.txt', { type: 'text/plain' });
   },
 
   // --- PDF -------------------------------------------------------------------
@@ -398,10 +531,12 @@ const AccountExport = {
       const rows = [
         c.server ? ['Server', c.server + ':' + c.port] : null,
         ['Protocol', c.protocol + (c.network ? '  /  ' + c.network : '')],
-        c.username ? ['Username', c.username] : null,
-        c.password ? ['Password', c.password] : null,
+        // See txt()'s Username/Password rows: same hideUserPass gate.
+        (c.username && !c.hideUserPass) ? ['Username', c.username] : null,
+        (c.password && !c.hideUserPass) ? ['Password', c.password] : null,
         c.uuid ? ['UUID', c.uuid] : null,
         c.psk ? ['PSK', c.psk] : null,
+        c.remoteId ? ['Remote ID', c.remoteId] : null,
         ['Expiry', c.expiry],
         ['Traffic', c.used + '  /  ' + c.total],
         ['Status', c.enable ? 'Enabled' : 'Disabled'],
@@ -455,7 +590,7 @@ const AccountExport = {
       y += cardH + 16;
     }
 
-    doc.save((filename || 'accounts') + '.pdf');
+    doc.save(AccountExport._safeName(filename, 'accounts') + '.pdf');
   },
 
   _qrDataUrl(text) {

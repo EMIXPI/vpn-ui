@@ -2,6 +2,7 @@ package controller
 
 import (
 	"github.com/mhsanaei/3x-ui/v2/database/model"
+	"github.com/mhsanaei/3x-ui/v2/web/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -63,9 +64,21 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 // so that one function answers "may this caller open the overview" for the route,
 // the landing resolver and the nav entry alike.
 func (a *XUIController) index(c *gin.Context) {
+	// The two backup-filename components the browser cannot work out for itself,
+	// already sanitized, so the picker's preview shows the name /getDb will really
+	// send. Resolved here rather than reimplemented in JS so there is one copy of the
+	// fallback chains; the cost is that renaming the panel in this same session shows
+	// in the preview only after a reload, while the download itself is always current.
+	var serverService service.ServerService
+	panelName, domain := serverService.BackupNameParts(browserHost(c))
+
 	// The donate dialog on the VPN-UI tile. Rendered server-side rather than
 	// fetched: the list is static, so a round trip would only add a spinner.
-	html(c, "index.html", "pages.index.title", gin.H{"donate": donateAddresses})
+	html(c, "index.html", "pages.index.title", gin.H{
+		"donate":            donateAddresses,
+		"backup_panel_name": panelName,
+		"backup_domain":     domain,
+	})
 }
 
 // inbounds renders the inbounds management page.

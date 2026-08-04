@@ -615,6 +615,10 @@ func (a *ServerController) getConfigJson(c *gin.Context) {
 }
 
 // getDb downloads the database file.
+//
+// The name is decided here and not in the browser: the overview reaches this with a
+// plain navigation rather than an XHR, so Content-Disposition is the only place a
+// filename can come from, and the picker's choices have to travel as query params.
 func (a *ServerController) getDb(c *gin.Context) {
 	db, err := a.serverService.GetDb()
 	if err != nil {
@@ -622,7 +626,9 @@ func (a *ServerController) getDb(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("vpn-ui_%s.db", time.Now().Format("20060102-150405"))
+	// Still gated below: the builder sanitizes every component it assembles, but this
+	// endpoint's guarantee is the gate, not the caller's good manners.
+	filename := a.serverService.BuildBackupFilename(backupNameOptions(c), browserHost(c))
 
 	if !isValidFilename(filename) {
 		c.AbortWithError(http.StatusBadRequest, fmt.Errorf("invalid filename"))
@@ -635,6 +641,34 @@ func (a *ServerController) getDb(c *gin.Context) {
 
 	// Write the file contents to the response
 	c.Writer.Write(db)
+}
+
+// backupNameOptions reads the filename picker's four checkboxes off the query
+// string.
+//
+// A request carrying NONE of them is not "the operator unticked everything", it is
+// an old bookmark, a script, or someone hitting /getDb directly, and those keep the
+// dated name this endpoint has always produced. The picker posts all four every
+// time, unticked ones included as false, so an all-false request is unambiguous and
+// does yield the bare vpn-ui.db it asked for.
+func backupNameOptions(c *gin.Context) service.BackupNameOptions {
+	picked := false
+	flag := func(name string) bool {
+		value, present := c.GetQuery(name)
+		picked = picked || present
+		return value == "true"
+	}
+
+	opts := service.BackupNameOptions{
+		Date:      flag("date"),
+		Time:      flag("time"),
+		PanelName: flag("panelName"),
+		Domain:    flag("domain"),
+	}
+	if !picked {
+		return service.BackupNameOptions{Date: true, Time: true}
+	}
+	return opts
 }
 
 func isValidFilename(filename string) bool {

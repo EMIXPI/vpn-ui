@@ -233,6 +233,16 @@
                           <a-menu-item key="sub" v-if="subSettings.enable && row.subId">
                             <a-icon type="link"></a-icon>{{ i18n "pages.settings.subSettings" }}
                           </a-menu-item>
+                          <!-- The whole account, one card per inbound serving it.
+                               The icons inside the expander export ONE membership;
+                               these two are the row's, so they carry every protocol
+                               the customer was sold. -->
+                          <a-menu-item key="exportTxt">
+                            <a-icon type="file-text"></a-icon>{{ i18n "pages.inbounds.exportTxt" }}
+                          </a-menu-item>
+                          <a-menu-item key="exportPdf">
+                            <a-icon type="file-pdf"></a-icon>{{ i18n "pages.inbounds.exportPdf" }}
+                          </a-menu-item>
                           <a-menu-item key="reset">
                             <a-icon type="retweet"></a-icon>{{ i18n "pages.inbounds.resetTraffic" }}
                           </a-menu-item>
@@ -294,21 +304,35 @@
                           </a-tooltip>
                           <span v-else class="bo-mb-cred"></span>
 
+                          <!-- This inbound's own bytes, except where the core cannot
+                               say. Xray counts per ACCOUNT with no inbound in the
+                               stat name, so for a vmess/vless/trojan/... membership
+                               the figure is the account's unattributed remainder,
+                               shared with every other Xray inbound serving it. That
+                               is marked rather than hidden: the alternative was a
+                               zero, which reads as "never used" and is false. -->
                           <a-popover :overlay-class-name="themeSwitcher.currentTheme">
                             <template slot="content">
                               <table cellpadding="2">
                                 <tr>
-                                  <td>&uarr; [[ sizeFormat(getUpStats(record, client.email)) ]]</td>
-                                  <td>&darr; [[ sizeFormat(getDownStats(record, client.email)) ]]</td>
+                                  <td>&uarr; [[ sizeFormat(getInboundUpStats(record, client.email)) ]]</td>
+                                  <td>&darr; [[ sizeFormat(getInboundDownStats(record, client.email)) ]]</td>
                                 </tr>
                                 <tr>
                                   <td>{{ i18n "pages.inbounds.allTimeTraffic" }}</td>
-                                  <td>[[ sizeFormat(getAllTimeClient(record, client.email)) ]]</td>
+                                  <td>[[ sizeFormat(getInboundAllTime(record, client.email)) ]]</td>
+                                </tr>
+                                <tr v-if="isSharedStats(record, client.email)">
+                                  <td colspan="2" class="bo-mb-shared-note">
+                                    {{ i18n "pages.clients.sharedUsageHint" }}
+                                  </td>
                                 </tr>
                               </table>
                             </template>
                             <div class="bo-mb-use">
-                              <b>[[ sizeFormat(getSumStats(record, client.email)) ]]</b>
+                              <b>[[ sizeFormat(getInboundSumStats(record, client.email)) ]]</b>
+                              <span v-if="isSharedStats(record, client.email)"
+                                class="bo-mb-shared">{{ i18n "pages.clients.sharedUsage" }}</span>
                             </div>
                           </a-popover>
 
@@ -339,13 +363,13 @@
 {{template "page/shell_end" . }}
 
 {{template "page/body_scripts" .}}
-<script src="{{ .base_path }}assets/qrcode/qrious2.min.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/uri/URI.min.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/js/model/reality_targets.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/js/model/inbound.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/js/model/dbinbound.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/jspdf/jspdf.umd.min.js?{{ .cur_ver }}"></script>
-<script src="{{ .base_path }}assets/js/util/export.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/qrcode/qrious2.min.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/uri/URI.min.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/reality_targets.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/inbound.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/js/model/dbinbound.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/jspdf/jspdf.umd.min.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/js/util/export.js?{{ .asset_ver }}"></script>
 {{template "component/aSidebar" .}}
 {{template "component/aThemeSwitch" .}}
 {{template "component/aPersianDatepicker" .}}
@@ -560,6 +584,8 @@
           case 'edit': return this.openEdit(row);
           case 'sub': return this.showAccountSub(row);
           case 'freeze': return this.toggleAccountFreeze(row);
+          case 'exportTxt': return this.exportTxt(this.accountTargets(row), row.email);
+          case 'exportPdf': return this.exportPdf(this.accountTargets(row), row.email);
           case 'delete': return this.confirmDelete(row);
           case 'reset':
             return this.$confirm({
@@ -860,10 +886,18 @@
           this.loading(false);
         }
       },
+      // The account, as the (inbound, email) pairs every membership-wide operation
+      // is addressed by. A row here is an ACCOUNT and the mixin speaks memberships,
+      // so anything that acts on "the customer" has to fan out over this list:
+      // handed a single membership instead, freeze would thaw one protocol and the
+      // export would ship one card for a customer who bought four.
+      accountTargets(row) {
+        return (row.memberships || []).map(m => ({ inboundId: m.inboundId, email: row.email }));
+      },
       // One bulk call carrying every membership as a target, so the time-lock maths
       // stays server-side and the whole account freezes or thaws in one write.
       async toggleAccountFreeze(row) {
-        const targets = (row.memberships || []).map(m => ({ inboundId: m.inboundId, email: row.email }));
+        const targets = this.accountTargets(row);
         if (!targets.length) return;
         const op = this.isAccountFrozen(row) ? 'unfreeze' : 'freeze';
         this.loading();
@@ -955,10 +989,10 @@
       // rest is a working account nobody is billed for, so a partial result has to
       // be reported rather than left looking like success.
       //
-      // The panel refuses to remove the LAST client of an inbound ("no client
-      // remained in Inbound"), which is pre-existing behaviour and is exactly when
-      // this bites: an account that is the only client of one of its inbounds is
-      // removed from the others and stays on that one.
+      // The panel no longer refuses to empty an inbound, so the common cause of a
+      // partial result (an account that was the only client of one of its inbounds)
+      // is gone. This still reports what stuck, because a membership can fail for
+      // reasons of its own and a half-deleted account must not look like success.
       async deleteAccount(row) {
         const stuck = [];
         for (const m of (row.memberships || [])) {

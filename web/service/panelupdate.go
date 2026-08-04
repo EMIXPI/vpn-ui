@@ -200,6 +200,10 @@ type PanelUpdateResultInfo struct {
 	Updated bool   `json:"updated"`
 	From    string `json:"from"`
 	To      string `json:"to"`
+	// Where the pre-update database snapshot landed. Empty when the snapshot did
+	// not run or failed, which it is allowed to do: it is best-effort and does not
+	// block the update.
+	BackupPath string `json:"backupPath"`
 }
 
 // TakePanelUpdateResult reports whether this process is the one that came up
@@ -212,9 +216,10 @@ func (s *ServerService) TakePanelUpdateResult() PanelUpdateResultInfo {
 	var settingService SettingService
 	from := settingService.TakePanelUpdatedFrom()
 	return PanelUpdateResultInfo{
-		Updated: from != "",
-		From:    from,
-		To:      config.GetVersion(),
+		Updated:    from != "",
+		From:       from,
+		To:         config.GetVersion(),
+		BackupPath: settingService.TakePanelUpdateBackupPath(),
 	}
 }
 
@@ -384,8 +389,9 @@ func installPanelBinary(staged, exe string) error {
 	// here on.
 	setPanelUpdateCancel(nil)
 	panelUpdateSpeed.Store(0)
-	// Best-effort DB snapshot before the new binary can migrate it.
-	backupPanelDB()
+	// Best-effort DB snapshot before the new binary can migrate it. The path is kept
+	// so the notice the restarted panel shows can say where the old database went.
+	backupPath, _ := backupPanelDB()
 
 	// Keep a copy of the current binary next to it so a bad update can be rolled
 	// back manually (mv vpn-ui.bak vpn-ui): once renamed, the old inode is gone.
@@ -410,6 +416,11 @@ func installPanelBinary(staged, exe string) error {
 	var settingService SettingService
 	if err := settingService.SetPanelUpdatedFrom(config.GetVersion()); err != nil {
 		logger.Warning("panel update: recording the updated-from version failed:", err)
+	}
+	// Written even when the snapshot failed and the path is empty: this CLEARS an
+	// earlier update's path, which would otherwise be announced as this one's.
+	if err := settingService.SetPanelUpdateBackupPath(backupPath); err != nil {
+		logger.Warning("panel update: recording the DB backup path failed:", err)
 	}
 
 	// Restart detached so our own termination can't abort the restart.
@@ -515,16 +526,26 @@ func IsCompatibleBinary(path string) bool {
 	return true
 }
 
-// backupPanelDB copies the SQLite DB (and its WAL/SHM sidecars) next to it with a
-// versioned name. Best-effort — a failed snapshot must not block the update.
-func backupPanelDB() {
+// backupPanelDB copies the SQLite DB (and its WAL/SHM sidecars) into a backups/
+// directory beside it, named for the version being replaced, this panel's name and
+// the moment it happened. Returns where it landed, or "" if it wrote nothing:
+// best-effort, since a failed snapshot must not block the update.
+//
+// The timestamp is what makes this multi-slot. The name used to be the version
+// alone, so a second update FROM the same version (a retry, or reinstalling the
+// build you are already on) silently overwrote the only copy the operator had.
+//
+// Domain is left out of the name: there is no request behind this call, so it could
+// only ever resolve to the webDomain setting or to nothing, and the panel name
+// already says which install this came from.
+func backupPanelDB() (string, error) {
 	db := config.GetDBPath()
 	if _, err := os.Stat(db); err != nil {
-		return
+		return "", err
 	}
 	dir := filepath.Join(filepath.Dir(db), "backups")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
+		return "", err
 	}
 	// Fold the WAL into the main DB first so the file copy is a consistent snapshot
 	// (the panel holds the DB open, so a plain copy could otherwise be torn).
@@ -533,16 +554,25 @@ func backupPanelDB() {
 			_, _ = sqlDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 		}
 	}
-	base := fmt.Sprintf("vpn-ui_%s.db", config.GetVersion())
+	// config.GetVersion() is still the OUTGOING version here: the swap has not
+	// happened yet, and this process is the binary being replaced.
+	var serverService ServerService
+	base := serverService.BuildBackupFilename(BackupNameOptions{
+		Date:      true,
+		Time:      true,
+		PanelName: true,
+		Version:   true,
+	}, "")
 	dst := filepath.Join(dir, base)
 	if err := CopyFile(db, dst); err != nil {
 		logger.Warning("panel update: DB backup failed:", err)
-		return
+		return "", err
 	}
 	for _, side := range []string{"-wal", "-shm"} {
 		_ = CopyFile(db+side, dst+side)
 	}
 	logger.Infof("panel update: backed up DB -> %s", dst)
+	return dst, nil
 }
 
 func CopyFile(src, dst string) error {

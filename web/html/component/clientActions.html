@@ -676,6 +676,44 @@
         if (!clientStats) return 0;
         return clientStats.allTime || (clientStats.up + clientStats.down);
       },
+      // --- per-inbound usage ------------------------------------------------
+      // The four above answer "how much has this ACCOUNT used", which is the right
+      // question for anything measured against the quota: the quota is account-wide,
+      // so a progress bar or a depletion check fed one inbound's slice would read
+      // empty for a customer who is actually out of traffic.
+      //
+      // These answer "how much came through THIS inbound", which is only meaningful
+      // where an inbound is named. Server-side split (attachClientStats), from the
+      // account's membership row.
+      getInboundUpStats(dbInbound, email) {
+        if (!email || email.length == 0) return 0;
+        let clientStats = this.getClientStats(dbInbound, email);
+        return clientStats ? (clientStats.inboundUp || 0) : 0;
+      },
+      getInboundDownStats(dbInbound, email) {
+        if (!email || email.length == 0) return 0;
+        let clientStats = this.getClientStats(dbInbound, email);
+        return clientStats ? (clientStats.inboundDown || 0) : 0;
+      },
+      getInboundSumStats(dbInbound, email) {
+        return this.getInboundUpStats(dbInbound, email) + this.getInboundDownStats(dbInbound, email);
+      },
+      getInboundAllTime(dbInbound, email) {
+        if (!email || email.length == 0) return 0;
+        let clientStats = this.getClientStats(dbInbound, email);
+        if (!clientStats) return 0;
+        return clientStats.inboundAllTime || (clientStats.inboundUp + clientStats.inboundDown) || 0;
+      },
+      // Whether the three above are this inbound's own or the account's pooled
+      // remainder. True only for the Xray-native protocols, whose per-user stat
+      // carries no inbound name, so the same number stands for every one of them
+      // serving the account. Set server-side; never inferred from the protocol
+      // here, so the two cannot drift apart.
+      isSharedStats(dbInbound, email) {
+        if (!email || email.length == 0) return false;
+        let clientStats = this.getClientStats(dbInbound, email);
+        return !!(clientStats && clientStats.shared);
+      },
       getRemStats(dbInbound, email) {
         if (!email || email.length == 0) return 0;
         let clientStats = this.getClientStats(dbInbound, email);

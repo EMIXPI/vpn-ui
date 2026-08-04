@@ -3043,15 +3043,16 @@ class Inbound extends XrayCommonClass {
         let email = client ? client.email : '';
         let addr = !ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0" ? this.listen : location.hostname;
         let port = this.port;
-        // MTProto: one link per mode the ACCOUNT has enabled, not one per inbound.
-        // The same 16-byte secret is reused across modes (only the prefix differs),
-        // so a disabled mode must not be offered here, the proxy would refuse it
+        // MTProto: one link per mode the INBOUND accepts, so an account yields several.
+        // The same 16-byte secret is reused across modes (only the prefix differs), so a
+        // disabled mode must not be offered here, the proxy would refuse it
         // ([access.user_modes]) and the user would be handed a link that cannot work.
-        // External Proxy endpoints are per-account too, so they are applied inside
-        // links() rather than from this.stream.externalProxy.
+        // The settings have to be passed in because that is where the modes and the
+        // FakeTLS domain live; External Proxy endpoints are per-ACCOUNT, so they are
+        // applied inside links() rather than from this.stream.externalProxy.
         if (this.protocol === Protocols.MTPROTO) {
             if (!client || typeof client.links !== 'function') return result;
-            return client.links(addr, port).map(l => ({
+            return client.links(addr, port, this.settings).map(l => ({
                 remark: [remark, email, l.label].filter(x => x && x.length > 0).join(remarkModel.charAt(0)),
                 link: l.link,
             }));
@@ -6047,44 +6048,158 @@ function greSetPeerField(client, i, field, value) {
   Vue.set(client.peers, i, next);
 }
 
+// Shown when the inbound form refuses to turn off the LAST connection mode.
+// Not merely advisory: with every mode off, no secret can dial the proxy, and the
+// backend refuses to start telemt on such an inbound rather than write per-account
+// mode entries that are EMPTY, which its patched reader takes for "unrestricted":
+// the exact opposite of what was asked.
+const MTPROTO_LAST_MODE_WARNING =
+  "At least one connection mode must stay enabled: an inbound with none has no usable link.";
+
 // MTProto Proxy (Telegram) inbound settings.
 //
 // Unlike every other VPN protocol here there is NO addressing block: MTProto is a
 // userspace relay, so clients keep their own IP and the backend assigns nothing.
 // Hence no ipRanges/dns/mtu/localIp, just which connection modes this inbound
-// honours, the FakeTLS domain, the device cap, and the optional ad tag.
+// honours, the FakeTLS domain and the per-account device cap.
+//
+// All three are the INBOUND's, not the account's, because the proxy applies them
+// that way: the FakeTLS domain is process-wide and the listener's mode set bounds
+// every account regardless. The secret, the link endpoints (externalProxy) and the
+// ad tag are per-account and live on MtprotoUser below.
 //
 // userLimitStrategy is deliberately absent: the proxy enforces the device cap
 // itself by refusing the excess connection, so there is no "evict the oldest"
 // choice to make (the panel never sees the admission).
-// Shown when the client form refuses to turn off an account's LAST connection mode.
-// Not merely advisory: with every mode off, no secret can dial the account, so the
-// backend drops it from the proxy config (activeClients) rather than render an entry
-// telemt would read as "unrestricted": the exact opposite of what was asked.
-const MTPROTO_LAST_MODE_WARNING =
-  "At least one connection mode must stay enabled: an account with none has no usable link.";
-
 Inbound.MtprotoSettings = class extends Inbound.Settings {
   constructor(
     protocol,
+    modeClassic = true,
+    modeSecure = true,
+    modeTls = true,
+    tlsDomain = "www.google.com",
+    userLimit = 0,
     mtprotoUsers = [new Inbound.MtprotoSettings.MtprotoUser()],
   ) {
     super(protocol);
-    // The inbound owns nothing but its port: modes, FakeTLS domain, User Limit,
-    // ad tag and external proxy are all per-account, because the proxy keys them
-    // off the authenticated secret rather than the socket.
+    this.modeClassic = modeClassic;
+    this.modeSecure = modeSecure;
+    this.modeTls = modeTls;
+    this.tlsDomain = tlsDomain;
+    this.userLimit = userLimit;
     this.mtprotoUsers = mtprotoUsers;
   }
 
+  // Whether ANY account on this inbound carries an ad tag, which is the condition
+  // the routing warning is drawn on. Any, not each: the middle-proxy path a tag
+  // needs is a process switch, so one tagged account takes Xray routing away from
+  // every account here (the backend's MtprotoService.anyAdtag asks the same question).
+  anyAdtag() {
+    return (this.mtprotoUsers || []).some(
+      (c) => c && c.adtagEnable && (c.adtag || "").trim() !== "",
+    );
+  }
+
+  // Which modes this inbound actually accepts, in the order the links are offered.
+  // The same set the backend writes into [general.modes] and, per account, into
+  // [access.user_modes], so a disabled mode is never handed out as a working link.
+  enabledModes() {
+    const out = [];
+    if (this.modeClassic) out.push("classic");
+    if (this.modeSecure) out.push("secure");
+    if (this.modeTls) out.push("tls");
+    return out;
+  }
+
+  // The pre-move shape resolved into this one: an inbound stored before these moved off
+  // the clients carries none of them at the root and its policy is on its accounts.
+  //
+  // Mirrors deriveMtprotoPolicy in web/service/mtproto.go and must keep agreeing with it
+  // (union of the accounts' modes, the first FakeTLS account's domain, the LARGEST
+  // device cap, and the fresh-inbound defaults when there is nothing to preserve). The
+  // shape test is key PRESENCE, and joint absence of all three modes, exactly as over
+  // there: an explicit false is an operator's choice, not an absence.
+  static legacyPolicy(json = {}) {
+    if (
+      json.modeClassic !== undefined ||
+      json.modeSecure !== undefined ||
+      json.modeTls !== undefined
+    ) {
+      // Current shape. A key still missing from it is a hand-written body, not a legacy
+      // inbound, so it keeps the fresh-inbound value it has always been given.
+      return {
+        modeClassic: true,
+        modeSecure: true,
+        modeTls: true,
+        tlsDomain: "www.google.com",
+        userLimit: 0,
+      };
+    }
+    const clients = Array.isArray(json.clients) ? json.clients : [];
+    // The device cap as the backend resolves it: absent means one device, an explicit 0
+    // means no limit (16 there, noLimitDevices), anything else is clamped to 1..64. The
+    // comparison runs on that effective number because the raw ones are not on one
+    // scale; the WINNER's raw value is what gets stored.
+    const effective = (v) => {
+      if (v === undefined || v === null) return 1;
+      if (v === 0) return 16;
+      return Math.min(Math.max(v, 1), 64);
+    };
+    const out = { modeClassic: false, modeSecure: false, modeTls: false, tlsDomain: "", userLimit: null };
+    let capEff = -1;
+    for (const c of clients) {
+      if (!c) continue;
+      out.modeClassic = out.modeClassic || !!c.modeClassic;
+      out.modeSecure = out.modeSecure || !!c.modeSecure;
+      out.modeTls = out.modeTls || !!c.modeTls;
+      if (!out.tlsDomain && c.modeTls && (c.tlsDomain || "").trim() !== "") {
+        out.tlsDomain = c.tlsDomain.trim();
+      }
+      const eff = effective(c.userLimit);
+      if (eff > capEff) {
+        capEff = eff;
+        out.userLimit = c.userLimit ?? null;
+      }
+    }
+    if (!out.modeClassic && !out.modeSecure && !out.modeTls) {
+      out.modeClassic = out.modeSecure = out.modeTls = true;
+    }
+    if (out.userLimit === null) {
+      // No accounts at all is a fresh inbound (no limit); accounts that all predate the
+      // field each meant one device, so an explicit 1 keeps the cap where it was.
+      out.userLimit = clients.length === 0 ? 0 : 1;
+    }
+    if (!out.tlsDomain) out.tlsDomain = "www.google.com";
+    return out;
+  }
+
   static fromJson(json = {}) {
+    // Resolved from the accounts rather than defaulted, because this form POSTS BACK
+    // what it read: falling back to the fresh-inbound values here would widen an
+    // operator's narrower set to all three modes and no device cap the first time anyone
+    // opened an un-migrated inbound and pressed Save, with nothing left to recover it
+    // from. The backend's startup pass (LiftClientSettingsToInbound) resolves it the
+    // same way, so this only covers the window before that lands.
+    const legacy = Inbound.MtprotoSettings.legacyPolicy(json);
     return new Inbound.MtprotoSettings(
       Protocols.MTPROTO,
+      // ?? and not ||, so an operator's explicit false survives the round-trip.
+      json.modeClassic ?? legacy.modeClassic,
+      json.modeSecure ?? legacy.modeSecure,
+      json.modeTls ?? legacy.modeTls,
+      json.tlsDomain ?? legacy.tlsDomain,
+      json.userLimit ?? legacy.userLimit,
       Inbound.MtprotoSettings.MtprotoUser.fromJson(json.clients),
     );
   }
 
   toJson() {
     return {
+      modeClassic: this.modeClassic,
+      modeSecure: this.modeSecure,
+      modeTls: this.modeTls,
+      tlsDomain: this.tlsDomain,
+      userLimit: this.userLimit,
       clients: Inbound.MtprotoSettings.MtprotoUser.toJsonArray(this.mtprotoUsers),
     };
   }
@@ -6096,21 +6211,22 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
 // having it immediately lets the tg:// links render on add; the backend re-mints
 // any account whose secret is blank.
 //
-// Modes / FakeTLS domain / User Limit / ad tag / external proxy live HERE rather
-// than on the inbound: the proxy keys them off the authenticated secret, so one
-// inbound can serve accounts with entirely different modes and links.
+// Modes, FakeTLS domain and User Limit are NOT here: they belong to the inbound (see
+// Inbound.MtprotoSettings), because the proxy applies them process-wide however they
+// are stored. The external proxy list stays per-account: it only picks which relay
+// endpoint this account's links advertise, and the proxy never sees it.
+//
+// The ad tag is per-account too, because telemt keys tags per user, but it is the one
+// field here whose effect is NOT confined to this account: any tag at all switches the
+// proxy process onto Telegram's middle-proxy path, so every account on the inbound
+// loses Xray routing. The client form says so at the switch.
 Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
   constructor(
     email = RandomUtil.randomLowerAndNum(9),
     secret = RandomUtil.randomSeq(32, { type: "hex" }),
     enable = true,
-    modeClassic = true,
-    modeSecure = true,
-    modeTls = true,
-    tlsDomain = "www.google.com",
     adtagEnable = false,
     adtag = "",
-    userLimit = 0,
     externalProxy = [],
     expiryTime = 0,
     tgId = "",
@@ -6126,13 +6242,8 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
     this.email = email;
     this.secret = secret;
     this.enable = enable;
-    this.modeClassic = modeClassic;
-    this.modeSecure = modeSecure;
-    this.modeTls = modeTls;
-    this.tlsDomain = tlsDomain;
     this.adtagEnable = adtagEnable;
     this.adtag = adtag;
-    this.userLimit = userLimit;
     this.externalProxy = externalProxy;
     this.expiryTime = expiryTime;
     this.tgId = tgId;
@@ -6164,13 +6275,8 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
         client.email ?? "",
         client.secret ?? RandomUtil.randomSeq(32, { type: "hex" }),
         client.enable ?? true,
-        client.modeClassic ?? true,
-        client.modeSecure ?? true,
-        client.modeTls ?? true,
-        client.tlsDomain ?? "www.google.com",
         client.adtagEnable ?? false,
         client.adtag ?? "",
-        client.userLimit ?? 0,
         Array.isArray(client.externalProxy) ? client.externalProxy : [],
         client.expiryTime ?? 0,
         client.tgId ?? "",
@@ -6187,11 +6293,12 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
 
   // The client-facing secret for one mode. The 16-byte secret is the same in all
   // three; the prefix is what tells the Telegram client (and the proxy) which
-  // transport to speak. FakeTLS additionally carries the hex-encoded domain.
-  secretFor(mode) {
+  // transport to speak. FakeTLS additionally carries the hex-encoded domain, which
+  // is the INBOUND's: telemt emulates one domain's certificate for the whole process.
+  secretFor(mode, tlsDomain) {
     if (mode === "secure") return "dd" + this.secret;
     if (mode === "tls") {
-      const domain = (this.tlsDomain || "www.google.com").trim();
+      const domain = (tlsDomain || "www.google.com").trim();
       const hex = Array.from(new TextEncoder().encode(domain))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
@@ -6200,21 +6307,15 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
     return this.secret;
   }
 
-  // Which modes this account may actually use, the same set the backend enforces
-  // via [access.user_modes]. Drives which links/QRs are offered, so a disabled mode
-  // is never handed out as a working link.
-  enabledModes() {
-    const out = [];
-    if (this.modeClassic) out.push("classic");
-    if (this.modeSecure) out.push("secure");
-    if (this.modeTls) out.push("tls");
-    return out;
-  }
-
-  // One tg:// link per enabled mode, per endpoint. External Proxy endpoints replace
-  // this server's address (a relay/CDN in front); with none set, the panel's own
-  // host:port is used.
-  links(host, port) {
+  // One tg:// link per mode the INBOUND accepts, per endpoint. External Proxy
+  // endpoints replace this server's address (a relay/CDN in front); with none set,
+  // the panel's own host:port is used.
+  //
+  // `settings` is the owning Inbound.MtprotoSettings and is required: the modes and
+  // the FakeTLS domain live there, so a caller that omits it would silently produce
+  // no links at all rather than the wrong ones.
+  links(host, port, settings) {
+    if (!settings || typeof settings.enabledModes !== "function") return [];
     const endpoints =
       Array.isArray(this.externalProxy) && this.externalProxy.length > 0
         ? this.externalProxy.map((p) => ({
@@ -6226,7 +6327,7 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
     const labels = { classic: "Classic", secure: "Secure (dd)", tls: "FakeTLS (ee)" };
     const out = [];
     for (const ep of endpoints) {
-      for (const mode of this.enabledModes()) {
+      for (const mode of settings.enabledModes()) {
         out.push({
           mode: mode,
           label: labels[mode] + (ep.remark ? `, ${ep.remark}` : ""),
@@ -6236,7 +6337,7 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
             "&port=" +
             ep.port +
             "&secret=" +
-            this.secretFor(mode),
+            this.secretFor(mode, settings.tlsDomain),
         });
       }
     }
@@ -6253,13 +6354,8 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
       email: this.email,
       secret: this.secret,
       enable: this.enable,
-      modeClassic: this.modeClassic,
-      modeSecure: this.modeSecure,
-      modeTls: this.modeTls,
-      tlsDomain: this.tlsDomain,
       adtagEnable: this.adtagEnable,
       adtag: this.adtag,
-      userLimit: this.userLimit,
       externalProxy: this.externalProxy || [],
       expiryTime: this.expiryTime,
       tgId: this.tgId,
