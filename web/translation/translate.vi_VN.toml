@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "Inbound 2022-blake3 giữ khoá riêng, được tạo cho từng thành viên, và không dùng mật khẩu ở trên. Hãy mở cấu hình hoặc QR của nó để đưa cho khách giá trị đúng."
 "title" = "Người dùng"
 "add" = "Thêm người dùng"
 "addTitle" = "Thêm người dùng"
@@ -508,6 +509,7 @@
 "credential" = "Thông tin đăng nhập"
 "sharedUsage" = "dùng chung"
 "sharedUsageHint" = "Xray tính lưu lượng theo tài khoản chứ không theo inbound, nên con số này là phần dùng còn lại của tài khoản, dùng chung cho mọi inbound Xray phục vụ nó."
+"onlineShared" = "Trực tuyến, trên một trong các inbound Xray của tài khoản này. Xray không cho biết là inbound nào."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Không bao giờ"
@@ -853,6 +855,11 @@
 "allowedIPs" = "IP được phép"
 "endpoint" = "Điểm cuối"
 "psk" = "Khóa chia sẻ"
+"clientNetwork" = "Mạng khách"
+"clientNetworkDesc" = "Dải địa chỉ cấp cho đường hầm của khách. Địa chỉ đầu tiên thuộc về chính inbound này, nên một /24 phục vụ 253 thiết bị."
+"devicesPerClient" = "Thiết bị mỗi khách"
+"devicesPerClientDesc" = "Mỗi tài khoản nhận bao nhiêu cặp khoá. Hai thiết bị WireGuard không thể dùng chung một cặp."
+"noAccounting" = "Xray không báo cáo lưu lượng theo từng peer WireGuard, nên khách trên inbound này không tích luỹ mức dùng: hạn mức không bao giờ hết và không bao giờ hiện trực tuyến. Hạn dùng, công tắc bật và xoá đều hoạt động."
 "domainStrategy" = "Chiến lược tên miền"
 
 [pages.xray.tun]

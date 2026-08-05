@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "Una entrada 2022-blake3 tiene su propia clave, generada por membresía, y no usa la contraseña de arriba. Abre su configuración o su QR para dar al cliente la correcta."
 "title" = "Clientes"
 "add" = "Agregar Cliente"
 "addTitle" = "Agregar Cliente"
@@ -508,6 +509,7 @@
 "credential" = "Credencial"
 "sharedUsage" = "compartido"
 "sharedUsageHint" = "Xray cuenta el tráfico por cuenta y no por entrada, así que esta cifra es el uso restante de la cuenta, compartido entre todas las entradas Xray que la sirven."
+"onlineShared" = "En línea, en una de las entradas Xray de esta cuenta. Xray no indica en cuál."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Nunca"
@@ -853,6 +855,11 @@
 "allowedIPs" = "IP permitidas"
 "endpoint" = "Punto final"
 "psk" = "Clave precompartida"
+"clientNetwork" = "Red de clientes"
+"clientNetworkDesc" = "El grupo del que salen las direcciones de túnel de los clientes. Su primera dirección pertenece a esta entrada, así que un /24 sirve a 253 dispositivos."
+"devicesPerClient" = "Dispositivos por cliente"
+"devicesPerClientDesc" = "Cuántos pares de claves recibe cada cuenta. Dos dispositivos WireGuard no pueden compartir uno."
+"noAccounting" = "Xray no informa del tráfico por peer de WireGuard, así que un cliente de esta entrada no acumula uso: su cuota nunca se agota y nunca aparece en línea. La caducidad, el interruptor y el borrado sí funcionan."
 "domainStrategy" = "Estrategia de dominio"
 
 [pages.xray.tun]

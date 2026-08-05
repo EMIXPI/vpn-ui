@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "Inbound 2022-blake3 punya kunci sendiri yang dibuat per keanggotaan dan tidak memakai kata sandi di atas. Buka konfigurasi atau QR-nya untuk memberi pelanggan nilai yang benar."
 "title" = "Klien"
 "add" = "Tambah Klien"
 "addTitle" = "Tambah Klien"
@@ -508,6 +509,7 @@
 "credential" = "Kredensial"
 "sharedUsage" = "bersama"
 "sharedUsageHint" = "Xray menghitung trafik per akun, bukan per inbound, sehingga angka ini adalah sisa pemakaian akun yang dibagi di antara semua inbound Xray yang melayaninya."
+"onlineShared" = "Online, pada salah satu inbound Xray akun ini. Xray tidak melaporkan yang mana."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Tidak Pernah"
@@ -853,6 +855,11 @@
 "allowedIPs" = "IP yang Diizinkan"
 "endpoint" = "Titik Akhir"
 "psk" = "Kunci Pra-Bagi"
+"clientNetwork" = "Jaringan Klien"
+"clientNetworkDesc" = "Kumpulan alamat terowongan klien. Alamat pertamanya milik inbound ini sendiri, jadi /24 melayani 253 perangkat."
+"devicesPerClient" = "Perangkat per Klien"
+"devicesPerClientDesc" = "Berapa pasang kunci yang didapat setiap akun. Dua perangkat WireGuard tidak bisa berbagi satu pasang."
+"noAccounting" = "Xray tidak melaporkan trafik per peer WireGuard, jadi klien di inbound ini tidak mengakumulasi penggunaan: kuotanya tidak pernah habis dan tidak pernah terlihat online. Kedaluwarsa, sakelar aktif, dan penghapusan tetap bekerja."
 "domainStrategy" = "Strategi Domain"
 
 [pages.xray.tun]

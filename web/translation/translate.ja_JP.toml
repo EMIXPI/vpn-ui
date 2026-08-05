@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "2022-blake3 のインバウンドはメンバーシップごとに生成された独自の鍵を持ち、上のパスワードは使いません。正しい値を顧客に渡すには、その設定または QR を開いてください。"
 "title" = "クライアント"
 "add" = "クライアント追加"
 "addTitle" = "クライアント追加"
@@ -508,6 +509,7 @@
 "credential" = "認証情報"
 "sharedUsage" = "共有"
 "sharedUsageHint" = "Xray はインバウンド単位ではなくアカウント単位でトラフィックを計測するため、この数値はアカウントの残り使用量であり、そのアカウントを提供するすべての Xray インバウンドで共有されます。"
+"onlineShared" = "オンライン。このアカウントのいずれかの Xray インバウンドですが、Xray はどれかを報告しません。"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "なし"
@@ -853,6 +855,11 @@
 "allowedIPs" = "許可されたIP"
 "endpoint" = "エンドポイント"
 "psk" = "共有キー"
+"clientNetwork" = "クライアントネットワーク"
+"clientNetworkDesc" = "クライアントのトンネルアドレスを割り当てるプール。先頭のアドレスはこのインバウンド自身のものなので、/24 で 253 台に対応します。"
+"devicesPerClient" = "クライアントあたりの端末数"
+"devicesPerClientDesc" = "各アカウントが受け取る鍵ペアの数。WireGuard の端末どうしは鍵ペアを共有できません。"
+"noAccounting" = "Xray は WireGuard の peer ごとのトラフィックを報告しないため、このインバウンドのクライアントには使用量が積み上がりません。割り当て量は尽きず、オンライン表示もされません。有効期限、有効化スイッチ、削除はいずれも機能します。"
 "domainStrategy" = "ドメイン戦略"
 
 [pages.xray.tun]

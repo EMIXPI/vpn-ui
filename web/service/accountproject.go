@@ -132,10 +132,13 @@ func applyAccountCredential(entry map[string]any, account *model.Account, inboun
 		// The secret is the credential; the identity is the email.
 		entry["secret"] = account.Secret
 		preserveOrDefaultID(entry, account.Email)
-	case model.WGC, model.AWG, model.GRE:
-		// Nothing reads "id" for these three (verified: no .ID reference in
-		// wgc.go, awg.go or gre.go), and the per-device keypairs live in the
-		// passed-through part of the entry.
+	case model.WGC, model.AWG, model.GRE, model.WireGuard:
+		// Nothing reads "id" for these (verified: no .ID reference in wgc.go,
+		// awg.go or gre.go), and the per-device keypairs live in the
+		// passed-through part of the entry. The Xray-native wireguard inbound
+		// joins them for exactly the same reason: a peer is authorised by its
+		// public key, so there is no credential for an account to carry and its
+		// key material is minted per membership (web/service/wgxray.go).
 		preserveOrDefaultID(entry, account.Email)
 	default:
 		entry["id"] = account.UUID
@@ -585,7 +588,7 @@ func overwriteAccountCredential(account *model.Account, entry map[string]any, pr
 		set(&account.Password, str("password"))
 	case model.MTPROTO:
 		set(&account.Secret, str("secret"))
-	case model.WGC, model.AWG, model.GRE:
+	case model.WGC, model.AWG, model.GRE, model.WireGuard:
 		// Identity is the email and nothing reads "id"; no credential to lift.
 	default:
 		set(&account.UUID, str("id"))
@@ -703,6 +706,13 @@ func shadowsocksKeySize(inbound *model.Inbound) int {
 	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err == nil {
 		method, _ = settings["method"].(string)
 	}
+	return shadowsocksMethodKeySize(method)
+}
+
+// shadowsocksMethodKeySize is the same answer for a named cipher, so a caller
+// holding a per-CLIENT method (multi-user shadowsocks lets an account carry its own,
+// and the inbound-level one is only the default) can ask about that instead.
+func shadowsocksMethodKeySize(method string) int {
 	switch strings.ToLower(strings.TrimSpace(method)) {
 	case "2022-blake3-aes-128-gcm":
 		return 16
@@ -1045,7 +1055,7 @@ func (s *AccountService) ensureCredentialsFor(tx *gorm.DB, accountId int, inboun
 	case model.MTPROTO:
 		// 32 hex characters, which is exactly a dashless uuid.
 		need(&account.Secret, dashless)
-	case model.WGC, model.AWG, model.GRE:
+	case model.WGC, model.AWG, model.GRE, model.WireGuard:
 		// Identity is the email; the per-device keypairs are minted by the
 		// protocol's own reconcile, not here.
 	default:

@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "مدخل 2022-blake3 له مفتاحه الخاص المولَّد لكل عضوية، ولا يستخدم كلمة المرور أعلاه. افتح إعداداته أو رمز QR لإعطاء العميل القيمة الصحيحة."
 "title" = "العملاء"
 "add" = "أضف عميل"
 "addTitle" = "إضافة عميل"
@@ -508,6 +509,7 @@
 "credential" = "بيانات الاعتماد"
 "sharedUsage" = "مشترك"
 "sharedUsageHint" = "يحسب Xray حركة البيانات لكل حساب وليس لكل وارد، لذا يمثل هذا الرقم الاستهلاك المتبقي للحساب مشتركًا بين كل الواردات من نوع Xray التي تخدمه."
+"onlineShared" = "متصل، على أحد مداخل Xray لهذا الحساب. لا يحدد Xray أيها."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "أبداً"
@@ -853,6 +855,11 @@
 "allowedIPs" = "عناوين IP المسموح بها"
 "endpoint" = "النهاية"
 "psk" = "المفتاح المشترك"
+"clientNetwork" = "شبكة العملاء"
+"clientNetworkDesc" = "المجمع الذي تُؤخذ منه عناوين نفق العملاء. أول عنوان فيه يخص هذا المدخل نفسه، لذا فإن /24 يخدم 253 جهازًا."
+"devicesPerClient" = "الأجهزة لكل عميل"
+"devicesPerClientDesc" = "كم زوج مفاتيح يحصل عليه كل حساب. لا يمكن لجهازي WireGuard مشاركة زوج واحد."
+"noAccounting" = "لا يبلّغ Xray عن حركة مرور لكل peer في WireGuard، لذا لا يسجل عميل هذا المدخل أي استهلاك: لن تنفد حصته أبدًا ولن يظهر متصلًا. أما الانتهاء والتفعيل والحذف فتعمل جميعها."
 "domainStrategy" = "استراتيجية الدومين"
 
 [pages.xray.tun]

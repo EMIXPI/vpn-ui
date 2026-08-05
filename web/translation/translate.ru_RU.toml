@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "Вход 2022-blake3 хранит собственный ключ, созданный для этого членства, и не использует пароль выше. Откройте его конфигурацию или QR, чтобы выдать клиенту правильное значение."
 "title" = "Клиенты"
 "add" = "Добавить клиента"
 "addTitle" = "Добавить клиента"
@@ -508,6 +509,7 @@
 "credential" = "Учётные данные"
 "sharedUsage" = "общий"
 "sharedUsageHint" = "Xray считает трафик по аккаунту, а не по входящему подключению, поэтому это оставшийся расход аккаунта, общий для всех обслуживающих его входящих Xray."
+"onlineShared" = "В сети, на одном из Xray-входов этой учётной записи. Xray не сообщает, на каком именно."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Никогда"
@@ -853,6 +855,11 @@
 "allowedIPs" = "Разрешенные IP-адреса"
 "endpoint" = "Конечная точка"
 "psk" = "Общий ключ"
+"clientNetwork" = "Сеть клиентов"
+"clientNetworkDesc" = "Пул, из которого выдаются туннельные адреса клиентов. Первый адрес принадлежит самому входу, поэтому /24 обслуживает 253 устройства."
+"devicesPerClient" = "Устройств на клиента"
+"devicesPerClientDesc" = "Сколько пар ключей получает каждая учётная запись. Два устройства WireGuard не могут делить одну пару."
+"noAccounting" = "Xray не сообщает трафик по каждому peer WireGuard, поэтому клиент на этом входе не накапливает расход: его квота никогда не исчерпается и он никогда не показывается в сети. Срок действия, переключатель и удаление работают."
 "domainStrategy" = "Стратегия домена"
 
 [pages.xray.tun]

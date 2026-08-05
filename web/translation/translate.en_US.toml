@@ -614,6 +614,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "A 2022-blake3 inbound holds its own key, minted per membership, and does not use the password above. Open its config or QR to give the customer the right one."
 "title" = "Clients"
 "add" = "Add Client"
 "addTitle" = "Add Client"
@@ -650,6 +651,7 @@
 "credential" = "Credential"
 "sharedUsage" = "shared"
 "sharedUsageHint" = "Xray counts traffic per account, not per inbound, so this figure is the account's remaining usage shared across every Xray inbound serving it."
+"onlineShared" = "Online, on one of this account's Xray inbounds. Xray does not report which one."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Never"
@@ -1093,6 +1095,11 @@
 "allowedIPs" = "Allowed IPs"
 "endpoint" = "Endpoint"
 "psk" = "PreShared Key"
+"clientNetwork" = "Client Network"
+"clientNetworkDesc" = "The pool client tunnel addresses come out of. Its first host is this inbound's own address, so a /24 serves 253 devices."
+"devicesPerClient" = "Devices per Client"
+"devicesPerClientDesc" = "How many keypairs each account gets. Two WireGuard devices cannot share one, so a customer with a phone and a laptop needs two."
+"noAccounting" = "Xray reports no traffic per WireGuard peer, so a client on this inbound accrues no usage: its quota can never trip and it is never shown online. Expiry, the enable switch and deletion all work."
 "domainStrategy" = "Domain Strategy"
 
 [pages.xray.tun]

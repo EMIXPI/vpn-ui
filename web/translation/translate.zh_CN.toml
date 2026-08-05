@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "2022-blake3 入站持有为该成员单独生成的密钥，不使用上面的密码。请打开它的配置或二维码，把正确的值交给客户。"
 "title" = "客户端"
 "add" = "添加客户端"
 "addTitle" = "添加客户端"
@@ -508,6 +509,7 @@
 "credential" = "凭据"
 "sharedUsage" = "共享"
 "sharedUsageHint" = "Xray 按账号而非按入站统计流量，因此该数值是该账号的剩余用量，由服务该账号的所有 Xray 入站共享。"
+"onlineShared" = "在线，位于该账号的某个 Xray 入站上。Xray 不会报告具体是哪一个。"
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "从不"
@@ -853,6 +855,11 @@
 "allowedIPs" = "允许的 IP"
 "endpoint" = "端点"
 "psk" = "共享密钥"
+"clientNetwork" = "客户端网络"
+"clientNetworkDesc" = "客户端隧道地址所在的地址池。其首个地址属于该入站本身，因此一个 /24 可服务 253 台设备。"
+"devicesPerClient" = "每客户端设备数"
+"devicesPerClientDesc" = "每个账号获得多少组密钥对。两台 WireGuard 设备无法共用一组。"
+"noAccounting" = "Xray 不会按 WireGuard peer 报告流量，因此该入站上的客户端不会累计用量：配额永远不会用完，也永远不会显示在线。到期、启用开关和删除均可正常工作。"
 "domainStrategy" = "域策略"
 
 [pages.xray.tun]

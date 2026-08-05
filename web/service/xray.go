@@ -248,6 +248,26 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		// get settings clients
 		settings := map[string]any{}
 		json.Unmarshal([]byte(inbound.Settings), &settings)
+
+		// The Xray-native wireguard inbound takes `peers`, never `clients`, so its
+		// accounts are translated here instead of going through the generic filter
+		// below. It has to be before that filter and not after: the filter is an
+		// allowlist over each client's keys, and it would delete the very key
+		// material a peer is built from. See web/service/wgxray.go.
+		if inbound.Protocol == model.WireGuard {
+			applyWireguardClients(settings, func(email string, entryEnabled bool) bool {
+				if enable, exists := enableByEmail[accountKey(email)]; exists && !enable {
+					return false
+				}
+				return entryEnabled
+			})
+			modifiedSettings, err := json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			inbound.Settings = string(modifiedSettings)
+		}
+
 		clients, ok := settings["clients"].([]any)
 		if ok {
 			// filter and clean clients

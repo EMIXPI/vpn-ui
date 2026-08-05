@@ -1477,6 +1477,20 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 .bo-mb.off { opacity:.55; }
 
 .bo-mb-id { display:flex; align-items:center; gap:7px; flex:1 1 210px; min-width:0; }
+
+/* Live on THIS inbound. Hollow at rest rather than filled-grey, so a row of
+   offline memberships reads as an absence of light instead of a row of dots
+   competing with the account lamp above it. */
+.bo-mb-lamp {
+  width:7px; height:7px; border-radius:50%; flex:0 0 auto;
+  border:1px solid var(--border); background:transparent;
+}
+.bo-mb-lamp--live { border-color:var(--ok); background:var(--ok); box-shadow:0 0 0 2px var(--ok-weak); }
+/* Connected, but on one of this account's Xray-native inbounds and the core does
+   not say which. Filled in the same hue with no ring: it is the same evidence,
+   held less certainly, and giving it a second colour would read as a third state
+   an operator has to learn. */
+.bo-mb-lamp--maybe { border-color:var(--ok); background:var(--ok-weak); }
 .bo-mb-name {
   font-weight:500; color:var(--text);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;

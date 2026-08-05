@@ -337,7 +337,16 @@ func inboundMethod(settings string) string {
 	return m
 }
 
-func settingsHoldClients(settings string) bool {
+func settingsHoldClients(protocol model.Protocol, settings string) bool {
+	// The Xray-native wireguard inbound stores `peers`, not `clients`, so on this
+	// test alone it looked like an inbound nothing could be a member of: the picker
+	// never offered it, and an operator could create one and then had no way at all
+	// to put an account on it. It holds clients now (see web/service/wgxray.go); the
+	// array is created by the reconcile, so answer for the protocol rather than
+	// waiting for the first reconcile to make the inbound assignable.
+	if protocol == model.WireGuard {
+		return true
+	}
 	var root map[string]any
 	if err := json.Unmarshal([]byte(settings), &root); err != nil || root == nil {
 		return false
@@ -381,7 +390,7 @@ func (s *AccountService) AssignableInboundsFor(user *model.User) ([]AccountMembe
 		// An inbound with no client list has nothing to be a member OF, and
 		// offering it only produces a save the server refuses. Same rule the
 		// client form's own checklist applies (modals/client_modal.html).
-		if !settingsHoldClients(in.Settings) {
+		if !settingsHoldClients(in.Protocol, in.Settings) {
 			continue
 		}
 		out = append(out, AccountMembershipView{

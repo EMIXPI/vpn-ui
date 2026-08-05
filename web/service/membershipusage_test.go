@@ -441,3 +441,218 @@ func TestAttachClientStatsFallsBackWithoutMemberships(t *testing.T) {
 			1*mb, 2*mb, 3*mb)
 	}
 }
+
+// The bug that made every figure on the Clients page read zero.
+//
+// The backfill filed each account's whole history under client_traffics.inbound_id,
+// its HOME inbound, whatever protocol that inbound spoke. On the overwhelming
+// majority of panels the home inbound is an Xray-native one, and those are rendered
+// from the account's unattributed REMAINDER (total minus every share) rather than
+// from a share of their own. So the seeded share was subtracted from the one figure
+// that would have shown it, and the account reported 0 used against every inbound
+// serving it while its row above still said gigabytes.
+func TestMigrationMembershipUsageLeavesXrayNativeUnattributed(t *testing.T) {
+	svc := newAccountsDB(t)
+	const email = "homevless@example.com"
+
+	// The home inbound is the vless one: lower id, so it is what a real panel's
+	// client_traffics row would name.
+	vless := seedInboundWithClients(t, model.VLESS, 47401, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": email, "enable": true, "totalGB": float64(0)},
+	})
+	l2tp := seedInboundWithClients(t, model.L2TP, 47402, []map[string]any{})
+	svc.MigrationAccounts()
+	account, err := svc.GetAccountByEmail(email)
+	if err != nil || account == nil {
+		t.Fatalf("GetAccountByEmail: %v", err)
+	}
+	account.UUID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	account.VpnUsername = "home-login"
+	account.Password = "home-pw"
+	if err := database.GetDB().Save(account).Error; err != nil {
+		t.Fatalf("save account: %v", err)
+	}
+	if _, err := svc.ApplyMemberships(email, []int{vless.Id, l2tp.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+	if err := database.GetDB().Create(&xray.ClientTraffic{
+		InboundId: vless.Id, Email: email, Enable: true, Up: 1 * mb, Down: 9 * mb, AllTime: 10 * mb,
+	}).Error; err != nil {
+		t.Fatalf("seed client_traffics: %v", err)
+	}
+
+	svc.MigrationMembershipUsage()
+
+	if got := membershipUsageOf(t, email, vless.Id); got.Up != 0 || got.Down != 0 || got.AllTime != 0 {
+		t.Errorf("the vless membership was seeded (up %d, down %d, allTime %d); it must stay at zero, "+
+			"because an Xray-native inbound renders the REMAINDER and a share parked on one is "+
+			"subtracted from that remainder and then displayed by nothing",
+			got.Up, got.Down, got.AllTime)
+	}
+
+	inbounds := &InboundService{}
+	loaded, err := inbounds.GetAllInbounds()
+	if err != nil {
+		t.Fatalf("GetAllInbounds: %v", err)
+	}
+	find := func(inboundId int) *xray.ClientTraffic {
+		for _, in := range loaded {
+			if in.Id != inboundId {
+				continue
+			}
+			for i := range in.ClientStats {
+				if accountKey(in.ClientStats[i].Email) == accountKey(email) {
+					return &in.ClientStats[i]
+				}
+			}
+		}
+		return nil
+	}
+	row := find(vless.Id)
+	if row == nil {
+		t.Fatal("the vless inbound does not list the account")
+	}
+	if !row.Shared {
+		t.Error("the vless row must be marked shared: nothing attributed those bytes to it")
+	}
+	if row.InboundDown != 9*mb {
+		t.Errorf("vless inboundDown = %d; want the whole unattributed remainder %d. A zero here "+
+			"is the reported bug: every protocol showing no usage on an account that has moved 10 MiB",
+			row.InboundDown, 9*mb)
+	}
+}
+
+// The repair for panels that already ran the broken backfill. Their misfiled shares
+// are in the table before this code ever runs, so fixing the seeder alone leaves
+// them reading zero for ever.
+func TestRepairMembershipUsageFreesTheRemainder(t *testing.T) {
+	svc := newAccountsDB(t)
+	const email = "misfiled@example.com"
+
+	vless := seedInboundWithClients(t, model.VLESS, 47501, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": email, "enable": true, "totalGB": float64(0)},
+	})
+	openvpn := seedInboundWithClients(t, model.OPENVPN, 47502, []map[string]any{})
+	svc.MigrationAccounts()
+	account, err := svc.GetAccountByEmail(email)
+	if err != nil || account == nil {
+		t.Fatalf("GetAccountByEmail: %v", err)
+	}
+	account.UUID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	account.VpnUsername = "misfiled-login"
+	account.Password = "misfiled-pw"
+	if err := database.GetDB().Save(account).Error; err != nil {
+		t.Fatalf("save account: %v", err)
+	}
+	if _, err := svc.ApplyMemberships(email, []int{vless.Id, openvpn.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+	if err := database.GetDB().Create(&xray.ClientTraffic{
+		InboundId: vless.Id, Email: email, Enable: true, Up: 0, Down: 8 * mb, AllTime: 8 * mb,
+	}).Error; err != nil {
+		t.Fatalf("seed client_traffics: %v", err)
+	}
+	// Exactly what the shipped backfill left behind: the whole history parked on the
+	// vless membership, and the flag set so it will never run again.
+	if err := database.GetDB().Exec(`
+		UPDATE account_inbounds SET down = ?, all_time = ?
+		WHERE inbound_id = ?`, 8*mb, 8*mb, vless.Id).Error; err != nil {
+		t.Fatalf("plant the misfiled share: %v", err)
+	}
+	var settingService SettingService
+	if err := settingService.setString(membershipUsageMigratedKey, "already-ran"); err != nil {
+		t.Fatalf("set the migrated flag: %v", err)
+	}
+
+	svc.MigrationMembershipUsage()
+
+	if got := membershipUsageOf(t, email, vless.Id); got.Down != 0 || got.AllTime != 0 {
+		t.Errorf("the misfiled vless share survived (down %d, allTime %d); the repair must clear it "+
+			"so those bytes go back into the remainder", got.Down, got.AllTime)
+	}
+	// The authoritative counter is never touched by any of this.
+	if total := accountTrafficOf(t, email); total.Down != 8*mb {
+		t.Errorf("client_traffics.down = %d; want it untouched at %d. The breakdown is a display "+
+			"figure and repairing it must never move real billing", total.Down, 8*mb)
+	}
+
+	inbounds := &InboundService{}
+	loaded, err := inbounds.GetAllInbounds()
+	if err != nil {
+		t.Fatalf("GetAllInbounds: %v", err)
+	}
+	for _, in := range loaded {
+		if in.Id != vless.Id {
+			continue
+		}
+		for i := range in.ClientStats {
+			if accountKey(in.ClientStats[i].Email) != accountKey(email) {
+				continue
+			}
+			if in.ClientStats[i].InboundDown != 8*mb {
+				t.Errorf("vless inboundDown = %d; want %d", in.ClientStats[i].InboundDown, 8*mb)
+			}
+		}
+	}
+}
+
+// A share whose inbound has been deleted must not go on eating the remainder. It has
+// no row left to be rendered under, so subtracting it hides those bytes everywhere.
+func TestAttachClientStatsIgnoresSharesOfDeletedInbounds(t *testing.T) {
+	svc := newAccountsDB(t)
+	const email = "orphanshare@example.com"
+
+	vless := seedInboundWithClients(t, model.VLESS, 47601, []map[string]any{
+		{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "email": email, "enable": true, "totalGB": float64(0)},
+	})
+	openvpn := seedInboundWithClients(t, model.OPENVPN, 47602, []map[string]any{})
+	svc.MigrationAccounts()
+	account, err := svc.GetAccountByEmail(email)
+	if err != nil || account == nil {
+		t.Fatalf("GetAccountByEmail: %v", err)
+	}
+	account.UUID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	account.VpnUsername = "orphan-login"
+	account.Password = "orphan-pw"
+	if err := database.GetDB().Save(account).Error; err != nil {
+		t.Fatalf("save account: %v", err)
+	}
+	if _, err := svc.ApplyMemberships(email, []int{vless.Id, openvpn.Id}, nil, true); err != nil {
+		t.Fatalf("ApplyMemberships: %v", err)
+	}
+	if err := database.GetDB().Create(&xray.ClientTraffic{
+		InboundId: vless.Id, Email: email, Enable: true, Down: 5 * mb, AllTime: 5 * mb,
+	}).Error; err != nil {
+		t.Fatalf("seed client_traffics: %v", err)
+	}
+	if err := database.GetDB().Exec(`UPDATE account_inbounds SET down = ?, all_time = ? WHERE inbound_id = ?`,
+		5*mb, 5*mb, openvpn.Id).Error; err != nil {
+		t.Fatalf("plant the openvpn share: %v", err)
+	}
+	// The inbound goes, its membership row is left behind (which is what an
+	// interrupted delete or a restored database looks like).
+	if err := database.GetDB().Exec(`DELETE FROM inbounds WHERE id = ?`, openvpn.Id).Error; err != nil {
+		t.Fatalf("delete the openvpn inbound: %v", err)
+	}
+
+	inbounds := &InboundService{}
+	loaded, err := inbounds.GetAllInbounds()
+	if err != nil {
+		t.Fatalf("GetAllInbounds: %v", err)
+	}
+	for _, in := range loaded {
+		if in.Id != vless.Id {
+			continue
+		}
+		for i := range in.ClientStats {
+			if accountKey(in.ClientStats[i].Email) != accountKey(email) {
+				continue
+			}
+			if in.ClientStats[i].InboundDown != 5*mb {
+				t.Errorf("vless inboundDown = %d; want the whole remainder %d. A share held by an "+
+					"inbound that no longer exists is rendered nowhere, so it must not be "+
+					"subtracted from the figure that is", in.ClientStats[i].InboundDown, 5*mb)
+			}
+		}
+	}
+}

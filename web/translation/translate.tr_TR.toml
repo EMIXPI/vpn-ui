@@ -472,6 +472,7 @@
 "missingRequired" = "A field the selected inbounds need is empty."
 "subIdHint" = "One subscription for the whole account, covering every inbound it is on."
 "ssStrictPassword" = "The password is base64 of the key length a shadowsocks-2022 inbound requires. Every other protocol accepts it as an ordinary string."
+"ssOwnKey" = "Bir 2022-blake3 gelen bağlantısı, üyelik başına üretilen kendi anahtarını tutar ve yukarıdaki parolayı kullanmaz. Müşteriye doğrusunu vermek için yapılandırmasını veya QR kodunu açın."
 "title" = "Müşteriler"
 "add" = "Müşteri Ekle"
 "addTitle" = "Müşteri Ekle"
@@ -508,6 +509,7 @@
 "credential" = "Kimlik bilgisi"
 "sharedUsage" = "paylaşılan"
 "sharedUsageHint" = "Xray trafiği gelen bağlantı başına değil hesap başına sayar; bu nedenle bu değer hesabın kalan kullanımıdır ve ona hizmet eden tüm Xray gelen bağlantıları arasında paylaşılır."
+"onlineShared" = "Çevrimiçi, bu hesabın Xray gelen bağlantılarından birinde. Xray hangisi olduğunu bildirmez."
 
 [pages.inbounds.periodicTrafficReset]
 "never" = "Asla"
@@ -853,6 +855,11 @@
 "allowedIPs" = "İzin Verilen IP'ler"
 "endpoint" = "Uç Nokta"
 "psk" = "Ön Paylaşılan Anahtar"
+"clientNetwork" = "İstemci Ağı"
+"clientNetworkDesc" = "İstemci tünel adreslerinin dağıtıldığı havuz. İlk adresi bu gelen bağlantının kendisine aittir, bu yüzden bir /24 253 cihaza hizmet eder."
+"devicesPerClient" = "İstemci başına cihaz"
+"devicesPerClientDesc" = "Her hesabın kaç anahtar çifti aldığı. İki WireGuard cihazı tek bir çifti paylaşamaz."
+"noAccounting" = "Xray, WireGuard peer başına trafik bildirmez; bu nedenle bu gelen bağlantıdaki bir istemci kullanım biriktirmez: kotası hiç dolmaz ve hiçbir zaman çevrimiçi görünmez. Süre dolumu, etkinleştirme anahtarı ve silme çalışır."
 "domainStrategy" = "Alan Adı Stratejisi"
 
 [pages.xray.tun]

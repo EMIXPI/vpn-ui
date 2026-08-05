@@ -101,6 +101,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/delDepletedClients/:id", requirePerm(model.PermDeleteClient), owns, a.delDepletedClients)
 	g.POST("/import", requirePerm(model.PermCreateInbound), a.importInbound)
 	g.POST("/onlines", read, a.onlines)
+	g.POST("/onlineMemberships", read, a.onlineMemberships)
 	g.POST("/lastOnline", read, a.lastOnline)
 	g.POST("/updateClientTraffic/:email", requirePerm(model.PermEditClient), ownsClient, a.updateClientTraffic)
 	g.POST("/:id/delClientByEmail/:email", requirePerm(model.PermDeleteClient), owns, a.delInboundClientByEmail)
@@ -117,6 +118,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/check-ikev2-cert", requirePerm(model.PermCreateInbound), a.checkIkev2Cert)
 	// WireGuard (C): render a client's per-device .conf(s) (keys are server-minted).
 	g.GET("/:id/wgc-configs", read, owns, a.getWgcConfigs)
+	g.GET("/:id/wgxray-configs", read, owns, a.getWireguardXrayConfigs)
 	// AmneziaWG: render a client's per-device .conf(s) with obfuscation (server-minted keys).
 	g.GET("/:id/awg-configs", read, owns, a.getAwgConfigs)
 	g.GET("/:id/gre-configs", read, owns, a.getGreConfigs)
@@ -346,6 +348,17 @@ func (a *InboundController) sshChanged(clientOnly bool) {
 	// The paired socks inbound (its account list and this inbound's routing tag) is
 	// built from the SSH settings, so Xray must pick the change up.
 	a.xrayService.SetToNeedRestart()
+}
+
+// onWireguardXrayClientChanged mints the key material and tunnel address every client
+// of an Xray-native `wireguard` inbound needs, and persists it.
+//
+// No daemon and no kernel interface, unlike wg-c: the device is inside Xray, so the
+// only thing to do here is make sure the peer list the config is generated FROM
+// exists. The restart itself is the caller's (reconcileForInbounds), which already
+// asks for one for every Xray-native protocol.
+func (a *InboundController) onWireguardXrayClientChanged() {
+	service.ReconcileAllWireguardXrayKeys()
 }
 
 // onWgcChanged reconciles WireGuard (C) keys + the kernel interface peer set when a
@@ -678,6 +691,11 @@ func (a *InboundController) addInbound(c *gin.Context) {
 		a.onMtprotoChanged()
 	} else if inbound.Protocol == model.SSH {
 		a.onSshChanged()
+	} else if inbound.Protocol == model.WireGuard {
+		// Xray-native, so it still wants the restart below, but its peers are built
+		// from key material that has to exist first.
+		a.onWireguardXrayClientChanged()
+		a.xrayService.SetToNeedRestart()
 	} else if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
@@ -758,6 +776,11 @@ func (a *InboundController) delInbound(c *gin.Context) {
 		a.onMtprotoChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.SSH {
 		a.onSshChanged()
+	} else if oldInbound != nil && oldInbound.Protocol == model.WireGuard {
+		// Xray-native, so it still wants the restart below, but its peers are built
+		// from key material that has to exist first.
+		a.onWireguardXrayClientChanged()
+		a.xrayService.SetToNeedRestart()
 	} else if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
@@ -853,6 +876,11 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 		a.onMtprotoChanged()
 	} else if inbound.Protocol == model.SSH {
 		a.onSshChanged()
+	} else if inbound.Protocol == model.WireGuard {
+		// Xray-native, so it still wants the restart below, but its peers are built
+		// from key material that has to exist first.
+		a.onWireguardXrayClientChanged()
+		a.xrayService.SetToNeedRestart()
 	} else if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
@@ -1140,6 +1168,11 @@ func (a *InboundController) delInboundClient(c *gin.Context) {
 		a.onMtprotoChanged()
 	} else if oldInbound != nil && oldInbound.Protocol == model.SSH {
 		a.onSshChanged()
+	} else if oldInbound != nil && oldInbound.Protocol == model.WireGuard {
+		// Xray-native, so it still wants the restart below, but its peers are built
+		// from key material that has to exist first.
+		a.onWireguardXrayClientChanged()
+		a.xrayService.SetToNeedRestart()
 	} else if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
@@ -1718,6 +1751,67 @@ func (a *InboundController) onlines(c *gin.Context) {
 	jsonObj(c, a.scopeEmails(c, a.inboundService.GetOnlineClients()), nil)
 }
 
+// onlineMemberships reports the same liveness per (inbound, account) pair, for the
+// Clients page's expander. "<inboundId>:<email>", inbound 0 meaning the session's
+// source inbound could not be named.
+//
+// Scoped on BOTH halves, and it has to be. The email scope is the same one onlines
+// applies and for the same reason (this is per-admin data on a panel-wide table);
+// the inbound scope is on top of it, because a shared inbound carries other admins'
+// customers and an account visible to this caller may also be a member of an inbound
+// that is not. Answering for that pair would tell them an inbound exists, its id,
+// and that someone is on it right now.
+func (a *InboundController) onlineMemberships(c *gin.Context) {
+	pairs := a.inboundService.GetOnlineMemberships()
+	if len(pairs) == 0 {
+		jsonObj(c, []string{}, nil)
+		return
+	}
+
+	byEmail := make(map[string][]string, len(pairs))
+	emails := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		sep := strings.IndexByte(pair, ':')
+		if sep < 0 {
+			continue
+		}
+		email := pair[sep+1:]
+		if _, seen := byEmail[email]; !seen {
+			emails = append(emails, email)
+		}
+		byEmail[email] = append(byEmail[email], pair)
+	}
+
+	allowed := func(int) bool { return true }
+	if user := session.GetLoginUser(c); user != nil && !user.IsSuperAdmin {
+		ids, err := accessService.AccessibleInboundIds(user.Id)
+		if err != nil {
+			jsonObj(c, []string{}, nil)
+			return
+		}
+		granted := make(map[int]bool, len(ids))
+		for _, id := range ids {
+			granted[id] = true
+		}
+		// Inbound 0 is "source unknown", not an inbound anyone holds a grant on. It
+		// stays visible for an account the caller may see, because that is the only
+		// evidence there is that an Xray-native membership is live at all.
+		allowed = func(id int) bool { return id == 0 || granted[id] }
+	}
+
+	out := make([]string, 0, len(pairs))
+	for _, email := range a.scopeEmails(c, emails) {
+		for _, pair := range byEmail[email] {
+			id, err := strconv.Atoi(pair[:strings.IndexByte(pair, ':')])
+			if err != nil || !allowed(id) {
+				continue
+			}
+			out = append(out, pair)
+		}
+	}
+	jsonObj(c, out, nil)
+}
+
 // lastOnline retrieves the last online timestamps for clients.
 func (a *InboundController) lastOnline(c *gin.Context) {
 	data, err := a.inboundService.GetClientsLastOnline()
@@ -2069,6 +2163,37 @@ func (a *InboundController) getWgcConfigs(c *gin.Context) {
 		return
 	}
 	configs, err := a.wgcService.RenderClientConfigs(inbound, c.Query("email"), browserHost(c))
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, configs, nil)
+}
+
+// getWireguardXrayConfigs renders the client configuration(s) for one account
+// (?email=) of an Xray-native `wireguard` inbound: one .conf per device slot, with
+// server-minted keys and the panel-access host as the endpoint.
+//
+// Same shape and the same ownership reasoning as getWgcConfigs: the account arrives
+// as a query param no middleware inspects, and the payload is its private keys, so
+// `owns` on :id is not enough on its own.
+func (a *InboundController) getWireguardXrayConfigs(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "Invalid inbound ID", err)
+		return
+	}
+	if !a.callerMayTouchClient(c, c.Query("email")) {
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.notFound"), errNotOwned)
+		return
+	}
+	service.ReconcileAllWireguardXrayKeys()
+	inbound, err := a.inboundService.GetInbound(id)
+	if err != nil {
+		jsonMsg(c, "Inbound not found", err)
+		return
+	}
+	configs, err := service.RenderWireguardXrayConfigs(inbound, c.Query("email"), browserHost(c))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
@@ -2433,6 +2558,12 @@ func (a *InboundController) reconcileForInbounds(inboundIds []int, needRestart b
 			a.onMtprotoClientChanged()
 		case model.SSH:
 			a.onSshClientChanged()
+		case model.WireGuard:
+			// Xray-native, so it needs the core restarted like every other default
+			// case below, but its peers do not exist until the keys and tunnel
+			// addresses are minted, and the generated config is built from them.
+			a.onWireguardXrayClientChanged()
+			xrayOnly = true
 		default:
 			xrayOnly = true
 		}

@@ -143,13 +143,19 @@ func resetMembershipUsage(tx *gorm.DB, emails []string) {
 // covering both and there is nothing to split it by.
 func countedByPanel(p model.Protocol) bool { return isVpnProtocol(p) || isRelayProtocol(p) }
 
-// membershipUsageRow is one membership's share, joined to the identity it belongs to.
+// membershipUsageRow is one membership's share, joined to the identity it belongs to
+// and to the inbound holding it.
 type membershipUsageRow struct {
 	InboundId int
 	Email     string
-	Up        int64
-	Down      int64
-	AllTime   int64
+	// Protocol is the inbound's, carried so the pooled remainder below can tell an
+	// attributable share from one that no inbound will ever render. The join that
+	// supplies it also drops any share whose inbound has been DELETED, for the same
+	// reason: subtracting it would hide those bytes on every page.
+	Protocol model.Protocol
+	Up       int64
+	Down     int64
+	AllTime  int64
 }
 
 // accountUsageSplit is one account's usage, already divided.
@@ -202,12 +208,19 @@ func (s *InboundService) attachClientStats(db *gorm.DB, inbounds []*model.Inboun
 		byEmail[accountKey(traffics[i].Email)] = &traffics[i]
 	}
 
+	// The inbound is joined as well as the account, so each share arrives knowing
+	// which protocol holds it. An INNER join on both sides is the point: a share
+	// whose inbound is gone is not a membership any more, and counting it would go
+	// on subtracting those bytes from the remainder below with no row left to render
+	// them under.
 	var shares []membershipUsageRow
 	if err := db.Table("account_inbounds").
 		Select("account_inbounds.inbound_id AS inbound_id, accounts.email AS email, " +
+			"inbounds.protocol AS protocol, " +
 			"COALESCE(account_inbounds.up, 0) AS up, COALESCE(account_inbounds.down, 0) AS down, " +
 			"COALESCE(account_inbounds.all_time, 0) AS all_time").
 		Joins("JOIN accounts ON accounts.id = account_inbounds.account_id").
+		Joins("JOIN inbounds ON inbounds.id = account_inbounds.inbound_id").
 		Scan(&shares).Error; err != nil {
 		return err
 	}
@@ -232,6 +245,22 @@ func (s *InboundService) attachClientStats(db *gorm.DB, inbounds []*model.Inboun
 	// the two sides are written by different statements in the same tick and a reset
 	// clears them independently, so a momentary negative is possible and reads far
 	// worse than a zero.
+	//
+	// ONLY attributable shares are subtracted, and that is the whole of a bug that
+	// made every figure on the Clients page read zero. An Xray-native inbound is
+	// never rendered from its own share (the core's stat carries no inbound, so it
+	// has none to speak of) but from this remainder, so a share parked on one is
+	// subtracted here and then displayed nowhere at all. MigrationMembershipUsage
+	// parked exactly that: on the upgrade that introduced the breakdown it filed
+	// each account's whole history under client_traffics.inbound_id, the account's
+	// HOME inbound, which on the overwhelming majority of panels is a vless or vmess
+	// one. The remainder came out as total-minus-total, so the account's Xray
+	// inbounds showed 0 and its VPN inbounds showed their own (zero) share: every
+	// protocol reporting nothing used while the account row above said gigabytes.
+	//
+	// Filtering here rather than only fixing the seeder repairs those panels on the
+	// next page load, and makes the class of bug unreachable: a share on an inbound
+	// that cannot render it can no longer eat the figure of one that can.
 	for key, split := range splits {
 		total := byEmail[key]
 		if total == nil {
@@ -239,6 +268,9 @@ func (s *InboundService) attachClientStats(db *gorm.DB, inbounds []*model.Inboun
 		}
 		var up, down, allTime int64
 		for _, share := range split.byInbound {
+			if !countedByPanel(share.Protocol) {
+				continue
+			}
 			up += share.Up
 			down += share.Down
 			allTime += share.AllTime
@@ -357,6 +389,14 @@ func max64(a, b int64) int64 {
 // membershipUsageMigratedKey is the setting that records the backfill has run.
 const membershipUsageMigratedKey = "membershipUsageBackfilledAt"
 
+// membershipUsageRepairedKey guards the one-shot repair of the shares the FIRST
+// backfill parked on inbounds that cannot render them. It is a second key rather
+// than a bump of the one above because the two do opposite things and a panel can
+// need either, both, or neither: a fresh install seeds and has nothing to repair, a
+// panel upgraded from the release that shipped the bug has already seeded and needs
+// only the repair.
+const membershipUsageRepairedKey = "membershipUsageRepairedAt"
+
 // MigrationMembershipUsage seeds the per-inbound breakdown from the usage that
 // exists today.
 //
@@ -378,6 +418,8 @@ func (s *AccountService) MigrationMembershipUsage() {
 	if db == nil {
 		return
 	}
+
+	s.repairMembershipUsage(db)
 
 	var settingService SettingService
 	// getSetting rather than getString: getString demands the key be in
@@ -413,16 +455,31 @@ func (s *AccountService) MigrationMembershipUsage() {
 			idByEmail[accountKey(account.Email)] = account.Id
 		}
 
-		// Which inbounds still exist. An account whose home inbound was deleted is
-		// common (nothing prunes client_traffics.inbound_id when its inbound goes),
-		// and seeding a membership that is not there would drop the history.
-		var liveIds []int
-		if err := tx.Model(&model.Inbound{}).Pluck("id", &liveIds).Error; err != nil {
+		// Which inbounds can hold a share: still there, and able to render one.
+		//
+		// Existence, because an account whose home inbound was deleted is common
+		// (nothing prunes client_traffics.inbound_id when its inbound goes) and
+		// seeding a membership that is not there would drop the history.
+		//
+		// And attributable, because an Xray-native inbound does not display its own
+		// share at all: it displays the account's unattributed REMAINDER, which is the
+		// total minus every share. Seeding one therefore subtracts the history from
+		// the only figure that would have shown it, and the account reads zero used on
+		// every inbound it is on. See the remainder loop in attachClientStats.
+		var liveRows []struct {
+			Id       int
+			Protocol model.Protocol
+		}
+		if err := tx.Model(&model.Inbound{}).Select("id", "protocol").Scan(&liveRows).Error; err != nil {
 			return err
 		}
-		live := make(map[int]bool, len(liveIds))
-		for _, id := range liveIds {
-			live[id] = true
+		live := make(map[int]bool, len(liveRows))
+		attributable := make(map[int]bool, len(liveRows))
+		for _, row := range liveRows {
+			live[row.Id] = true
+			if countedByPanel(row.Protocol) {
+				attributable[row.Id] = true
+			}
 		}
 
 		var traffics []xray.ClientTraffic
@@ -444,19 +501,34 @@ func (s *AccountService) MigrationMembershipUsage() {
 			}
 			sort.Ints(inboundIds)
 
-			// The home inbound if it is really a membership and really still exists,
-			// otherwise the lowest live one. Ascending order makes that deterministic
-			// rather than "whichever the database returned first".
+			// The home inbound when it is really a membership and really still there.
+			// If it is one that cannot hold a share, the history stays UNATTRIBUTED:
+			// the remainder is exactly where a byte with no known source belongs, and
+			// moving it to some other inbound of the account's would be inventing an
+			// attribution the panel was never told.
+			//
+			// The fallback to the lowest live membership is only for a home inbound
+			// that is not there at all, where nothing is known either way and one
+			// deterministic guess beats losing the history. Ascending order makes it
+			// deterministic rather than "whichever the database returned first", and it
+			// still has to be one that can render what it is given.
 			target := 0
+			homeIsMembership := false
 			for _, id := range inboundIds {
 				if id == traffic.InboundId && live[id] {
-					target = id
+					homeIsMembership = true
+					if attributable[id] {
+						target = id
+					}
 					break
 				}
 			}
+			if target == 0 && homeIsMembership {
+				continue
+			}
 			if target == 0 {
 				for _, id := range inboundIds {
-					if live[id] {
+					if attributable[id] {
 						target = id
 						break
 					}
@@ -493,5 +565,67 @@ func (s *AccountService) MigrationMembershipUsage() {
 	}
 	if seeded > 0 {
 		logger.Infof("MigrationMembershipUsage - seeded the per-inbound breakdown for %d account(s); their existing usage is filed under the inbound they were created on", seeded)
+	}
+}
+
+// repairMembershipUsage clears the shares the first backfill filed against inbounds
+// that never display one.
+//
+// The release that introduced the breakdown seeded every account's whole history
+// under client_traffics.inbound_id without asking what protocol that inbound speaks.
+// An Xray-native inbound renders the account's unattributed REMAINDER, not its own
+// share, so a share sitting on one is subtracted from the remainder and shown by
+// nothing: the Clients page reported 0 used against every single inbound of an
+// account that had moved gigabytes. attachClientStats now ignores such a share when
+// it computes the remainder, which fixes the display on its own; this puts the table
+// back in agreement with it so the two cannot be read against each other and
+// disagree.
+//
+// Nothing is lost by zeroing them. client_traffics is untouched and remains the
+// authoritative total, and these bytes go straight back into the remainder, which is
+// where a byte Xray could not place belongs.
+//
+// Deliberately NOT restricted to rows the backfill wrote: the live path cannot
+// produce one (an Xray record carries no inbound id, and addTo drops the ones that
+// name none), so every such row is either the backfill's or corruption, and both
+// want clearing.
+func (s *AccountService) repairMembershipUsage(db *gorm.DB) {
+	var settingService SettingService
+	if setting, err := settingService.getSetting(membershipUsageRepairedKey); err == nil && setting != nil && setting.Value != "" {
+		return
+	}
+
+	var stray []int
+	var inbounds []model.Inbound
+	if err := db.Model(&model.Inbound{}).Select("id", "protocol").Find(&inbounds).Error; err != nil {
+		logger.Warning("MigrationMembershipUsage - cannot list inbounds to repair the breakdown, will retry on the next start: ", err)
+		return
+	}
+	for i := range inbounds {
+		if !countedByPanel(inbounds[i].Protocol) {
+			stray = append(stray, inbounds[i].Id)
+		}
+	}
+
+	cleared := int64(0)
+	if len(stray) > 0 {
+		res := db.Exec(`
+			UPDATE account_inbounds SET up = 0, down = 0, all_time = 0
+			WHERE inbound_id IN (?)
+			  AND (COALESCE(up, 0) <> 0 OR COALESCE(down, 0) <> 0 OR COALESCE(all_time, 0) <> 0)`,
+			stray)
+		if res.Error != nil {
+			logger.Warning("MigrationMembershipUsage - cannot clear the misfiled breakdown, will retry on the next start: ", res.Error)
+			return
+		}
+		cleared = res.RowsAffected
+	}
+
+	if err := settingService.setString(membershipUsageRepairedKey, time.Now().Format(time.RFC3339)); err != nil {
+		logger.Warning("MigrationMembershipUsage - could not set the repaired flag: ", err)
+		return
+	}
+	if cleared > 0 {
+		logger.Infof("MigrationMembershipUsage - moved %d misfiled per-inbound total(s) back into the account's unattributed usage; those inbounds are counted by Xray, which does not say which inbound a byte came through", cleared)
 	}
 }

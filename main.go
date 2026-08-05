@@ -235,6 +235,13 @@ func runWebServer() {
 	// a setting so a later revoke stays revoked (see MigrationOverviewAccess).
 	adminMigrations := &service.AdminService{}
 	adminMigrations.MigrationOverviewAccess()
+	// Give every Xray-native wireguard inbound its device keypair, its clients array
+	// and one tunnel address per client device. Idempotent and cheap (it touches
+	// nothing that is already right), so it runs on every start rather than behind a
+	// flag: an inbound created before this release has no clients array at all, and
+	// until it has one the Clients page cannot offer it as somewhere to put an
+	// account. See web/service/wgxray.go.
+	service.ReconcileAllWireguardXrayKeys()
 
 	// Extract the pinned Xray core + base geo files baked into the panel. The
 	// core is overwritten on every start so the bundled (patched) fork is always

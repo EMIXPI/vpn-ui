@@ -1261,6 +1261,9 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	if err := validateClientIdentities(inbound.Protocol, clients); err != nil {
 		return inbound, false, err
 	}
+	if err := ValidateShadowsocksKeys(inbound, clients, nil); err != nil {
+		return inbound, false, err
+	}
 
 	// Nothing to exclude: this inbound has no row yet, so the whole DB is "other".
 	existEmail, err := s.checkEmailsExistExcludingInbound(clients, 0)
@@ -1539,7 +1542,12 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		if err := validateChangedClientIdentities(inbound.Protocol, updatedClients, storedClients); err != nil {
 			return inbound, false, err
 		}
+		if err := ValidateShadowsocksKeys(inbound, updatedClients, storedClients); err != nil {
+			return inbound, false, err
+		}
 	} else if err := validateClientIdentities(inbound.Protocol, updatedClients); err != nil {
+		return inbound, false, err
+	} else if err := ValidateShadowsocksKeys(inbound, updatedClients, nil); err != nil {
 		return inbound, false, err
 	}
 
@@ -1847,6 +1855,9 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	// would be skipped for exactly the protocols that need them.
 	if target, terr := s.GetInbound(data.Id); terr == nil && target != nil {
 		if err := validateClientIdentities(target.Protocol, clients); err != nil {
+			return false, err
+		}
+		if err := ValidateShadowsocksKeys(target, clients, nil); err != nil {
 			return false, err
 		}
 	}
@@ -2531,6 +2542,9 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	if err := validateChangedClientIdentities(oldInbound.Protocol, clients, oldClients); err != nil {
 		return false, err
 	}
+	if err := ValidateShadowsocksKeys(oldInbound, clients, oldClients); err != nil {
+		return false, err
+	}
 
 	oldEmail := ""
 	newClientId := clientIdentity(oldInbound.Protocol, clients[0])
@@ -3152,6 +3166,9 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 		// Empty onlineUsers
 		if p != nil {
 			p.SetOnlineClients(make([]string, 0))
+			// Cleared with it, or the last tick that DID see traffic keeps every
+			// membership it lit showing live for as long as the panel stays up.
+			p.SetOnlineMemberships(make([]string, 0))
 		}
 		return nil
 	}
@@ -3246,6 +3263,25 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	// total only. See web/service/membershipusage.go.
 	membershipDeltas := map[membershipUsageKey]*membershipUsageDelta{}
 
+	// WHICH inbound each online account was seen on, in the same tick and from the
+	// same records the breakdown above is built from.
+	//
+	// onlineClients answers "is this account connected", which is an account-wide
+	// question with an account-wide answer, and the Clients page repeated that one
+	// answer against every membership: an account on ssh and l2tp connecting over ssh
+	// alone lit up BOTH, and there was no way to tell from the page which of them the
+	// customer was actually using.
+	//
+	// The evidence is already here. A record that names its source inbound places the
+	// session exactly; one that does not (everything Xray counts, whose stat is
+	// "user>>><email>>>>traffic" with no inbound in it) is filed under inbound 0,
+	// which the page renders as "on one of this account's Xray inbounds, and the core
+	// cannot say which". That is the same distinction the usage figures already draw,
+	// deliberately: one guess would otherwise be marking a customer live on an
+	// inbound they have never once connected to.
+	onlineMembershipSet := map[string]bool{}
+	onlineMemberships := make([]string, 0, len(traffics))
+
 	// Every record matching an email is applied, not just the first. A tick can legitimately
 	// carry more than one record for an account (a client billed under two protocols, or a
 	// relay reporting alongside Xray), and stopping at the first silently threw the rest
@@ -3296,6 +3332,19 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 					traffics[traffic_index].InboundId,
 					dbClientTraffics[dbTraffic_index].Email,
 					billedUp, billedDown, rawUp+rawDown)
+				// Bytes on the wire are the whole of the liveness signal here, exactly
+				// as they are for the account-wide flag below. Measured bytes, not
+				// billed: a multiplier of zero is a pricing decision and must not make
+				// a connected customer look offline.
+				if rawUp+rawDown > 0 {
+					key := onlineMembershipKey(
+						traffics[traffic_index].InboundId,
+						dbClientTraffics[dbTraffic_index].Email)
+					if !onlineMembershipSet[key] {
+						onlineMembershipSet[key] = true
+						onlineMemberships = append(onlineMemberships, key)
+					}
+				}
 				moved += rawUp + rawDown
 			}
 		}
@@ -3312,6 +3361,7 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	// and an unguarded call there takes the whole traffic job down.
 	if p != nil {
 		p.SetOnlineClients(onlineClients)
+		p.SetOnlineMemberships(onlineMemberships)
 	}
 
 	err = tx.Save(dbClientTraffics).Error
@@ -5388,6 +5438,27 @@ func (s *InboundService) GetOnlineClients() []string {
 		return []string{}
 	}
 	return p.GetOnlineClients()
+}
+
+// onlineMembershipKey is the wire form of one (inbound, account) liveness pair.
+// Inbound 0 is not a missing value to be cleaned up but a meaning: "connected, and
+// the collector could not name which of this account's inbounds it came through".
+func onlineMembershipKey(inboundId int, email string) string {
+	return strconv.Itoa(inboundId) + ":" + accountKey(email)
+}
+
+// GetOnlineMemberships returns the (inbound, account) pairs the last traffic tick
+// saw bytes for, as "<inboundId>:<email>" with the email normalised.
+//
+// Separate from GetOnlineClients rather than replacing it: the account-wide list is
+// what the dashboard counts, what the Telegram bot reports and what the row-level
+// lamp on the Clients page lights, and all three want "is this customer connected"
+// rather than "where". Only the per-membership view needs this.
+func (s *InboundService) GetOnlineMemberships() []string {
+	if p == nil {
+		return []string{}
+	}
+	return p.GetOnlineMemberships()
 }
 
 func (s *InboundService) GetClientsLastOnline() (map[string]int64, error) {

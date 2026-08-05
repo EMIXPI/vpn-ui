@@ -928,8 +928,14 @@ func TestAddInboundKeepsWireguardDeviceKeys(t *testing.T) {
 func TestAddInboundKeepsShadowsocksPerClientMethod(t *testing.T) {
 	s := newInboundDB(t)
 
+	// The per-account key is a REAL 32-byte PSK, which its chacha20-poly1305 cipher
+	// demands. "client-psk" was accepted when this was written and is now refused by
+	// ValidateShadowsocksKeys, correctly: that account could never have connected.
+	// The subject here is the per-account METHOD surviving the add path, so the
+	// fixture is corrected rather than the check relaxed.
+	const clientPsk = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 	posted := `{"method":"2022-blake3-aes-256-gcm","password":"inbound-psk","network":"tcp,udp","ivCheck":false,` +
-		`"clients":[{"method":"2022-blake3-chacha20-poly1305","password":"client-psk","email":"erin@example.com","enable":false}]}`
+		`"clients":[{"method":"2022-blake3-chacha20-poly1305","password":"` + clientPsk + `","email":"erin@example.com","enable":false}]}`
 	added, _, err := s.AddInbound(&model.Inbound{
 		UserId: 1, Tag: "inbound-11301", Port: 11301, Protocol: model.Shadowsocks,
 		Enable: true, Settings: posted,

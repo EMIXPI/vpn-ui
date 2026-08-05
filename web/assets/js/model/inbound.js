@@ -2206,6 +2206,7 @@ class Inbound extends XrayCommonClass {
             case Protocols.GRE: return this.settings.greUsers;
             case Protocols.MTPROTO: return this.settings.mtprotoUsers;
             case Protocols.SSH: return this.settings.sshUsers;
+            case Protocols.WIREGUARD: return this.settings.wgClients;
             default: return null;
         }
     }
@@ -6701,13 +6702,21 @@ Inbound.HttpSettings.HttpAccount = class extends XrayCommonClass {
     }
 };
 
+// The Xray-native wireguard inbound. Its core config is a DEVICE with a peer list,
+// not a user list, so the panel keeps its accounts in `clients` alongside and the
+// server translates them into `peers` on the way to Xray (web/service/wgxray.go).
+// `peers` stays for anything an operator pinned by hand; the managed accounts are
+// appended to it and never replace it.
 Inbound.WireguardSettings = class extends XrayCommonClass {
     constructor(
         protocol,
         mtu = 1420,
         secretKey = Wireguard.generateKeypair().privateKey,
-        peers = [new Inbound.WireguardSettings.Peer()],
-        noKernelTun = false
+        peers = [],
+        noKernelTun = false,
+        wgClients = [],
+        clientNetwork = '10.10.0.0/24',
+        userLimit = 1,
     ) {
         super(protocol);
         this.mtu = mtu;
@@ -6715,6 +6724,18 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
         this.pubKey = secretKey.length > 0 ? Wireguard.generateKeypair(secretKey).publicKey : '';
         this.peers = peers;
         this.noKernelTun = noKernelTun;
+        // MUST round-trip, exactly like WgcSettings.wgcUsers: the backend stores the
+        // accounts and their server-minted key material here, and every inbound save
+        // posts the whole settings blob back. A model that forgets the field deletes
+        // every account on the inbound.
+        this.wgClients = wgClients;
+        // The pool peer addresses are handed out from. One /32 per device slot, and
+        // the first host of it is the inbound's own address.
+        this.clientNetwork = clientNetwork;
+        // How many keypairs one account gets, since two WireGuard devices cannot
+        // share one. Provisioning only: this protocol reports nothing per peer, so
+        // there is no way to notice a third device and nothing to enforce with.
+        this.userLimit = userLimit;
     }
 
     addPeer() {
@@ -6730,8 +6751,16 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
             Protocols.WIREGUARD,
             json.mtu,
             json.secretKey,
-            json.peers.map(peer => Inbound.WireguardSettings.Peer.fromJson(peer)),
+            // Guarded rather than json.peers.map: an inbound whose peers are all
+            // managed accounts legitimately has no `peers` key at all, and the bare
+            // .map threw, which in a Vue render blanks the whole page.
+            Array.isArray(json.peers)
+                ? json.peers.map(peer => Inbound.WireguardSettings.Peer.fromJson(peer))
+                : [],
             json.noKernelTun,
+            Inbound.WireguardSettings.WgClient.fromJson(json.clients),
+            json.clientNetwork ?? '10.10.0.0/24',
+            json.userLimit ?? 1,
         );
     }
 
@@ -6739,8 +6768,114 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
         return {
             mtu: this.mtu ?? undefined,
             secretKey: this.secretKey,
+            pubKey: this.pubKey,
             peers: Inbound.WireguardSettings.Peer.toJsonArray(this.peers),
             noKernelTun: this.noKernelTun,
+            clients: Inbound.WireguardSettings.WgClient.toJsonArray(this.wgClients),
+            clientNetwork: this.clientNetwork,
+            userLimit: this.userLimit,
+        };
+    }
+};
+
+// One account on an Xray wireguard inbound. Identity is the email: a peer is
+// authorised by its public key, so there is no username and no password to key on,
+// which is the same model wg-c, awg, gre and mtproto already use.
+//
+// `devices` and `addresses` are index-aligned and BOTH minted server-side. They must
+// round-trip for the reason spelled out on WgcSettings.WgUser.devices: an inbound
+// save posts every account back, and a model that drops the field revokes key
+// material the customer has already installed.
+Inbound.WireguardSettings.WgClient = class extends XrayCommonClass {
+    constructor(
+        email = RandomUtil.randomLowerAndNum(9),
+        enable = true,
+        devices = [],
+        addresses = [],
+        privKey = '',
+        pubKey = '',
+        psk = '',
+        expiryTime = 0,
+        tgId = '',
+        subId = RandomUtil.randomLowerAndNum(16),
+        comment = '',
+        totalGB = 0,
+        limitIp = 0,
+        reset = 0,
+        created_at = undefined,
+        updated_at = undefined,
+    ) {
+        super();
+        this.email = email;
+        this.enable = enable;
+        this.devices = Array.isArray(devices) ? devices : [];
+        this.addresses = Array.isArray(addresses) ? addresses : [];
+        this.privKey = privKey;
+        this.pubKey = pubKey;
+        this.psk = psk;
+        this.expiryTime = expiryTime;
+        this.tgId = tgId;
+        this.subId = subId;
+        this.comment = comment;
+        this.totalGB = totalGB;
+        this.limitIp = limitIp;
+        this.reset = reset;
+        this.created_at = created_at;
+        this.updated_at = updated_at;
+    }
+
+    // See WgcSettings.WgUser.id: toJson writes id=email but fromJson cannot restore
+    // it through the constructor, so without this every id-keyed path (edit, row key,
+    // /updateClient/:clientId) sees undefined.
+    get id() {
+        return this.email;
+    }
+
+    static fromJson(json = []) {
+        if (!Array.isArray(json)) return [];
+        return json.map(j => new Inbound.WireguardSettings.WgClient(
+            j.email,
+            j.enable ?? true,
+            Array.isArray(j.devices) ? j.devices : [],
+            Array.isArray(j.addresses) ? j.addresses : [],
+            j.privKey ?? '',
+            j.pubKey ?? '',
+            j.psk ?? '',
+            j.expiryTime ?? 0,
+            j.tgId ?? '',
+            j.subId ?? '',
+            j.comment ?? '',
+            j.totalGB ?? 0,
+            j.limitIp ?? j.ipLimit ?? 0,
+            j.reset ?? 0,
+            j.created_at,
+            j.updated_at,
+        ));
+    }
+
+    static toJsonArray(clients) {
+        return (clients || []).map(c => c.toJson());
+    }
+
+    toJson() {
+        return {
+            id: this.email, // identity = email, keeping the shared id-based client logic working
+            email: this.email,
+            enable: this.enable,
+            devices: this.devices,
+            addresses: this.addresses,
+            privKey: this.privKey,
+            pubKey: this.pubKey,
+            psk: this.psk,
+            expiryTime: this.expiryTime,
+            tgId: this.tgId,
+            subId: this.subId,
+            comment: this.comment,
+            totalGB: this.totalGB,
+            limitIp: this.limitIp,
+            reset: this.reset,
+            created_at: this.created_at,
+            updated_at: this.updated_at,
         };
     }
 };

@@ -294,6 +294,14 @@
         <a-alert v-if="clientMembershipModal.strictSsBytes" type="info" show-icon
           :style="{ marginTop: '4px' }"
           message='{{ i18n "pages.clients.ssStrictPassword" }}'></a-alert>
+        <!-- Said outright, because the green chip on the Password row lists
+             shadowsocks among the protocols that use it and for this cipher family
+             that is not true: the membership holds a key minted for itself alone.
+             Without this an operator reads the box as the customer's shadowsocks
+             password, hands it over, and it does not work. -->
+        <a-alert v-if="clientMembershipModal.strictSsBytes" type="warning" show-icon
+          :style="{ marginTop: '8px' }"
+          message='{{ i18n "pages.clients.ssOwnKey" }}'></a-alert>
         <a-alert v-if="clientMembershipModal.isEdit" type="warning" show-icon
           :style="{ marginTop: '8px' }"
           message='{{ i18n "pages.clients.credentialWarn" }}'></a-alert>
@@ -378,6 +386,38 @@
       this.selected = e.target.checked ? this.assignable.map(i => i.inboundId) : [];
     },
 
+    // Every key this form ever binds, present from the moment `client` is assigned.
+    //
+    // This is not tidiness, it is the only way the Credentials tab works at all.
+    // Vue 2 walks an object ONCE, when it is assigned, and makes exactly the keys it
+    // finds reactive; a key added afterwards is an ordinary property that no render
+    // depends on. `client` used to be assigned with the nine identity keys and have
+    // its six credential keys bolted on a moment later by loadCredentialsFrom /
+    // seedCredentials, so every box on that tab was bound to a dead property:
+    //
+    //   - the regenerate button wrote a fresh value into the model and nothing
+    //     re-rendered, so the box kept showing the old one and the button read as
+    //     doing nothing at all;
+    //   - typing was worse. a-input is controlled here (v-model gives it a :value),
+    //     so on every keystroke it defers to the parent's value instead of its own
+    //     draft, and the parent's value is stale for exactly as long as the key is
+    //     non-reactive.
+    //
+    // v-model's own writes could not save it either: `client[f.key]` compiles to
+    // $set, and $set on a key the object ALREADY HAS is a plain assignment, so the
+    // key those two seeded stayed dead however hard it was typed into.
+    //
+    // Anything the form binds belongs here, including `security` (lifted off a vmess
+    // entry) and the ad tag pair, which had to be hand-seeded for this same reason.
+    blankClient() {
+      return {
+        email: '', enable: true, limitIp: 0, comment: '', subId: '', reset: 0,
+        tgId: 0, adtagEnable: false, adtag: '',
+        id: '', password: '', vpnUsername: '', auth: '', secret: '',
+        naiveUsername: '', security: '',
+      };
+    },
+
     show({ row = null, storedBy = {}, assignable = [], onDone = null }) {
       this.assignable = assignable;
       this.onDone = onDone;
@@ -391,15 +431,11 @@
       this.daysTouched = false;
       this.storedExpiry = row ? (Number(row.expiryTime) || 0) : 0;
       if (row) {
-        // adtagEnable/adtag are seeded here rather than left to loadCredentialsFrom
-        // because Vue 2 only makes the keys an object HAS at assignment reactive: a
-        // key added afterwards renders once and never updates, so the switch would
-        // not move when clicked.
-        this.client = {
+        this.client = Object.assign(this.blankClient(), {
           email: row.email, enable: row.enable, limitIp: row.limitIp,
           comment: row.comment, subId: row.subId, reset: row.reset,
-          tgId: row.tgId || 0, adtagEnable: false, adtag: '',
-        };
+          tgId: row.tgId || 0,
+        });
         this.delayedStart = row.expiryTime < 0;
         // The account's credentials as they are stored TODAY, read off its
         // memberships: whichever entry carries a field, carries the account's
@@ -415,9 +451,9 @@
           : (row.expiryTime < 0 ? Math.round(Math.abs(row.expiryTime) / 86400000) : 0);
         this.selected = (row.memberships || []).map(m => m.inboundId);
       } else {
-        this.client = { email: this.mint('email'), enable: true, limitIp: 0,
-                        comment: '', subId: '', reset: 0, tgId: 0,
-                        adtagEnable: false, adtag: '' };
+        this.client = Object.assign(this.blankClient(), {
+          email: this.mint('email'), enable: true,
+        });
         this.totalGb = 0;
         this.days = 0;
         this.delayedStart = false;
@@ -621,6 +657,22 @@
       return 0;
     },
 
+    // Whether a password is a legal user PSK for a 2022-blake3 cipher: base64 of
+    // exactly the key length. Mirrors validShadowsocksKey (web/service/account.go),
+    // which now REFUSES a write that fails it, so the form has to answer the same
+    // question before it posts one.
+    validSsKey(password, bytes) {
+      if (!bytes) return true;
+      const s = String(password || '');
+      // Base64 of n bytes is exactly ceil(n/3)*4 characters, so a length check
+      // catches the ordinary case before decoding, and atob throws on anything that
+      // is not base64 at all.
+      try {
+        return atob(s).length === bytes;
+      } catch (e) {
+        return false;
+      }
+    },
     mint(key) {
       switch (key) {
         case 'id': return RandomUtil.randomUUID();
@@ -634,7 +686,12 @@
         case 'vpnUsername': return RandomUtil.randomLowerAndNum(8);
         case 'auth': return RandomUtil.randomSeq(10);
         case 'secret': return RandomUtil.randomSeq(32, { type: 'hex' });
-        case 'naiveUsername': return '';
+        // A real generator, because the row carries a Regenerate button and a
+        // generator that returns "" makes that button CLEAR the box instead. Blank
+        // is still its correct resting state (naive falls back to the email), which
+        // is why seedCredentials skips this field: nothing fills it unless the
+        // operator asks for a value.
+        case 'naiveUsername': return RandomUtil.randomLowerAndNum(8);
         case 'subId': return RandomUtil.randomLowerAndNum(16);
         // The same generator the client form's own dice button has always used
         // (form/client.html), so a name made here is indistinguishable from one
@@ -643,7 +700,13 @@
         default: return '';
       }
     },
-    regenerate(key) { this.$set ? this.$set(this.client, key, this.mint(key)) : (this.client[key] = this.mint(key)); },
+    // Vue.set, not this.$set: this object is a plain literal handed to a Vue
+    // instance as data, so it has no $set of its own and the ternary that used to
+    // guard this call ALWAYS took its fallback branch. blankClient makes every key
+    // reactive up front, which is what actually fixes the button; the global setter
+    // is kept so a credential added to credentialFields later and forgotten there is
+    // merely a stale placeholder rather than a control that silently does nothing.
+    regenerate(key) { Vue.set(this.client, key, this.mint(key)); },
 
     // Lift the account's current credentials out of its stored entries. Each
     // protocol's entry carries only its own fields, so the whole set is assembled
@@ -651,14 +714,30 @@
     // the login name, and both name the same shared password.
     loadCredentialsFrom(row) {
       const c = this.client;
+      const stored = (m) => (this.storedBy && this.storedBy[m.inboundId]) || {};
+
+      // Pass one: the PROTOCOL-SHAPED field, which is what the daemon or the core
+      // actually authenticates on, so it wins wherever the two disagree.
       for (const m of (row.memberships || [])) {
-        const e = (this.storedBy && this.storedBy[m.inboundId]) || {};
+        const e = stored(m);
         const vpnLike = ['l2tp', 'pptp', 'openvpn', 'openconnect', 'sstp', 'ikev2', 'ssh']
           .includes(m.protocol);
-        const emailId = ['wg-c', 'awg', 'gre', 'mtproto'].includes(m.protocol);
+        const emailId = ['wg-c', 'awg', 'gre', 'mtproto', 'wireguard'].includes(m.protocol);
         if (e.id && vpnLike) c.vpnUsername = c.vpnUsername || e.id;
         else if (e.id && !emailId) c.id = c.id || e.id;
-        if (e.password) c.password = c.password || e.password;
+        // A 2022-blake3 membership's password is NOT the account's. It is a PSK
+        // minted for that one membership, because the cipher demands base64 of an
+        // exact length and the account's single password is shared with trojan,
+        // anytls, naive, tuic and all seven credential VPNs.
+        //
+        // Adopting it here was destructive rather than merely wrong: the form
+        // carries the password it loaded onto EVERY entry it posts, and the server
+        // lifts it onto the account for any anchor that is not itself shadowsocks.
+        // Opening such an account and pressing Save with no edit at all logged out
+        // every other protocol on it, RADIUS included.
+        if (e.password && !this.strictBytesFor(m.inboundId)) {
+          c.password = c.password || e.password;
+        }
         if (e.auth) c.auth = c.auth || e.auth;
         if (e.secret) c.secret = c.secret || e.secret;
         if (e.username) c.naiveUsername = c.naiveUsername || e.username;
@@ -671,6 +750,43 @@
           c.adtag = e.adtag || '';
         }
       }
+
+      // Pass two: the CARRIED keys, which this same form writes onto every entry it
+      // posts (entryFor) and which are the account's own columns verbatim.
+      //
+      // It refused to read back three of the keys it writes, and that lost customer
+      // credentials. An account holding a uuid with no CURRENT vmess/vless/tuic
+      // membership showed a blank uuid box; ticking a vless inbound then minted a
+      // fresh one on submit and the server lifted it onto the account, so every
+      // vless config already installed stopped authenticating. The server would have
+      // kept the stored one: it only ever fills blanks. Same shape for the VPN login
+      // name and the naive username.
+      for (const m of (row.memberships || [])) {
+        const e = stored(m);
+        if (e.uuid) c.id = c.id || e.uuid;
+        if (e.vpnUsername) c.vpnUsername = c.vpnUsername || e.vpnUsername;
+        if (e.naiveUsername) c.naiveUsername = c.naiveUsername || e.naiveUsername;
+        // Excluded here as well as in pass one, and there is no carried key that
+        // escapes it: entryFor posts the shared password under `password`, and the
+        // server then OVERWRITES that key on a 2022-blake3 membership with the PSK it
+        // minted for it (applyAccountCredential). So the stored entry's `password` on
+        // such an inbound is never the account's, whichever pass reads it.
+        if (e.password && !this.strictBytesFor(m.inboundId)) {
+          c.password = c.password || e.password;
+        }
+      }
+    },
+
+    // The 2022-blake3 key length one ticked inbound demands, or 0. Keyed by inbound
+    // rather than over the whole set like strictSsBytes, which answers "does the
+    // password this form holds have to be in the strict shape".
+    strictBytesFor(inboundId) {
+      const ib = this.assignable.find(x => x.inboundId === inboundId);
+      if (!ib || ib.protocol !== 'shadowsocks') return 0;
+      const method = (ib.method || '').toLowerCase().trim();
+      if (method === '2022-blake3-aes-128-gcm') return 16;
+      if (method === '2022-blake3-aes-256-gcm' || method === '2022-blake3-chacha20-poly1305') return 32;
+      return 0;
     },
 
     // Fill every credential a new account could need, so the common case is one
@@ -679,9 +795,9 @@
     seedCredentials() {
       for (const f of this.credentialFields) {
         if (f.key === 'naiveUsername') continue;
-        if (!this.client[f.key]) this.client[f.key] = this.mint(f.key);
+        if (!this.client[f.key]) Vue.set(this.client, f.key, this.mint(f.key));
       }
-      if (!this.client.subId) this.client.subId = this.mint('subId');
+      if (!this.client.subId) Vue.set(this.client, 'subId', this.mint('subId'));
     },
 
     async ok() {
@@ -704,8 +820,29 @@
       // page stops responding entirely.
       for (const f of this.credentialFields) {
         if (this.fieldMintedOnSubmit(f) && !(this.client[f.key] || '').trim()) {
-          this.client[f.key] = this.mint(f.key);
+          Vue.set(this.client, f.key, this.mint(f.key));
         }
+      }
+      // And one field that has to be re-minted even when it is NOT blank.
+      //
+      // The password is seeded on open, before a single inbound has been ticked, so
+      // strictSsBytes is 0 at that moment and mint() produces ten alphanumeric
+      // characters. Tick a 2022-blake3 inbound afterwards and that password is not a
+      // key it can use: the cipher wants base64 of exactly 16 or 32 bytes. The sweep
+      // above cannot fix it, because the field is not blank.
+      //
+      // The result was an account created, listed and unable to connect, with the
+      // Credentials tab showing a password that never worked. Re-minting here rather
+      // than seeding lazily keeps the common case (open the form, everything is
+      // already filled in) exactly as it was.
+      //
+      // Only ever widens what the password can serve: every other protocol takes any
+      // string, so a key in the strict shape satisfies all of them at once. The bulk
+      // form does not need this - it builds its accounts after the picker, which is
+      // the ordering to copy if this form is ever rewritten.
+      const strict = this.strictSsBytes;
+      if (strict && !this.validSsKey(this.client.password, strict)) {
+        Vue.set(this.client, 'password', this.mint('password'));
       }
 
       this.confirmLoading = true;
@@ -789,7 +926,10 @@
         case 'sstp': case 'ikev2': case 'ssh':
           return Object.assign(base, { id: c.vpnUsername, password: c.password });
         // Identity IS the email for these, so "id" carries it rather than a uuid.
-        case 'wg-c': case 'awg': case 'gre':
+        // Xray-native wireguard joins them: a peer is authorised by its public key,
+        // so there is no credential to post and the server mints the key material
+        // per membership (web/service/wgxray.go).
+        case 'wg-c': case 'awg': case 'gre': case 'wireguard':
           return Object.assign(base, { id: email });
         // The ad tag rides the mtproto entry ONLY. It is not carried on every entry
         // the way the credential columns above are, because nothing lifts it onto the

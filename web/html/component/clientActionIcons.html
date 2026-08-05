@@ -19,6 +19,10 @@
       <a-icon class="normal-icon" type="qrcode" v-if="record.protocol === Protocols.WGC" @click="showWgcConfig(record.id,client);"></a-icon>
     </a-tooltip>
     <a-tooltip>
+      <template slot="title">WireGuard Config</template>
+      <a-icon class="normal-icon" type="qrcode" v-if="record.protocol === Protocols.WIREGUARD" @click="showWireguardXrayConfig(record.id,client);"></a-icon>
+    </a-tooltip>
+    <a-tooltip>
       <template slot="title">AmneziaWG Config</template>
       <a-icon class="normal-icon" type="qrcode" v-if="record.protocol === Protocols.AWG" @click="showAwgConfig(record.id,client);"></a-icon>
     </a-tooltip>

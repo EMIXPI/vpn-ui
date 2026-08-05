@@ -511,6 +511,12 @@
         // backend-minted keys); the modal fetches them from the wgc-configs API.
         wgcConfigModal.show(dbInboundId, client);
       },
+      showWireguardXrayConfig(dbInboundId, client) {
+        // Xray-native WireGuard. Same viewer as wg-c above and the same server-side
+        // rendering, off a different endpoint: the two implementations differ in
+        // where the tunnel is terminated, not in what a client installs.
+        wgcConfigModal.show(dbInboundId, client, 'wgxray-configs');
+      },
       showAwgConfig(dbInboundId, client) {
         // AmneziaWG configs are rendered server-side (per-device .conf with
         // backend-minted keys + obfuscation params); the modal fetches them from

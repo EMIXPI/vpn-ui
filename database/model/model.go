@@ -416,6 +416,23 @@ type Client struct {
 	Comment    string `json:"comment" form:"comment"`       // Client comment
 	Reset      int    `json:"reset" form:"reset"`           // Reset period in days
 
+	// VpnUsername is the account's VPN login name CARRIED on an entry addressed to
+	// some other protocol. It is not what any inbound authenticates on: the login
+	// name lives in "id" on the seven protocols that use one, and this key exists so
+	// the Clients form can post every credential column of an account to whichever
+	// inbound the write happens to be addressed to (see liftCarriedCredentials).
+	//
+	// Modelled here for the reason the block below states, and for a second one.
+	// Being absent from this struct did not only mean AddInbound dropped it: it also
+	// meant validateClientIdentities could not SEE it, and that check keys on the
+	// addressed inbound's protocol. So a login name posted on a vless-addressed
+	// write was validated as a vless uuid (i.e. not at all), lifted onto the account
+	// by the accounts sync, and projected onto the account's openvpn membership as
+	// its "id" - which openvpn.go turns into a CCD filename, written as root. A
+	// value of "../../../../etc/cron.d/x" wrote there. The rules were never weak;
+	// the field simply walked past them.
+	VpnUsername string `json:"vpnUsername,omitempty"`
+
 	// Shadowsocks per-client cipher. Multi-user shadowsocks lets each account carry
 	// its own method, and the inbound-level one is only the default.
 	//
@@ -520,6 +537,20 @@ type Client struct {
 	PubKey  string         `json:"pubKey,omitempty"`
 	Psk     string         `json:"psk,omitempty"`
 	Devices []ClientDevice `json:"devices,omitempty"`
+
+	// Addresses is the tunnel address of each device slot, "10.10.0.4/32" and so on,
+	// used by the Xray-native `wireguard` inbound: one entry per entry in Devices,
+	// same index.
+	//
+	// Stored rather than derived from the client's position, and that is the whole
+	// point of it. An Xray wireguard peer is authorised by its allowedIPs, and the
+	// address is also written into the .conf the customer installs, so deriving it
+	// from a list index would silently re-address every account after any deletion
+	// and every one of their installed configs would stop passing traffic. Present
+	// here for the same reason the four blocks above are: creating an inbound
+	// round-trips every client through THIS struct, so a field it does not model is
+	// dropped without a word. omitempty, so no other protocol's client JSON grows.
+	Addresses []string `json:"addresses,omitempty"`
 
 	CreatedAt int64 `json:"created_at,omitempty"` // Creation timestamp
 	UpdatedAt int64 `json:"updated_at,omitempty"` // Last update timestamp

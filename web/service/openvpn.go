@@ -543,6 +543,24 @@ func (s *OpenVpnService) writeClientConfigDir(inbound *model.Inbound, settings *
 		if len(ips) == 0 {
 			continue
 		}
+		// The login name becomes a PATH here, so it is checked again at the point of
+		// use rather than trusted to have been checked on the way in.
+		//
+		// Not belt-and-braces. ValidateVpnUsername runs on the write paths, and a
+		// value can reach this row without passing one: a DB import, a restored
+		// backup, a row written by a binary that predates the rule, or a future
+		// carrier key nobody remembered to validate (which is exactly how
+		// "vpnUsername" got in). The panel runs as root and os.MkdirAll would
+		// happily create the parent, so the cost of being wrong once here is
+		// arbitrary file creation anywhere on the box.
+		//
+		// Skipped rather than failed: one bad row must not stop the other accounts
+		// on the inbound from being configured.
+		if err := ValidateVpnUsername(client.ID); err != nil {
+			logger.Warningf("openvpn inbound %d: refusing to write a block file for %q: %v",
+				inbound.Id, client.Email, err)
+			continue
+		}
 		// "<serverBlockMask> <ip1> <ip2> ...": the hook leases a free IP from the list
 		// and pushes ifconfig-push <freeIP> <serverBlockMask> (topology subnet).
 		content := mask + " " + strings.Join(ips, " ") + "\n"
