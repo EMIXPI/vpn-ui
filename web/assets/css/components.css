@@ -1500,13 +1500,31 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 /* The credential this inbound authenticates on. Monospace because it is copied,
    truncated because a uuid is 36 characters and the whole row is not about it. */
 .bo-mb-cred {
-  flex:1 1 260px; min-width:0; display:flex; align-items:center; gap:6px;
+  flex:1 1 260px; min-width:0; display:flex; align-items:center; gap:10px;
   font-family:var(--font-mono, ui-monospace, monospace); font-size:12px;
-  color:var(--text-2); cursor:pointer;
+  color:var(--text-2);
 }
-.bo-mb-cred:hover { color:var(--accent); }
+/* One copyable artifact. There can be two of them on the dial-in protocols, whose
+   customer needs a username AND a password, so each is its own click target rather
+   than the whole cell being one. */
+.bo-mb-cred-one {
+  min-width:0; display:flex; align-items:center; gap:5px; cursor:pointer;
+}
+.bo-mb-cred-one:hover { color:var(--accent); }
+/* The tiny label in front of a value. Without it a bare login name and a bare
+   password are two indistinguishable strings sitting next to each other. */
+.bo-mb-cred-k {
+  flex:0 0 auto; font-family:var(--ui, inherit); font-size:10px;
+  text-transform:uppercase; letter-spacing:.04em; color:var(--text-3);
+}
 .bo-mb-cred-v { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .bo-mb-cred .anticon { flex:0 0 auto; font-size:12px; }
+/* A share link is far too long for the cell, so the tooltip carries the whole of it
+   and wraps rather than running off the edge of the screen. */
+.bo-mb-cred-full {
+  max-width:420px; margin-top:4px; word-break:break-all; white-space:normal;
+  font-family:var(--font-mono, ui-monospace, monospace); font-size:11px; opacity:.85;
+}
 
 .bo-mb-use {
   flex:0 0 auto; display:flex; align-items:center; gap:8px;

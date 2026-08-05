@@ -301,20 +301,25 @@
                             <span class="bo-mb-port">:[[ record.port ]]</span>
                           </div>
 
-                          <!-- What the customer types into their client for THIS
-                               inbound: the field the protocol authenticates on. It
-                               is a uuid on vmess, a password on trojan and a login
-                               name on the dial-in protocols, which is exactly why
-                               it cannot be shown once on the account row. -->
-                          <a-tooltip v-if="membershipCredential(record, client)">
-                            <template slot="title">
-                              {{ i18n "pages.clients.credential" }} &middot; {{ i18n "copy" }}
-                            </template>
-                            <div class="bo-mb-cred" @click="copyText(membershipCredential(record, client))">
-                              <span class="bo-mb-cred-v">[[ membershipCredential(record, client) ]]</span>
-                              <a-icon type="copy"></a-icon>
-                            </div>
-                          </a-tooltip>
+                          <!-- What the operator hands the customer FOR THIS INBOUND,
+                               which is a different artifact per protocol family: the
+                               share link a client imports, or the login pair a
+                               dial-in protocol authenticates with. Both are
+                               per-inbound, which is why neither can be shown once on
+                               the account row above. -->
+                          <div class="bo-mb-cred" v-if="membershipCredentials(record, client).length">
+                            <a-tooltip v-for="cred in membershipCredentials(record, client)" :key="cred.key">
+                              <template slot="title">
+                                [[ cred.label ]] &middot; {{ i18n "copy" }}
+                                <div class="bo-mb-cred-full">[[ cred.value ]]</div>
+                              </template>
+                              <span class="bo-mb-cred-one" @click="copyText(cred.value)">
+                                <span class="bo-mb-cred-k">[[ cred.short ]]</span>
+                                <span class="bo-mb-cred-v">[[ cred.value ]]</span>
+                                <a-icon type="copy"></a-icon>
+                              </span>
+                            </a-tooltip>
+                          </div>
                           <span v-else class="bo-mb-cred"></span>
 
                           <!-- This inbound's own bytes, except where the core cannot
@@ -808,16 +813,68 @@
         const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
         return client ? client.enable !== false : false;
       },
-      // The field this inbound's protocol authenticates on: a uuid for vmess and
-      // vless, the password for trojan and the credential VPNs, the login name for
-      // ssh. Single definition in model/inbound.js, mirrored server-side by
-      // clientIdentityKey; do not re-derive it here.
-      membershipCredential(dbInbound, client) {
-        if (!dbInbound || !client) return '';
-        const id = getClientIdentity(dbInbound.protocol, client);
-        // wg-c, awg, gre and mtproto are addressed by the email, which the row
-        // above already spells out; showing it again says nothing.
-        return id && id !== client.email ? String(id) : '';
+      // What the operator hands the customer for THIS inbound.
+      //
+      // This used to be getClientIdentity's answer, always: a uuid on vmess, a
+      // password on trojan, a login name on ssh. That is the field the protocol
+      // AUTHENTICATES on, which is not the same question. A vless uuid on its own
+      // configures nothing, since the address, port, transport, reality key and flow
+      // are all missing from it, and copying it gave an operator something they then
+      // could not send to anybody. An l2tp account needs BOTH of its fields, so
+      // showing one of them was showing half a credential.
+      //
+      // So: whatever the customer actually installs. A share link where the protocol
+      // produces one, the login pair where it does not.
+      membershipCredentials(dbInbound, client) {
+        if (!dbInbound || !client) return [];
+        // Anything a client imports by URL, which is hasLink()'s own question. Going
+        // through it rather than listing protocols here means anytls, tuic, naive and
+        // mtproto are covered with no second list to keep in step, and a protocol
+        // that gains a link generator later is covered by that alone.
+        if (dbInbound.hasLink()) {
+          const inbound = dbInbound.toInbound();
+          let links = [];
+          try {
+            links = inbound.genAllLinks('', this.remarkModel || '-ieo', client) || [];
+          } catch (e) {
+            // A half-configured inbound (no certificate yet, a reality key not
+            // generated) can throw in a generator. One block failing to offer a link
+            // must not take the whole expander down with it.
+            console.warn('link generation failed for inbound ' + dbInbound.id, e);
+            return [];
+          }
+          // mtproto yields one link per enabled mode, so the label carries the mode
+          // and there can legitimately be several.
+          return links.filter(l => l && l.link).map((l, i) => ({
+            label: '{{ i18n "pages.clients.shareLink" }}' + (links.length > 1 && l.remark ? ' (' + l.remark + ')' : ''),
+            short: '{{ i18n "pages.clients.shareLinkShort" }}',
+            value: String(l.link),
+            key: 'link' + i,
+          }));
+        }
+        // The seven dial-in protocols: the customer types two fields into their
+        // client, and neither is derivable from the other. `id` is the login name on
+        // these (applyAccountCredential writes account.VpnUsername there), which is
+        // exactly why it must not be labelled the way a uuid would be.
+        if (CLIENT_USERPASS_PROTOCOLS.includes(dbInbound.protocol)) {
+          const out = [];
+          if (client.id) {
+            out.push({ label: '{{ i18n "pages.clients.vpnUsername" }}',
+                       short: '{{ i18n "pages.clients.vpnUsernameShort" }}',
+                       value: String(client.id), key: 'user' });
+          }
+          if (client.password) {
+            out.push({ label: '{{ i18n "password" }}',
+                       short: '{{ i18n "pages.clients.passwordShort" }}',
+                       value: String(client.password), key: 'pass' });
+          }
+          return out;
+        }
+        // wg-c, awg, gre and the Xray-native wireguard are addressed by the email,
+        // which the row above already spells out. What their customer installs is a
+        // generated config, and that is behind this block's own config icon rather
+        // than something that fits on one line here.
+        return [];
       },
       // Two hues, neither of them a reserved status colour: the tag says which
       // data plane serves the inbound, not how healthy it is. Same split as the

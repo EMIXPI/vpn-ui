@@ -33,6 +33,18 @@ const Protocols = {
 // how it drifted last time: openconnect/sstp/ikev2 were added to the browser's list
 // and not to the backend's, so an edit was keyed on the password while the server
 // looked the account up by id, and every edit came back "empty client ID".
+// The protocols whose customer types a username AND a password into their client,
+// rather than importing a link. On all seven the entry's `id` holds the LOGIN NAME
+// (applyAccountCredential writes account.VpnUsername there) and `password` holds the
+// password, so neither field means what it means on an Xray-native protocol.
+//
+// Kept beside getClientIdentity because it answers the neighbouring question: that
+// one says what a protocol is ADDRESSED by, this one says what its customer is given.
+const CLIENT_USERPASS_PROTOCOLS = [
+    Protocols.L2TP, Protocols.PPTP, Protocols.OPENVPN, Protocols.OPENCONNECT,
+    Protocols.SSTP, Protocols.IKEV2, Protocols.SSH,
+];
+
 function getClientIdentity(protocol, client) {
     switch (protocol) {
         // Username+password VPN protocols: the password is the key, because the

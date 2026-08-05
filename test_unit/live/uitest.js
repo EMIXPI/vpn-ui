@@ -843,6 +843,27 @@ async function main() {
   await evalJs('window.__closeAll()');
   await wait(500);
 
+  // The per-membership copy field offers what the customer actually installs, which
+  // differs by protocol family. It used to offer getClientIdentity's answer always:
+  // a bare uuid on vmess, which configures nothing on its own (no address, port,
+  // transport, reality key or flow), and ONE of the two fields a dial-in protocol
+  // needs.
+  const copyable = await evalJs(`(() => {
+     const row = (app.clients || []).find(c => c.email === ${JSON.stringify('uitest-seed@ui')});
+     if (!row) return 'no seeded account';
+     return app.accountInbounds(row).map(ib => {
+       const c = (app.accountClientIn(row, ib) || [])[0];
+       return { proto: ib.protocol,
+                creds: c ? app.membershipCredentials(ib, c).map(x => ({
+                  short: x.short, scheme: String(x.value).split(':')[0] })) : [] };
+     });
+   })()`);
+  check('an Xray membership offers the share link, not a bare credential',
+        Array.isArray(copyable) && copyable.length > 0 &&
+          copyable.every((m) => m.creds.length === 1 && m.creds[0].short === 'link' &&
+                                /^(vmess|vless|trojan|ss|anytls|tuic|naive\+https|hysteria2?)$/.test(m.creds[0].scheme)),
+        JSON.stringify(copyable));
+
   // ------------------------------------------------- credentials that must work
   console.log('\n=== credentials that have to be usable ===');
 
