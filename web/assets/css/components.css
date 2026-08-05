@@ -1545,6 +1545,60 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 .bo-mb-actions { flex:0 0 auto; margin-inline-start:auto; }
 
 /* ---------------------------------------------------------------------------
+ * GRE: the far side's Outbound form, box by box (modals/greConfigModal)
+ *
+ * Here rather than in a <style> inside that modal for the reason the SSL block
+ * below states: Vue strips a <style> out of a template while compiling it, and
+ * the block disappears with no warning in a production build.
+ *
+ * Every selector is under .gre-out. The rules are shaped like a definition list
+ * and would otherwise reach every two-column layout in the panel.
+ * --------------------------------------------------------------------------- */
+.gre-out {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.gre-out-h {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.gre-out-h span { font-size: 12px; color: var(--text-3); }
+.gre-out-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 34%) 1fr;
+  gap: 2px 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.gre-out-row:last-child { border-bottom: 0; }
+/* A box that must be left empty is recessed rather than hidden: blank is a
+   decision the operator has to make deliberately, and a missing row reads as an
+   answer nobody gave. */
+.gre-out-row--blank { opacity: .72; }
+.gre-out-k { font-size: 12px; color: var(--text-2); }
+.gre-out-v {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+  color: var(--text); cursor: pointer; word-break: break-all;
+}
+.gre-out-v:hover { color: var(--accent); }
+.gre-out-v--none {
+  font-family: var(--ui, inherit); font-style: italic;
+  color: var(--text-3); cursor: default;
+}
+.gre-out-v--none:hover { color: var(--text-3); }
+/* The note spans both columns so a full sentence is not squeezed into the value
+   column, which is sized for an address. */
+.gre-out-n {
+  grid-column: 1 / -1;
+  font-size: 11px; line-height: 1.45; color: var(--text-3);
+}
+
+/* ---------------------------------------------------------------------------
  * SSL certificate manager (Panel Settings, the SSL tab)
  *
  * Here rather than in a <style> block inside settings/panel/ssl.html: Vue strips

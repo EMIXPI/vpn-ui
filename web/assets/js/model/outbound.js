@@ -3000,12 +3000,18 @@ const VPN_OUT_KINDS = {
             // route to the server picks, which is right on a single-homed host and
             // wrong to guess on exactly the multi-homed one whose operator knows it.
             { name: 'local', type: 'text', def: '', label: 'vpnOutLocalAddress' },
-            { name: 'address', type: 'text', def: '', label: 'vpnOutTunAddress', placeholder: '10.11.0.2/30' },
+            // /32, not /30. The classic point-to-point pair is what a router
+            // manual teaches, but a vpn-ui GRE inbound hands each account a single
+            // address out of the inbound's block: a /30 pasted here claims three
+            // more addresses, and on a busy inbound those belong to other accounts.
+            // The inbound's own config modal now states the mask alongside the
+            // address for exactly this reason.
+            { name: 'address', type: 'text', def: '', label: 'vpnOutTunAddress', placeholder: '10.9.3.7/32' },
             // The far side's inner address. Nothing routes by it (a point-to-point
             // GRE device sends everything to its outer remote), but it is half of
             // the pair of numbers the far side hands out and it is what an operator
             // pings to prove the tunnel carries traffic.
-            { name: 'peer', type: 'text', def: '', label: 'vpnOutPeerAddress', placeholder: '10.11.0.1' },
+            { name: 'peer', type: 'text', def: '', label: 'vpnOutPeerAddress', placeholder: '10.9.3.1' },
             { name: 'ttl', type: 'number', def: null, min: 0, max: 255, plain: 'TTL', placeholder: '64' },
             // Blank = let the kernel choose, as the GRE inbound documents: the
             // right MTU differs between raw GRE and GRE-in-FOU and the kernel
