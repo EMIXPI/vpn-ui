@@ -964,6 +964,64 @@ async function main() {
         traversal && traversal.success === false && /path separator/i.test(traversal.msg || ''),
         JSON.stringify(traversal));
 
+  // --------------------------------------------- the outbound link parser
+  // Pasting a share link into an outbound is a client-side transform
+  // (Outbound.fromLink), and outbound.js is only loaded by the Xray Configs page.
+  //
+  // The bug: an IPv6 literal is bracketed in a URL authority and must not be in the
+  // config field, where the address is a bare host. Xray reads "[2001:db8::1]" as a
+  // DOMAIN, fails to resolve it, and the outbound is dead with nothing in the log
+  // naming the brackets. parseShareLink stripped them (so tuic and naive were fine)
+  // while the four schemes going through fromParamLink kept them.
+  console.log('\n=== the outbound link parser ===');
+  await goto('/panel/xray');
+  const parsed = await evalJs(`(() => {
+     if (typeof Outbound === 'undefined') return 'outbound.js not loaded';
+     const at = (link) => {
+       try { const o = Outbound.fromLink(link); return o ? o.settings.address : null; }
+       catch (e) { return 'THREW ' + e.message; }
+     };
+     return {
+       anytls6: at('anytls://secret@[2001:db8::1]:443?security=tls&type=tcp#v6'),
+       vless6:  at('vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@[2001:db8::1]:443?security=tls&type=tcp#v6'),
+       trojan6: at('trojan://pw@[2001:db8::1]:443?security=tls&type=tcp#v6'),
+       tuic6:   at('tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:pw@[2001:db8::1]:443?alpn=h3#v6'),
+       naive6:  at('naive+https://u:p@[2001:db8::1]:443#v6'),
+       anytls4: at('anytls://secret@203.0.113.9:443?security=tls&type=tcp#v4'),
+     };
+   })()`);
+  check('an IPv6 share link imports as a bare address on every scheme',
+        parsed && typeof parsed === 'object' &&
+          ['anytls6','vless6','trojan6','tuic6','naive6'].every(k => parsed[k] === '2001:db8::1') &&
+          parsed.anytls4 === '203.0.113.9',
+        JSON.stringify(parsed));
+
+  // The three the user asked about are already routed by fromLink, and each has to
+  // land on its own settings class rather than falling through to null.
+  const schemes = await evalJs(`(() => {
+     if (typeof Outbound === 'undefined') return 'outbound.js not loaded';
+     const proto = (link) => {
+       try { const o = Outbound.fromLink(link); return o ? o.protocol : null; }
+       catch (e) { return 'THREW ' + e.message; }
+     };
+     return {
+       anytls: proto('anytls://secret@203.0.113.9:443?security=tls&type=tcp#a'),
+       tuic:   proto('tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:pw@203.0.113.9:443?alpn=h3&congestion_control=bbr#t'),
+       naiveH: proto('naive+https://u:p@203.0.113.9:443#n'),
+       naiveQ: proto('naive+quic://u:p@203.0.113.9:443#n'),
+       junk:   proto('not-a-link'),
+     };
+   })()`);
+  check('anytls, tuic and naive links import as their own outbound',
+        schemes && schemes.anytls === 'anytls' && schemes.tuic === 'tuic' &&
+          schemes.naiveH === 'naive' && schemes.naiveQ === 'naive' && schemes.junk === null,
+        JSON.stringify(schemes));
+
+  // Back to the Clients page. outbound.js is only on the Xray Configs page, but
+  // clientMembershipModal is only on this one, and every later check reaches for it.
+  await goto('/panel/clients');
+  await inject();
+
   // ------------------------------------------------ Xray-native WireGuard
   // Reported as "we add the inbound but we cannot assign any client to it". Its
   // settings carry peers, not clients, so the picker filtered it out and the accounts

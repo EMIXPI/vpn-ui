@@ -1830,6 +1830,15 @@ class Outbound extends CommonClass {
         if (!match) return null;
         let [, protocol, userData, address, port,] = match;
         port *= 1;
+        // An IPv6 literal is bracketed in a URL authority and must NOT be in the
+        // config field, where the address is a bare host. Xray reads "[2001:db8::1]"
+        // as a DOMAIN, fails to resolve it, and the outbound is dead with nothing in
+        // the log naming the brackets as the cause.
+        //
+        // parseShareLink already strips them, so tuic and naive imported IPv6
+        // correctly while the four schemes routed through here (vless, trojan, ss
+        // and anytls) did not. Same treatment, so the two paths agree.
+        address = address.replace(/^\[(.*)\]$/, '$1');
         if (protocol == 'ss') {
             protocol = 'shadowsocks';
             userData = atob(userData).split(':');
