@@ -306,3 +306,94 @@ func TestWgxrayHostAtRefusesToWrap(t *testing.T) {
 		t.Errorf("host 3 = %q; want empty, the pool is exhausted", got)
 	}
 }
+
+// The device's own address has to be in the pool its peers are addressed from.
+// Xray's default when the field is absent is the bogon 10.0.0.1, so an inbound
+// handing its clients 10.10.0.x had its device in a different subnet from all of
+// them.
+func TestApplyWireguardClientsAddressesTheDevice(t *testing.T) {
+	settings := map[string]any{
+		"clientNetwork": "10.77.0.0/24",
+		"clients":       []any{},
+	}
+	applyWireguardClients(settings, func(string, bool) bool { return true })
+	addr, _ := settings["address"].([]any)
+	if len(addr) != 1 || addr[0] != "10.77.0.1" {
+		t.Errorf("address = %v; want [10.77.0.1], the first host of the pool", settings["address"])
+	}
+
+	// The default pool when the inbound does not name one.
+	bare := map[string]any{"clients": []any{}}
+	applyWireguardClients(bare, func(string, bool) bool { return true })
+	if addr, _ := bare["address"].([]any); len(addr) != 1 || addr[0] != "10.10.0.1" {
+		t.Errorf("address = %v; want [10.10.0.1]", bare["address"])
+	}
+}
+
+// An imported inbound, or one configured by hand, may already name an address, and
+// that one is the truth about what its existing peers are talking to.
+func TestApplyWireguardClientsKeepsAConfiguredAddress(t *testing.T) {
+	settings := map[string]any{
+		"clientNetwork": "10.77.0.0/24",
+		"address":       []any{"192.168.9.1"},
+		"clients":       []any{},
+	}
+	applyWireguardClients(settings, func(string, bool) bool { return true })
+	if addr, _ := settings["address"].([]any); len(addr) != 1 || addr[0] != "192.168.9.1" {
+		t.Errorf("address = %v; want the configured 192.168.9.1 untouched", settings["address"])
+	}
+}
+
+// An inbound imported from upstream 3x-ui has peers and NO clients key at all. Its
+// hand-authored peers must survive the rewrite, and its device key must not be
+// re-minted: every peer already installed is authorised against it.
+func TestUpstreamWireguardInboundSurvivesImport(t *testing.T) {
+	newAccountsDB(t)
+	const upstreamKey = "UPSTREAMSECRETKEYAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	const peerKey = "HANDAUTHOREDPEERPUBKEYAAAAAAAAAAAAAAAAAAAAA="
+	inbound := wgxrayInbound(t, map[string]any{
+		"mtu":         1420,
+		"secretKey":   upstreamKey,
+		"noKernelTun": false,
+		"peers": []any{
+			map[string]any{"publicKey": peerKey, "allowedIPs": []any{"10.0.0.2/32"}, "keepAlive": 25},
+		},
+	})
+
+	if _, err := ReconcileWireguardXrayKeys(inbound); err != nil {
+		t.Fatalf("ReconcileWireguardXrayKeys: %v", err)
+	}
+	settings := wgxraySettings(t, inbound)
+
+	if settings["secretKey"] != upstreamKey {
+		t.Errorf("the device key was re-minted (%v); every peer already installed is "+
+			"authorised against the imported one", settings["secretKey"])
+	}
+	peers, _ := settings["peers"].([]any)
+	if len(peers) != 1 || peers[0].(map[string]any)["publicKey"] != peerKey {
+		t.Errorf("the hand-authored peer did not survive: %v", settings["peers"])
+	}
+	if _, ok := settings["clients"].([]any); !ok {
+		t.Error("no clients array was added, so the inbound stays unassignable")
+	}
+	// An absent userLimit is legacy and means ONE device per account, not the
+	// 64-device maximum that an explicit 0 means.
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(inbound.Settings), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := wgxrayEffectiveDevices(raw); got != 1 {
+		t.Errorf("devices per account = %d; want 1 for an inbound that names no user limit", got)
+	}
+
+	// And the generated config keeps the peer while dropping the clients key.
+	gen := wgxraySettings(t, inbound)
+	applyWireguardClients(gen, func(string, bool) bool { return true })
+	if _, still := gen["clients"]; still {
+		t.Error("clients reached the generated config")
+	}
+	out, _ := gen["peers"].([]any)
+	if len(out) != 1 || out[0].(map[string]any)["publicKey"] != peerKey {
+		t.Errorf("generated peers = %v; want the hand-authored one preserved", gen["peers"])
+	}
+}

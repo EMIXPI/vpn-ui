@@ -50,7 +50,14 @@ const (
 
 // wgxrayNetwork reads the pool this inbound addresses its clients from.
 func wgxrayNetwork(raw map[string]json.RawMessage) *net.IPNet {
-	cidr := strings.TrimSpace(jsonString(raw["clientNetwork"]))
+	return wgxrayParseNetwork(jsonString(raw["clientNetwork"]))
+}
+
+// wgxrayParseNetwork resolves a configured pool, falling back to the default for
+// anything absent, unparseable or not v4. Never returns nil: every caller uses the
+// result to derive an address, and a nil here would be a panic on a typo.
+func wgxrayParseNetwork(cidr string) *net.IPNet {
+	cidr = strings.TrimSpace(cidr)
 	if cidr == "" {
 		cidr = wgxrayDefaultNetwork
 	}
@@ -87,9 +94,23 @@ func wgxrayHostAt(network *net.IPNet, n int) string {
 func WgxrayServerAddress(inbound *model.Inbound) string {
 	raw := map[string]json.RawMessage{}
 	_ = json.Unmarshal([]byte(inbound.Settings), &raw)
+	return wgxrayServerAddressFrom(raw)
+}
+
+// wgxrayServerAddressFrom is the same answer from an already-parsed raw settings map.
+func wgxrayServerAddressFrom(raw map[string]json.RawMessage) string {
 	network := wgxrayNetwork(raw)
-	addr := wgxrayHostAt(network, wgxrayServerHost)
-	return strings.TrimSuffix(addr, "/32")
+	return strings.TrimSuffix(wgxrayHostAt(network, wgxrayServerHost), "/32")
+}
+
+// wgxrayServerAddressFromSettings is the same answer again for the generic
+// map[string]any the config generator works in. Kept separate rather than converting
+// between the two shapes: the generator runs for every inbound on every config
+// build, and a re-marshal there would be paid on all of them.
+func wgxrayServerAddressFromSettings(settings map[string]any) string {
+	cidr, _ := settings["clientNetwork"].(string)
+	network := wgxrayParseNetwork(cidr)
+	return strings.TrimSuffix(wgxrayHostAt(network, wgxrayServerHost), "/32")
 }
 
 // wgxrayEffectiveDevices is how many keypairs one account gets on this inbound.
@@ -344,6 +365,24 @@ func applyWireguardClients(settings map[string]any, enabledFor func(email string
 	delete(settings, "clients")
 	if !ok {
 		return
+	}
+
+	// The device's own address inside the tunnel, which has to be in the pool the
+	// peers are addressed from.
+	//
+	// Xray's default when the field is absent is the bogon 10.0.0.1
+	// (third_party/Xray-core/infra/conf/wireguard.go), so an inbound handing its
+	// clients 10.10.0.x had its device sitting in a different subnet from every one
+	// of them. Derived from clientNetwork rather than pinned, so an operator who
+	// widens or moves the pool moves the device with it.
+	//
+	// Never overwritten: an imported inbound, or one an operator configured by hand,
+	// may already name an address, and that one is the truth about what its existing
+	// peers are talking to.
+	if _, named := settings["address"]; !named {
+		if addr := wgxrayServerAddressFromSettings(settings); addr != "" {
+			settings["address"] = []any{addr}
+		}
 	}
 
 	peers, _ := settings["peers"].([]any)
