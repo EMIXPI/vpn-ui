@@ -501,8 +501,8 @@
       // calls, rather than by trimming the prefix here. Two reasons: the bare kind
       // is ambiguous for exactly one of them (Xray ships its own userspace
       // wireguard outbound, so "wireguard" would name two different rows, which is
-      // why VPN_OUT_KINDS calls the tunnel "WireGuard (kernel)"), and a second
-      // lookup would be a second place to keep in step with that list.
+      // why VPN_OUT_KINDS calls the tunnel "WireGuard (C)"), and a second lookup
+      // would be a second place to keep in step with that list.
       outboundProtocolLabel(outbound) {
         if (outbound && outbound.tag && this.sshOutboundTags.includes(outbound.tag)) {
           return Protocols.SSH;

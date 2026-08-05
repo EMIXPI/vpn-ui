@@ -2790,10 +2790,19 @@ const VPN_OUT_AWG_FIELDS = VPN_OUT_WG_FIELDS.concat([
 ]);
 
 const VPN_OUT_KINDS = {
-    // "(kernel)" is not decoration: it is what separates this row from Xray's own
-    // wireguard outbound in the picker, and it is the same word Core Settings
-    // already uses for the server-side twin. See PROTOCOL_LABELS.
-    wireguard: { label: 'WireGuard (kernel)', fields: VPN_OUT_WG_FIELDS },
+    // The qualifier is not decoration: it is what separates this row from Xray's
+    // own userspace wireguard outbound in the picker, and unqualified the two read
+    // as one protocol listed twice.
+    //
+    // "(C)" and not "(kernel)", which is what this said and was wrong. The panel
+    // names this protocol "WireGuard (C)" everywhere an operator meets it: the
+    // inbound picker (ProtocolLabels in model/inbound.js), the Overview, Core
+    // Settings' protocol column and the account export. "WireGuard (kernel)" is
+    // the RUNTIME name, and it belongs to the one column that lists runtimes,
+    // beside xl2tpd, pptpd and ocserv (core.html). Naming the outbound after the
+    // runtime made the tunnel look like a different protocol from the inbound it
+    // dials.
+    wireguard: { label: 'WireGuard (C)', fields: VPN_OUT_WG_FIELDS },
     awg: { label: 'AmneziaWG', fields: VPN_OUT_AWG_FIELDS },
     openvpn: {
         label: 'OpenVPN',
