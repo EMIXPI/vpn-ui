@@ -488,14 +488,27 @@
       // What to call an outbound in the UI. An SSH tunnel is a socks outbound in
       // the config and must stay one, and a VPN tunnel is a freedom one, but
       // calling them "socks" and "freedom" on screen hides what the operator
-      // actually created. The VPN label carries the kind, because "vpn" alone
-      // would not say whether the row dials WireGuard or PPTP.
+      // actually created.
+      //
+      // The tunnels are named the way the Add Outbound picker names them (GRE,
+      // L2TP/IPsec, PPTP), NOT by their stored protocol. That value carries a
+      // "vpn:" prefix which is a discriminator in the data model and not a name:
+      // it is what isVpnProtocol tests and what decides which driver raises the
+      // tunnel, so it has to stay in the config, but on screen it only made every
+      // row read "vpn:gre" instead of "GRE".
+      //
+      // Through protocolLabel, which is what the Add Outbound picker already
+      // calls, rather than by trimming the prefix here. Two reasons: the bare kind
+      // is ambiguous for exactly one of them (Xray ships its own userspace
+      // wireguard outbound, so "wireguard" would name two different rows, which is
+      // why VPN_OUT_KINDS calls the tunnel "WireGuard (kernel)"), and a second
+      // lookup would be a second place to keep in step with that list.
       outboundProtocolLabel(outbound) {
         if (outbound && outbound.tag && this.sshOutboundTags.includes(outbound.tag)) {
           return Protocols.SSH;
         }
         const vpn = this.vpnOutboundOf(outbound);
-        if (vpn) return vpnProtocolFor(vpn.kind);
+        if (vpn) return protocolLabel(vpnProtocolFor(vpn.kind), vpn.kind);
         return outbound ? outbound.protocol : '';
       },
       async getOutboundsTraffic() {
