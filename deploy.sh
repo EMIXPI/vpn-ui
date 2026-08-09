@@ -373,20 +373,11 @@ if [[ "$MODE" == "install" ]]; then
     # Optional migration: import an existing 3x-ui (or vpn-ui) backup database before
     # the panel is configured, so an operator moving over keeps their inbounds,
     # clients, traffic and admin logins. The import preserves THIS install's own
-    # port/path/TLS/secret, so only the operator's data comes across. Honour a preset
-    # IMPORT_DB for non-interactive installs; otherwise ask on the controlling
-    # terminal. A piped install with no IMPORT_DB set skips it and starts fresh.
+    # port/path/TLS/secret, so only the operator's data comes across. This is
+    # opt-in through IMPORT_DB only: the deploy never asks, so a plain install
+    # always starts fresh without an extra question.
     imported=""
     import_path="${IMPORT_DB:-}"
-    if [[ -z "$import_path" && -r /dev/tty ]]; then
-        {
-            printf '%s::%s %sExisting 3x-ui data%s\n' "$B$BLUE" "$R" "$WHITE" "$R"
-            printf '    Import inbounds, clients and traffic from a 3x-ui backup database?\n'
-            printf '    Enter the path to the .db file, or leave blank to start fresh.\n'
-            printf '  path: '
-        } > /dev/tty
-        read -r import_path < /dev/tty || import_path=""
-    fi
     if [[ -n "$import_path" ]]; then
         if [[ -r "$import_path" ]]; then
             msg "Importing database from $import_path"
