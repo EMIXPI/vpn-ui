@@ -2532,7 +2532,16 @@ func (a *InboundController) reconcileForInbounds(inboundIds []int, needRestart b
 
 	// Each VPN hook regenerates its own daemon config and requests the Xray
 	// restart itself, so only the native Xray protocols fall through to the
-	// bare SetToNeedRestart below.
+	// bare SetToNeedRestart below — and only when the caller could not apply the
+	// change live.
+	//
+	// needRestart is the whole point of the flag: AddInboundClient and
+	// UpdateInboundClient push the account into the running core over the Xray API
+	// and report false when that worked. Forcing a restart on top of a successful
+	// hot-add threw the hot-add away and dropped every live connection on the box
+	// each time an operator added one vmess/vless/trojan account, which is what
+	// this used to do before the reconcile fan-out was factored out of the three
+	// client handlers.
 	xrayOnly := needRestart
 	for protocol := range protocols {
 		switch protocol {
@@ -2565,7 +2574,8 @@ func (a *InboundController) reconcileForInbounds(inboundIds []int, needRestart b
 			a.onWireguardXrayClientChanged()
 			xrayOnly = true
 		default:
-			xrayOnly = true
+			// Nothing to do: the account is already in the running core if the API
+			// call succeeded, and needRestart already says so if it did not.
 		}
 	}
 	if xrayOnly {
