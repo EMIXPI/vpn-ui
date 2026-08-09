@@ -1250,6 +1250,11 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	if exist {
 		return inbound, false, common.NewError("Port already exists:", inbound.Port)
 	}
+	// Everything the row's own port column cannot answer: OpenVPN's second port, the
+	// panel's own listeners, and whatever else on the host already holds the socket.
+	if err := s.checkPortConflicts(inbound, 0); err != nil {
+		return inbound, false, err
+	}
 
 	clients, err := s.GetClients(inbound)
 	if err != nil {
@@ -1509,6 +1514,12 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	if exist {
 		return inbound, false, common.NewError("Port already exists:", inbound.Port)
+	}
+	// Same widened check as the add path. Ports this inbound already holds are
+	// exempt, so an edit that leaves the port alone is never blocked by its own
+	// running listener.
+	if err := s.checkPortConflicts(inbound, inbound.Id); err != nil {
+		return inbound, false, err
 	}
 
 	// This edit REPLACES the client list, so the inbound's own persisted row is not a
