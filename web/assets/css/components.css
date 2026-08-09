@@ -1610,6 +1610,58 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
  * here can reach the other pages.
  * ------------------------------------------------------------------------ */
 
+/* THE CARDS: the host's certificate inventory, which is what the tab now leads
+   with. A grid rather than a list because the cards are peers — no certificate
+   is more important than another, and a list implies a first one that is.
+   auto-fill with a min track keeps a single-certificate host from stretching one
+   card across the whole page. */
+.settings-page .ssl-cards {
+  display:grid; gap:12px; margin-bottom:16px;
+  grid-template-columns:repeat(auto-fill, minmax(240px, 1fr));
+}
+.settings-page .ssl-card {
+  border:1px solid var(--border); border-radius:10px; background:var(--surface);
+  padding:14px 16px; cursor:pointer; transition:border-color .15s, box-shadow .15s;
+  display:flex; flex-direction:column; min-width:0;
+}
+.settings-page .ssl-card:hover { border-color:var(--accent); }
+/* The selected card carries a ring AND a heavier border: on a monochrome or
+   high-contrast theme a colour change alone is not a state change. */
+.settings-page .ssl-card-on {
+  border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset;
+}
+.settings-page .ssl-card-empty { opacity:.72; }
+/* The two non-certificate tiles are not selectable, so they must not offer the
+   pointer that says they are. */
+.settings-page .ssl-card-adopt,
+.settings-page .ssl-card-new { cursor:default; border-style:dashed; }
+.settings-page .ssl-card-adopt:hover,
+.settings-page .ssl-card-new:hover { border-color:var(--border); }
+
+.settings-page .ssl-card-top {
+  display:flex; align-items:center; gap:8px; min-width:0;
+}
+.settings-page .ssl-card-name {
+  font-weight:600; font-size:14px; flex:1 1 auto; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.settings-page .ssl-card-dot {
+  flex:0 0 auto; width:8px; height:8px; border-radius:50%;
+  background:currentColor;
+}
+.settings-page .ssl-card-sub {
+  color:var(--text-2); font-size:12px; margin-top:3px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.settings-page .ssl-card-tags { margin-top:8px; }
+.settings-page .ssl-card-tags:empty { display:none; }
+.settings-page .ssl-card-foot {
+  margin-top:auto; padding-top:10px; font-size:12px; color:var(--text-2);
+}
+.settings-page .ssl-card-note {
+  margin-top:8px; font-size:11.5px; line-height:1.5; color:var(--warn);
+}
+
 /* THE HERO: the answer to "do I have a certificate, is it healthy, is it being
    used", in that order, in one card. The name is the largest thing on the tab
    because it is the first thing an operator checks. */
@@ -1647,6 +1699,20 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
   display:flex; align-items:center; gap:8px; margin-top:12px;
   color:var(--ok); font-size:13px;
 }
+
+/* WHO IS SERVING THIS CERTIFICATE, one quiet row per listener rather than a
+   warning alert: a host whose panel and subscription server hold different
+   certificates is a normal setup, not a misconfiguration. So each row states the
+   fact and offers the button, and neither shouts. */
+.settings-page .ssl-assign { margin:14px 0 4px; }
+.settings-page .ssl-assign-row {
+  display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:8px;
+  font-size:13px;
+}
+/* The icon is never the only channel: the row always carries the listener's name
+   in words, and the button's presence is what actually says "not this one yet". */
+.settings-page .ssl-assign-on { color:var(--ok); }
+.settings-page .ssl-assign-off { color:var(--text-3); }
 
 .settings-page .ssl-alert { margin:12px 0; }
 .settings-page .ssl-alert-btn { margin-top:10px; }

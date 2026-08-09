@@ -1800,6 +1800,15 @@ func updateCert(publicKey string, privateKey string) {
 
 	if (privateKey != "" && publicKey != "") || (privateKey == "" && publicKey == "") {
 		settingService := service.SettingService{}
+
+		// The subscription server can now hold a DIFFERENT certificate from the panel
+		// (see SSLService.Assign). Read where it points BEFORE the panel pair moves, so
+		// a deliberate split survives this command.
+		oldPanelCert, _ := settingService.GetCertFile()
+		oldSubCert, _ := settingService.GetSubCertFile()
+		subFollowsPanel := strings.TrimSpace(oldSubCert) == "" ||
+			filepath.Clean(oldSubCert) == filepath.Clean(oldPanelCert)
+
 		err = settingService.SetCertFile(publicKey)
 		if err != nil {
 			fmt.Println("set certificate public key failed:", err)
@@ -1812,6 +1821,14 @@ func updateCert(publicKey string, privateKey string) {
 			fmt.Println("set certificate private key failed:", err)
 		} else {
 			fmt.Println("set certificate private key success")
+		}
+
+		// Only carry the subscription server along when it was already serving the
+		// panel's certificate. Moving it regardless is what this used to do, and it
+		// would silently undo an operator who had just given the two different names.
+		if !subFollowsPanel {
+			fmt.Printf("subscription server left on its own certificate (%s)\n", oldSubCert)
+			return
 		}
 
 		err = settingService.SetSubCertFile(publicKey)

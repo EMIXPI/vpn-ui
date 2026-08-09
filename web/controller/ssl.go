@@ -68,6 +68,11 @@ type sslStartForm struct {
 	// every connected user. Opt-in, and it stays opt-in: absent means false, so an
 	// old client or a hand-made request can never disconnect anyone by omission.
 	ApplyDisruptive bool `form:"applyDisruptive" json:"applyDisruptive"`
+
+	// Profile names which certificate to act on. Absent is the default one, so
+	// every request written before named certificates existed still means what it
+	// used to; the service validates the name rather than trusting it as a path.
+	Profile string `form:"profile" json:"profile"`
 }
 
 // sslOperationRequest builds the service request from the form.
@@ -90,7 +95,8 @@ func sslOperationRequest(c *gin.Context) (service.SSLOperationRequest, error) {
 			// dump of the form. See the file comment.
 			CloudflareToken: c.PostForm("cloudflareToken"),
 		},
-		FanOut: service.SSLFanOutOptions{ApplyDisruptive: f.ApplyDisruptive},
+		FanOut:  service.SSLFanOutOptions{ApplyDisruptive: f.ApplyDisruptive},
+		Profile: strings.TrimSpace(f.Profile),
 	}
 	return req, nil
 }
@@ -99,7 +105,7 @@ func sslOperationRequest(c *gin.Context) (service.SSLOperationRequest, error) {
 // certificate, whether the panel is actually serving it, the consumers, the
 // budget, the history and the rollback versions.
 func (a *SettingController) sslStatus(c *gin.Context) {
-	st, err := a.sslService.Status()
+	st, err := a.sslService.Status(sslProfileParam(c))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.status"), err)
 		return
@@ -134,7 +140,7 @@ func (a *SettingController) sslPreflight(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.preflight"), err)
 		return
 	}
-	res, err := a.sslService.Preflight(req.PreflightRequest())
+	res, err := a.sslService.Preflight(req.Profile, req.PreflightRequest())
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.preflight"), err)
 		return
@@ -145,7 +151,7 @@ func (a *SettingController) sslPreflight(c *gin.Context) {
 // sslConsumers lists everything on this host configured to serve the managed
 // certificate, with the per-consumer cost of applying a new one.
 func (a *SettingController) sslConsumers(c *gin.Context) {
-	list, err := a.sslService.Consumers()
+	list, err := a.sslService.Consumers(sslProfileParam(c))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.consumers"), err)
 		return
@@ -173,15 +179,70 @@ func (a *SettingController) sslStart(c *gin.Context) {
 	jsonObj(c, a.sslService.RunState(), nil)
 }
 
-// sslUseManaged points the panel's own listener (and the subscription listener) at
-// the store's stable paths.
+// sslUseManaged points listeners at a profile's stable paths.
 //
 // The one-click fix for the single most confusing state this feature has: a
 // certificate that renews perfectly while the panel keeps serving something else,
 // because webCertFile still names a file the renewal never touches.
+//
+// `targets` names which listeners to move, repeated like every other array the
+// axios interceptor stringifies. Omitting it moves BOTH, which is what this route
+// has always done and what a host running one certificate wants; naming just one is
+// how the panel and the subscription server end up on different certificates.
 func (a *SettingController) sslUseManaged(c *gin.Context) {
-	err := a.sslService.UseManagedCertificate()
+	targets := c.PostFormArray("targets")
+	if len(targets) == 0 {
+		targets = []string{service.SSLAssignTargetPanel, service.SSLAssignTargetSub}
+	}
+	err := a.sslService.Assign(sslProfileParam(c), targets)
 	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.useManaged"), err)
+}
+
+// sslAdopt takes a certificate this host is already serving, but that no profile
+// owns, into the store: the deploy.sh / vpn-ui-menu case.
+//
+// Super-admin like every other mutation here, and for the sharper reason: it writes
+// the file the webserver will load as its own TLS identity, from a path the caller
+// chose. The service refuses a path already inside the store and refuses a pair
+// whose key does not match the leaf before anything is written.
+func (a *SettingController) sslAdopt(c *gin.Context) {
+	res, err := a.sslService.AdoptCertificate(
+		sslProfileParam(c),
+		c.PostForm("certPath"),
+		c.PostForm("keyPath"),
+	)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.adopt"), err)
+		return
+	}
+	jsonObj(c, res, nil)
+}
+
+// sslStopLegacyRenewal removes acme.sh's own cron entry, so the panel's job is the
+// only thing renewing. Deliberately its own button rather than part of adopting:
+// that cron renews every domain in the legacy acme home, including any this panel
+// never adopted.
+func (a *SettingController) sslStopLegacyRenewal(c *gin.Context) {
+	err := service.StopLegacyRenewal()
+	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.stopLegacyRenewal"), err)
+}
+
+// sslDeleteProfile removes a named certificate and everything stored under it. The
+// service refuses while a listener or an inbound still serves it, so this cannot be
+// the step that leaves a setting naming a path that no longer resolves.
+func (a *SettingController) sslDeleteProfile(c *gin.Context) {
+	err := service.DeleteSSLProfile(sslProfileParam(c))
+	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.deleteProfile"), err)
+}
+
+// sslProfileParam reads the certificate name off a request, from either the query
+// (the GET reads) or the form (the POSTs), so every handler resolves it the same
+// way. An absent name is the default certificate; the service validates the rest.
+func sslProfileParam(c *gin.Context) string {
+	if v := strings.TrimSpace(c.Query("profile")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(c.PostForm("profile"))
 }
 
 // sslRollback re-points the active link at a stored version.
@@ -196,6 +257,6 @@ func (a *SettingController) sslRollback(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.rollback"), errors.New("no version was given"))
 		return
 	}
-	err := a.sslService.Rollback(version)
+	err := a.sslService.Rollback(sslProfileParam(c), version)
 	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.rollback"), err)
 }

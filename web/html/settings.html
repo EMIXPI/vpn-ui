@@ -152,6 +152,19 @@
         // operation is in flight server-side.
         busy: false,
         status: null,
+        // Which certificate the page is showing. One host can hold several (the
+        // panel and the subscription server routinely want different names), and
+        // every read and every operation is scoped to this one. Empty is the
+        // default certificate, which is the only one that existed before.
+        profile: '',
+        // Set once the page has landed on a certificate, whether the operator
+        // clicked a card or the first load picked the one actually in use. Nothing
+        // auto-selects after that, so a deliberate choice is never overwritten by a
+        // status refresh that happened to be in flight.
+        profilePicked: false,
+        // The name typed into "add a certificate". Kept out of `form` because it
+        // names the STORE to act on, not the certificate to ask a CA for.
+        newProfile: '',
         form: {
           identifiers: [],
           challenge: 'standalone-domain',
@@ -382,10 +395,24 @@
       // ---------------------------------------------------------------------
       async loadSslStatus() {
         this.ssl.loading = true;
-        const msg = await HttpUtil.get('/panel/setting/ssl/status');
+        const msg = await HttpUtil.get('/panel/setting/ssl/status', { profile: this.ssl.profile });
         this.ssl.loading = false;
         if (!msg || !msg.success || !msg.obj) return;
         this.ssl.status = msg.obj;
+        // Land on a certificate that EXISTS. The default profile is empty on any
+        // host whose certificate arrived by another road (adopted from deploy.sh,
+        // or issued into a named one), and opening the tab on it showed "No
+        // certificate yet" with a perfectly good certificate in the card beside it.
+        // Once only, and never over a selection the operator made themselves.
+        if (!this.ssl.profilePicked && !this.ssl.status.active) {
+          const withCert = (this.ssl.status.profiles || []).filter(p => p.active);
+          const pick = withCert.find(p => p.usedByPanel) || withCert[0];
+          if (pick) {
+            this.ssl.profilePicked = true;
+            await this.sslSelectProfile(pick.name === 'default' ? '' : pick.name);
+            return;
+          }
+        }
         // Seed the form from the certificate already in use, once. Let's Encrypt
         // meters the EXACT set of names, so [a.com] and [a.com, www.a.com] are two
         // separate 5-per-7-days budgets: retyping the set by hand is how an
@@ -426,6 +453,9 @@
           webrootPath: f.webrootPath,
           applyDisruptive: !!f.applyDisruptive,
           cloudflareToken: f.cloudflareToken,
+          // Which certificate to act on. Every operation is scoped to one store,
+          // so an issuance for the subscription name cannot land on the panel's.
+          profile: this.ssl.profile,
         };
       },
       async sslStart(op) {
@@ -511,9 +541,14 @@
         this.ssl.summary = msg.obj.reason || '';
         this.sslApplySteps(msg.obj.steps || []);
       },
-      async sslUseManaged() {
+      // targets is which listeners to point at this certificate. Omitted means
+      // both, which is what a host running a single certificate wants; passing one
+      // is how the panel and the subscription server end up on different ones.
+      async sslUseManaged(targets) {
         this.ssl.busy = true;
-        const msg = await HttpUtil.post('/panel/setting/ssl/use-managed');
+        const body = { profile: this.ssl.profile };
+        if (Array.isArray(targets) && targets.length) body.targets = targets;
+        const msg = await HttpUtil.post('/panel/setting/ssl/use-managed', body);
         this.ssl.busy = false;
         if (!msg || !msg.success) return;
         await this.loadSslStatus();
@@ -521,9 +556,52 @@
         // shows the old path until it is re-read.
         await this.getAllSetting();
       },
+      // Switch the page to another certificate. The issue form is re-seeded from
+      // whatever that one holds, so the identifier list can never carry over from
+      // the certificate that was on screen a moment ago and quietly spend a budget
+      // slot on the wrong set of names.
+      async sslSelectProfile(name) {
+        if (this.ssl.profile === name) return;
+        this.ssl.profilePicked = true;
+        this.ssl.profile = name;
+        this.ssl.form.identifiers = [];
+        this.ssl.challengePicked = false;
+        this.ssl.formSeeded = false;
+        await this.loadSslStatus();
+      },
+      // Adding one only names it. Nothing is written until an issuance lands in it,
+      // so a name typed by mistake costs nothing and disappears on reload.
+      sslAddProfile() {
+        const name = (this.ssl.newProfile || '').trim().toLowerCase();
+        if (!name) return;
+        if (!/^[a-z0-9_-]{1,32}$/.test(name)) {
+          this.$message.warning(this.sslProfileNameRule());
+          return;
+        }
+        this.ssl.newProfile = '';
+        this.sslSelectProfile(name);
+      },
+      async sslDeleteProfile(name) {
+        this.ssl.busy = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/delete-profile', { profile: name });
+        this.ssl.busy = false;
+        if (!msg || !msg.success) return;
+        await this.sslSelectProfile('');
+      },
+      // Every certificate the host holds, always including the one on screen: a
+      // name just added has no directory yet, so the server cannot list it.
+      sslProfiles() {
+        const known = (this.ssl.status && this.ssl.status.profiles) || [];
+        const current = this.ssl.profile || 'default';
+        if (known.some(p => p.name === current)) return known;
+        return known.concat([{ name: current, active: null, usedByPanel: false, usedBySub: false }]);
+      },
+      sslCurrentProfile() {
+        return this.ssl.profile || 'default';
+      },
       async sslRollback(version) {
         this.ssl.busy = true;
-        const msg = await HttpUtil.post('/panel/setting/ssl/rollback', { version: version });
+        const msg = await HttpUtil.post('/panel/setting/ssl/rollback', { version: version, profile: this.ssl.profile });
         this.ssl.busy = false;
         if (msg && msg.success) await this.loadSslStatus();
       },
@@ -639,8 +717,14 @@
       // Whole days, from the nanoseconds the server already computed. Never from
       // notAfter minus now: that would disagree with the server's own renewal
       // decision at exactly the boundary where the operator is looking.
-      sslDaysLeft() {
-        const a = this.ssl.status && this.ssl.status.active;
+      // Every health helper takes an OPTIONAL cert info so one card can ask about
+      // its own certificate rather than the selected one; omitted, they answer for
+      // the selection, which is what the detail section below the cards wants.
+      sslInfoOr(info) {
+        return info || (this.ssl.status && this.ssl.status.active) || null;
+      },
+      sslDaysLeft(info) {
+        const a = this.sslInfoOr(info);
         return a ? Math.floor((a.remainingNanos || 0) / 86400e9) : 0;
       },
       // The server's renewalDue is a fraction of the certificate's own lifetime,
@@ -648,26 +732,100 @@
       // report "not due". A week or less is never a healthy state whatever the
       // lifetime was, so the floor is here rather than in the words alone: the
       // colour and the sentence have to agree.
-      sslHealthUrgent() {
-        const a = this.ssl.status && this.ssl.status.active;
-        return !!a && (a.renewalDue || this.sslDaysLeft() <= 7);
+      sslHealthUrgent(info) {
+        const a = this.sslInfoOr(info);
+        return !!a && (a.renewalDue || this.sslDaysLeft(a) <= 7);
       },
-      sslHealthLevel() {
-        const a = this.ssl.status && this.ssl.status.active;
+      sslHealthLevel(info) {
+        const a = this.sslInfoOr(info);
         if (!a) return '';
         if (a.expired) return 'bad';
-        return this.sslHealthUrgent() ? 'warn' : 'ok';
+        return this.sslHealthUrgent(a) ? 'warn' : 'ok';
       },
       // One plain sentence in days. The old line read "67d2h left", which is a
       // duration an operator has to decode before it means anything.
-      sslHealthText() {
-        const a = this.ssl.status && this.ssl.status.active;
+      // Read through a method, never pasted into a template expression: the
+      // English string carries an apostrophe that Go escapes to &#39;, which
+      // breaks the expression and blanks the entire settings page. See the note at
+      // the top of settings/panel/ssl.html.
+      sslProfileNameRule() {
+        return '{{ i18n "pages.settings.ssl.profileNameRule" }}';
+      },
+      // --- Cards ----------------------------------------------------------
+      // One card per certificate. The heading is the certificate's own primary
+      // name when it has one, because that is what an operator recognises; the
+      // profile slug is a filing detail and only stands in for an empty profile.
+      sslCardTitle(p) {
+        const ids = (p.active && p.active.identifiers) || [];
+        return ids.length ? ids[0] : p.name;
+      },
+      sslCardSubtitle(p) {
+        const ids = (p.active && p.active.identifiers) || [];
+        if (ids.length > 1) {
+          return '{{ i18n "pages.settings.ssl.cardMoreNames" }}'.replace('{n}', ids.length - 1);
+        }
+        if (!p.active) return '{{ i18n "pages.settings.ssl.cardEmpty" }}';
+        return p.name;
+      },
+      // An empty profile has no health to report, so the dot is omitted rather
+      // than drawn in a neutral colour that reads as "fine".
+      sslCardLevel(p) {
+        return p.active ? this.sslHealthLevel(p.active) : '';
+      },
+      sslCardHealth(p) {
+        return p.active ? this.sslHealthText(p.active) : '';
+      },
+      sslCardIssuer(p) {
+        return (p.active && p.active.issuer) || '';
+      },
+      // --- Certificates issued outside the manager --------------------------
+      // deploy.sh and the vpn-ui menu install to their own path and leave
+      // acme.sh's cron renewing it. Adopting copies the material into the store,
+      // carries the renewal state so the panel can renew it, and re-points
+      // whichever listener was on the old path.
+      async sslAdopt(candidate) {
+        this.ssl.busy = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/adopt', {
+          profile: candidate.suggestedName,
+          certPath: candidate.certPath,
+          keyPath: candidate.keyPath,
+        });
+        this.ssl.busy = false;
+        if (!msg || !msg.success) return;
+        const res = msg.obj || {};
+        // Say what actually happened rather than a flat success: whether renewal
+        // came across is the difference between a managed certificate and a
+        // snapshot that will quietly expire.
+        if (res.carriedAcme) {
+          this.$message.success('{{ i18n "pages.settings.ssl.toasts.adoptFull" }}');
+        } else {
+          this.$message.warning('{{ i18n "pages.settings.ssl.toasts.adoptNoRenewal" }}');
+        }
+        await this.sslSelectProfile(res.profile === 'default' ? '' : res.profile);
+        await this.getAllSetting();
+      },
+      async sslStopLegacyRenewal() {
+        this.ssl.busy = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/stop-legacy-renewal');
+        this.ssl.busy = false;
+        if (msg && msg.success) await this.loadSslStatus();
+      },
+      sslAdoptTitle(c) {
+        const ids = (c.info && c.info.identifiers) || [];
+        return ids.length ? ids[0] : c.certPath;
+      },
+      sslDeleteProfileConfirm() {
+        return '{{ i18n "pages.settings.ssl.deleteProfileConfirm" }}'
+          .replace('{name}', this.sslCurrentProfile());
+      },
+      sslHealthText(info) {
+        const a = this.sslInfoOr(info);
         if (!a) return '';
         if (a.expired) return '{{ i18n "pages.settings.ssl.expired" }}';
-        const days = this.sslDaysLeft();
+        const days = this.sslDaysLeft(a);
         if (days <= 0) return '{{ i18n "pages.settings.ssl.healthToday" }}';
         if (days === 1) return '{{ i18n "pages.settings.ssl.healthTomorrow" }}';
-        const text = this.sslHealthUrgent()
+        const text = this.sslHealthUrgent(a)
           ? '{{ i18n "pages.settings.ssl.healthSoon" }}'
           : '{{ i18n "pages.settings.ssl.healthValid" }}';
         return text.replace('{days}', days);

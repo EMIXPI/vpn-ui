@@ -85,6 +85,11 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/ssl/start", requireSuperAdmin(), a.sslStart)
 	g.POST("/ssl/use-managed", requireSuperAdmin(), a.sslUseManaged)
 	g.POST("/ssl/rollback", requireSuperAdmin(), a.sslRollback)
+	// Deleting a certificate takes private keys off disk and can strand a listener,
+	// so it sits on the same super-admin gate as everything else that mutates here.
+	g.POST("/ssl/delete-profile", requireSuperAdmin(), a.sslDeleteProfile)
+	g.POST("/ssl/adopt", requireSuperAdmin(), a.sslAdopt)
+	g.POST("/ssl/stop-legacy-renewal", requireSuperAdmin(), a.sslStopLegacyRenewal)
 }
 
 // serviceStatus returns the current systemd unit state for the panel.

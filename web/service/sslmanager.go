@@ -27,6 +27,20 @@ type SSLService struct{}
 
 // SSLStatus is one call that answers everything the settings page needs to render.
 type SSLStatus struct {
+	// Profile is the certificate this status is about, and Profiles is every one
+	// that exists, so the page can render every card and the selected certificate
+	// from a single call.
+	Profile  string              `json:"profile"`
+	Profiles []SSLProfileSummary `json:"profiles"`
+
+	// Adoptable are certificates this host is serving that no profile owns yet,
+	// which on a box deployed through deploy.sh is the normal starting state.
+	Adoptable []SSLAdoptable `json:"adoptable"`
+
+	// LegacyRenewal reports acme.sh's own cron still being installed, i.e. a second
+	// scheduler renewing into a path the store does not own.
+	LegacyRenewal bool `json:"legacyRenewal"`
+
 	StoreRoot string `json:"storeRoot"`
 	AcmeHome  string `json:"acmeHome"`
 
@@ -40,9 +54,12 @@ type SSLStatus struct {
 	// is managed yet.
 	Active *SSLCertInfo `json:"active,omitempty"`
 
-	// UsedByPanel reports whether the panel's own listener is pointed at the
-	// managed path. False means a renewal will change nothing for the panel.
+	// UsedByPanel / UsedBySub report whether each listener is pointed at THIS
+	// profile's managed path. Both false means a renewal of it changes nothing for
+	// either, which is legitimate (an inbound may be its only consumer) but is the
+	// first thing to check when a renewal appears to have done nothing.
 	UsedByPanel bool          `json:"usedByPanel"`
+	UsedBySub   bool          `json:"usedBySub"`
 	Consumers   []SSLConsumer `json:"consumers"`
 
 	// Running is the in-flight operation, if any. While it is non-nil the UI
@@ -70,17 +87,24 @@ type SSLRunningOp struct {
 // into the result rather than returned, because a settings page that renders
 // nothing because one inbound has malformed JSON is worse than one that renders
 // most of the truth.
-func (s *SSLService) Status() (*SSLStatus, error) {
-	root := DefaultSSLStoreRoot()
+func (s *SSLService) Status(profile string) (*SSLStatus, error) {
+	profile, root, err := sslResolveProfile(profile)
+	if err != nil {
+		return nil, err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return nil, err
 	}
 	st := &SSLStatus{
-		StoreRoot: root,
-		AcmeHome:  SSLAcmeHome(root),
-		CertPath:  store.ActiveCertPath(),
-		KeyPath:   store.ActiveKeyPath(),
+		Profile:       profile,
+		Profiles:      ListSSLProfiles(),
+		Adoptable:     DetectAdoptableCertificates(),
+		LegacyRenewal: SSLLegacyRenewalInstalled(),
+		StoreRoot:     root,
+		AcmeHome:      SSLAcmeHome(root),
+		CertPath:      store.ActiveCertPath(),
+		KeyPath:       store.ActiveKeyPath(),
 	}
 
 	if store.HasActive() {
@@ -94,7 +118,10 @@ func (s *SSLService) Status() (*SSLStatus, error) {
 
 	var ss SettingService
 	if p, err := ss.GetCertFile(); err == nil {
-		st.UsedByPanel = filepath.Clean(p) == filepath.Clean(st.CertPath)
+		st.UsedByPanel = samePath(p, st.CertPath)
+	}
+	if p, err := ss.GetSubCertFile(); err == nil {
+		st.UsedBySub = samePath(p, st.CertPath)
 	}
 	if consumers, err := ListSSLConsumers(st.CertPath); err == nil {
 		st.Consumers = consumers
@@ -119,8 +146,11 @@ func (s *SSLService) Status() (*SSLStatus, error) {
 
 // Preflight runs every local check and returns the verdict WITHOUT contacting any
 // CA. Safe to call as often as the UI likes; that is the point of it.
-func (s *SSLService) Preflight(req SSLPreflightRequest) (SSLPreflightResult, error) {
-	root := DefaultSSLStoreRoot()
+func (s *SSLService) Preflight(profile string, req SSLPreflightRequest) (SSLPreflightResult, error) {
+	_, root, err := sslResolveProfile(profile)
+	if err != nil {
+		return SSLPreflightResult{}, err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return SSLPreflightResult{}, err
@@ -139,8 +169,11 @@ func (s *SSLService) Preflight(req SSLPreflightRequest) (SSLPreflightResult, err
 // Consumers lists everything pointed at the managed certificate path, so the UI
 // can show which protocols would drop connections BEFORE the operator agrees to a
 // disruptive apply.
-func (s *SSLService) Consumers() ([]SSLConsumer, error) {
-	root := DefaultSSLStoreRoot()
+func (s *SSLService) Consumers(profile string) ([]SSLConsumer, error) {
+	_, root, err := sslResolveProfile(profile)
+	if err != nil {
+		return nil, err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return nil, err
@@ -148,39 +181,93 @@ func (s *SSLService) Consumers() ([]SSLConsumer, error) {
 	return ListSSLConsumers(store.ActiveCertPath())
 }
 
-// UseManagedCertificate points the panel and subscription listeners at the store's
-// stable paths. Idempotent, and worth doing exactly once: after this, no renewal
-// ever needs a setting changed again.
+// sslResolveProfile is the one place a name coming off the wire turns into a store
+// root, so every entry point validates it identically.
+func sslResolveProfile(name string) (string, string, error) {
+	name, err := NormalizeSSLProfile(name)
+	if err != nil {
+		return "", "", err
+	}
+	root, err := SSLProfileRoot(name)
+	if err != nil {
+		return "", "", err
+	}
+	return name, root, nil
+}
+
+// UseManagedCertificate points BOTH listeners at a profile's stable paths. Kept as
+// the one-click path for the common case where one certificate covers the whole
+// host; Assign is what splits them.
+func (s *SSLService) UseManagedCertificate(profile string) error {
+	return s.Assign(profile, []string{SSLAssignTargetPanel, SSLAssignTargetSub})
+}
+
+// Assign points the named listeners at a profile's stable paths, and leaves every
+// listener not named alone. This is what lets the panel and the subscription server
+// hold different certificates: assign one profile to "panel" and another to
+// "subscription", and each keeps its own identity through every later renewal,
+// because both settings name a stable path that never changes again.
 //
-// Refuses when nothing is active, because writing paths that do not resolve is
-// precisely how web.go:541-556 ends up silently serving plain HTTP after the next
-// restart.
-func (s *SSLService) UseManagedCertificate() error {
-	root := DefaultSSLStoreRoot()
+// Refuses when the profile holds nothing usable, because writing paths that do not
+// resolve is precisely how web.go:541-556 ends up silently serving plain HTTP after
+// the next restart. That check is the reason this cannot be a plain setting write.
+func (s *SSLService) Assign(profile string, targets []string) error {
+	_, root, err := sslResolveProfile(profile)
+	if err != nil {
+		return err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return err
 	}
 	if _, err := sslValidatePair(store.ActiveCertPath(), store.ActiveKeyPath()); err != nil {
-		return fmt.Errorf("the managed certificate is not usable yet (%w). Issue one first", err)
+		return fmt.Errorf("that certificate is not usable yet (%w). Issue one first", err)
 	}
+
+	var panel, sub bool
+	for _, t := range targets {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case SSLAssignTargetPanel:
+			panel = true
+		case SSLAssignTargetSub:
+			sub = true
+		case "":
+		default:
+			return fmt.Errorf("%q is not something a certificate can be assigned to", t)
+		}
+	}
+	if !panel && !sub {
+		return fmt.Errorf("pick at least one of the panel or the subscription server")
+	}
+
 	var ss SettingService
-	if err := ss.SetCertFile(store.ActiveCertPath()); err != nil {
-		return err
+	if panel {
+		if err := ss.SetCertFile(store.ActiveCertPath()); err != nil {
+			return err
+		}
+		if err := ss.SetKeyFile(store.ActiveKeyPath()); err != nil {
+			return err
+		}
 	}
-	if err := ss.SetKeyFile(store.ActiveKeyPath()); err != nil {
-		return err
+	if sub {
+		if err := ss.SetSubCertFile(store.ActiveCertPath()); err != nil {
+			return err
+		}
+		if err := ss.SetSubKeyFile(store.ActiveKeyPath()); err != nil {
+			return err
+		}
 	}
-	if err := ss.SetSubCertFile(store.ActiveCertPath()); err != nil {
-		return err
-	}
-	return ss.SetSubKeyFile(store.ActiveKeyPath())
+	return nil
 }
 
-// Rollback re-points the active link at a stored version. The version has to
-// revalidate, so a rollback cannot be the thing that breaks TLS either.
-func (s *SSLService) Rollback(version string) error {
-	root := DefaultSSLStoreRoot()
+// Rollback re-points a profile's active link at one of its stored versions. The
+// version has to revalidate, so a rollback cannot be the thing that breaks TLS
+// either.
+func (s *SSLService) Rollback(profile, version string) error {
+	_, root, err := sslResolveProfile(profile)
+	if err != nil {
+		return err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return err
@@ -206,6 +293,10 @@ func (s *SSLService) Rollback(version string) error {
 type SSLOperationRequest struct {
 	SSLIssueRequest
 	FanOut SSLFanOutOptions `json:"fanOut"`
+
+	// Profile names the certificate this operation acts on. Empty is the default
+	// one, which is what every caller predating named certificates means.
+	Profile string `json:"profile"`
 }
 
 // sslRun holds the single in-progress or most-recent run, so the settings page can
@@ -249,7 +340,13 @@ func (s *SSLService) RunState() SSLRunState {
 // going. Every operation here either costs metered CA budget or restarts a daemon,
 // so a second one the operator did not knowingly start is never the right answer.
 func (s *SSLService) Start(req SSLOperationRequest) error {
-	root := DefaultSSLStoreRoot()
+	// Each profile is a separate store with its own acme home, ledger and lock, so
+	// the refusal below is per certificate: issuing for the subscription name does
+	// not block a renewal of the panel's.
+	_, root, err := sslResolveProfile(req.Profile)
+	if err != nil {
+		return err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return err
@@ -581,8 +678,30 @@ func sslLastErrorLine(out string) string {
 // acme.sh's own cron: acme.sh's `--install` cron would be a SECOND scheduler, and
 // two --standalone runs racing for port 80 fail validation, which costs the
 // hourly budget. One scheduler, and it is this one.
-func (s *SSLService) RenewIfDue() error {
-	root := DefaultSSLStoreRoot()
+// RenewAllDue renews every certificate that is due, one profile at a time.
+//
+// Sequential on purpose: two --standalone runs racing for port 80 both fail
+// validation and both spend budget, which is the exact failure the single-scheduler
+// rule above exists to avoid. A profile that errors does not stop the others, since
+// one misconfigured certificate must not park the renewal of the panel's own.
+func (s *SSLService) RenewAllDue() error {
+	var firstErr error
+	for _, p := range ListSSLProfiles() {
+		if err := s.RenewIfDue(p.Name); err != nil {
+			logger.Warning("ssl: renewing certificate ", p.Name, ": ", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+func (s *SSLService) RenewIfDue(profile string) error {
+	profileName, root, err := sslResolveProfile(profile)
+	if err != nil {
+		return err
+	}
 	store, err := OpenSSLStore(root)
 	if err != nil {
 		return err
@@ -615,7 +734,7 @@ func (s *SSLService) RenewIfDue() error {
 		Identifiers: info.Identifiers,
 		Challenge:   challenge,
 		Op:          SSLOpRenew,
-	}}
+	}, Profile: profileName}
 
 	// Check BEFORE starting, so a scheduled renewal that is going to be refused
 	// stays silent instead of clobbering the run log.
@@ -626,7 +745,7 @@ func (s *SSLService) RenewIfDue() error {
 	// block from a timer they never triggered, replacing the output they were
 	// reading. This belongs here rather than in the job: the job cannot know which
 	// refusals are routine, and every caller of RenewIfDue wants the same silence.
-	pre, err := s.Preflight(req.PreflightRequest())
+	pre, err := s.Preflight(profileName, req.PreflightRequest())
 	if err != nil {
 		return err
 	}

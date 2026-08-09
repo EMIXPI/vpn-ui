@@ -138,5 +138,7 @@ func (j *CheckSSLRenewJob) renewIfDue() error {
 	if j.renew != nil {
 		return j.renew()
 	}
-	return j.sslService.RenewIfDue()
+	// Every named certificate, not just the default one: a subscription certificate
+	// nobody renews expires exactly as quietly as the panel's would.
+	return j.sslService.RenewAllDue()
 }

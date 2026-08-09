@@ -23,69 +23,160 @@
 -->
 
 <!-- ====================================================================
-     1. THE THREE QUESTIONS.
+     1. THE CERTIFICATES, one card each.
+
+     A host routinely holds more than one: the panel is reached on an admin
+     name and subscriptions are handed to customers on a public one, and
+     putting both in one SAN list publishes the panel's hostname to
+     Certificate Transparency. So the page leads with the inventory, not with
+     a single certificate's detail.
+
+     A card answers, at a glance and in this order: which name, is it healthy,
+     who is serving it. Selecting one scopes every action and every panel
+     below to that certificate.
+     ==================================================================== -->
+<div class="ssl-cards" v-if="ssl.status">
+
+    <!-- Managed certificates. -->
+    <div v-for="p in sslProfiles()" :key="'p-' + p.name"
+        class="ssl-card"
+        :class="{ 'ssl-card-on': p.name === sslCurrentProfile(), 'ssl-card-empty': !p.active }"
+        role="button" tabindex="0"
+        @click="sslSelectProfile(p.name === 'default' ? '' : p.name)"
+        @keyup.enter="sslSelectProfile(p.name === 'default' ? '' : p.name)">
+
+        <div class="ssl-card-top">
+            <span class="ssl-card-name" :title="sslCardTitle(p)">[[ sslCardTitle(p) ]]</span>
+            <span v-if="sslCardLevel(p)" class="ssl-card-dot"
+                :class="'ssl-health-' + sslCardLevel(p)"></span>
+        </div>
+
+        <div class="ssl-card-sub">[[ sslCardSubtitle(p) ]]</div>
+
+        <div class="ssl-card-tags">
+            <a-tag v-if="p.usedByPanel" color="blue">{{ i18n "pages.settings.ssl.tagPanel" }}</a-tag>
+            <a-tag v-if="p.usedBySub" color="purple">{{ i18n "pages.settings.ssl.tagSub" }}</a-tag>
+            <a-tag v-if="p.active && p.active.staging" color="red">{{ i18n "pages.settings.ssl.stagingTag" }}</a-tag>
+            <a-tag v-if="p.active && p.active.selfSigned" color="orange">{{ i18n "pages.settings.ssl.selfSigned" }}</a-tag>
+            <a-tag v-if="p.active && !p.active.keyMatchesLeaf" color="red">{{ i18n "pages.settings.ssl.keyMismatch" }}</a-tag>
+        </div>
+
+        <div class="ssl-card-foot" :class="'ssl-health-' + sslCardLevel(p)">
+            [[ sslCardHealth(p) || '{{ i18n "pages.settings.ssl.cardNothingYet" }}' ]]
+        </div>
+    </div>
+
+    <!-- Certificates this host already serves that no profile owns: the state a
+         box deployed through deploy.sh starts in. Offered rather than adopted
+         automatically, because adopting re-points a live listener. -->
+    <div v-for="c in (ssl.status.adoptable || [])" :key="'a-' + c.certPath"
+        class="ssl-card ssl-card-adopt">
+        <div class="ssl-card-top">
+            <span class="ssl-card-name" :title="c.certPath">[[ sslAdoptTitle(c) ]]</span>
+            <a-tag color="gold">{{ i18n "pages.settings.ssl.tagUnmanaged" }}</a-tag>
+        </div>
+        <div class="ssl-card-sub">[[ c.source ]]</div>
+        <div class="ssl-card-tags">
+            <a-tag v-if="c.usedByPanel" color="blue">{{ i18n "pages.settings.ssl.tagPanel" }}</a-tag>
+            <a-tag v-if="c.usedBySub" color="purple">{{ i18n "pages.settings.ssl.tagSub" }}</a-tag>
+        </div>
+        <div class="ssl-card-foot">[[ sslHealthText(c.info) ]]</div>
+        <!-- Whether renewal comes across is the whole difference between adopting
+             a certificate and adopting a snapshot that expires quietly, so it is
+             said on the card and not only in the toast afterwards. -->
+        <div class="ssl-card-note" v-if="!c.hasAcmeState">
+            {{ i18n "pages.settings.ssl.adoptNoStateNote" }}
+        </div>
+        <a-button type="primary" size="small" :loading="ssl.busy"
+            :style="{ marginTop: '10px' }" @click.stop="sslAdopt(c)">
+            <a-icon type="import"></a-icon>{{ i18n "pages.settings.ssl.adopt" }}
+        </a-button>
+    </div>
+
+    <!-- Add. A name only; nothing is written until an issuance lands in it. -->
+    <div class="ssl-card ssl-card-new">
+        <div class="ssl-card-top">
+            <span class="ssl-card-name">{{ i18n "pages.settings.ssl.addProfile" }}</span>
+        </div>
+        <div class="ssl-card-sub">{{ i18n "pages.settings.ssl.addProfileDesc" }}</div>
+        <a-input-group compact :style="{ marginTop: '10px' }">
+            <a-input :style="{ width: '62%' }" size="small"
+                v-model.trim="ssl.newProfile"
+                :placeholder="sslProfileNameRule()"
+                @pressEnter="sslAddProfile"></a-input>
+            <a-button size="small" type="primary" @click="sslAddProfile">
+                <a-icon type="plus"></a-icon>
+            </a-button>
+        </a-input-group>
+    </div>
+</div>
+
+<!-- Two schedulers. acme.sh's own cron renews into the path the shell flow
+     installed, which after adoption is not the path anything reads. Its own
+     button, never folded into adopting: that one cron renews EVERY domain in the
+     legacy acme home, including any this panel never took over. -->
+<a-alert v-if="ssl.status && ssl.status.legacyRenewal" type="warning" show-icon class="ssl-alert"
+    message='{{ i18n "pages.settings.ssl.legacyRenewalTitle" }}'>
+    <template slot="description">
+        <div>{{ i18n "pages.settings.ssl.legacyRenewalDesc" }}</div>
+        <a-popconfirm placement="topLeft" :overlay-class-name="themeSwitcher.currentTheme"
+            title='{{ i18n "pages.settings.ssl.legacyRenewalConfirm" }}'
+            ok-text='{{ i18n "sure" }}' cancel-text='{{ i18n "cancel" }}'
+            @confirm="sslStopLegacyRenewal">
+            <a-button size="small" :loading="ssl.busy" class="ssl-alert-btn">
+                <a-icon type="stop"></a-icon>{{ i18n "pages.settings.ssl.legacyRenewalStop" }}
+            </a-button>
+        </a-popconfirm>
+    </template>
+</a-alert>
+
+<!-- ====================================================================
+     2. THE SELECTED CERTIFICATE: what it covers, who is serving it, and the
+        two actions that do not contact a CA. Issuing is not here; it is the
+        last row of the form below, behind a confirmation.
      ==================================================================== -->
 <div class="ssl-hero" v-if="ssl.status">
-
-    <!-- Nothing managed yet. The form below opens by itself in this state, so
-         this says what is missing and then gets out of the way. -->
     <template v-if="!ssl.status.active">
         <div class="ssl-hero-title">{{ i18n "pages.settings.ssl.noneTitle" }}</div>
         <div class="ssl-hero-sub">{{ i18n "pages.settings.ssl.noneDesc" }}</div>
     </template>
 
     <template v-else>
-        <!-- Q1: what have I got. The primary name large, the rest quiet beneath
-             it: the set matters (it is what the budget meters), the individual
-             extra names rarely do. -->
         <div class="ssl-hero-title">[[ sslPrimaryName() ]]</div>
         <div class="ssl-hero-sub" v-if="sslOtherNames()">[[ sslOtherNames() ]]</div>
 
-        <!-- Q2: is it healthy. One sentence in days, not a timestamp to subtract
-             from today. Colour is the second channel and never the only one. -->
         <div class="ssl-health" :class="'ssl-health-' + sslHealthLevel()">
             <span class="ssl-health-dot"></span>[[ sslHealthText() ]]
         </div>
 
-        <!-- The three states that change what the certificate is actually worth.
-             Rare, so they cost nothing when they are absent, and each one is the
-             difference between a working TLS handshake and a browser error. -->
-        <div class="ssl-flags"
-            v-if="ssl.status.active.staging || ssl.status.active.selfSigned || !ssl.status.active.keyMatchesLeaf">
-            <a-tag v-if="ssl.status.active.staging" color="red">{{ i18n "pages.settings.ssl.stagingTag" }}</a-tag>
-            <a-tag v-if="ssl.status.active.selfSigned" color="orange">{{ i18n "pages.settings.ssl.selfSigned" }}</a-tag>
-            <a-tag v-if="!ssl.status.active.keyMatchesLeaf" color="red">{{ i18n "pages.settings.ssl.keyMismatch" }}</a-tag>
-        </div>
-
-        <!-- Q3, and the single most confusing state this feature can be in: the
-             certificate renews perfectly and the panel keeps serving something
-             else, because webCertFile still names a file no renewal touches.
-             Loud, and it carries its own one-click fix. -->
-        <div v-if="ssl.status.usedByPanel" class="ssl-inuse">
-            <a-icon type="check-circle"></a-icon>
-            <span>{{ i18n "pages.settings.ssl.usedByPanel" }}</span>
-        </div>
-        <a-alert v-else type="warning" show-icon class="ssl-alert"
-            message='{{ i18n "pages.settings.ssl.notUsedTitle" }}'>
-            <template slot="description">
-                <div>{{ i18n "pages.settings.ssl.notUsedDesc" }}</div>
-                <a-button type="primary" size="small" :loading="ssl.busy" class="ssl-alert-btn"
-                    @click="sslUseManaged">
-                    <a-icon type="link"></a-icon>{{ i18n "pages.settings.ssl.useManaged" }}
+        <!-- Which listener serves this certificate, and the one-click fix for
+             each. Separately, because they are different servers on different
+             ports handed to different people: "the panel is covered" says
+             nothing about the subscription server. -->
+        <div class="ssl-assign">
+            <div class="ssl-assign-row">
+                <a-icon :type="ssl.status.usedByPanel ? 'check-circle' : 'minus-circle'"
+                    :class="ssl.status.usedByPanel ? 'ssl-assign-on' : 'ssl-assign-off'"></a-icon>
+                <span>{{ i18n "pages.settings.ssl.tagPanel" }}</span>
+                <a-button v-if="!ssl.status.usedByPanel" size="small" type="primary"
+                    :loading="ssl.busy" @click="sslUseManaged(['panel'])">
+                    {{ i18n "pages.settings.ssl.useManaged" }}
                 </a-button>
-            </template>
-        </a-alert>
+            </div>
+            <div class="ssl-assign-row">
+                <a-icon :type="ssl.status.usedBySub ? 'check-circle' : 'minus-circle'"
+                    :class="ssl.status.usedBySub ? 'ssl-assign-on' : 'ssl-assign-off'"></a-icon>
+                <span>{{ i18n "pages.settings.ssl.tagSub" }}</span>
+                <a-button v-if="!ssl.status.usedBySub" size="small"
+                    :loading="ssl.busy" @click="sslUseManaged(['subscription'])">
+                    {{ i18n "pages.settings.ssl.useForSub" }}
+                </a-button>
+            </div>
+        </div>
 
-        <!-- ============================================================
-             2. THE ACTION HIERARCHY, and it is not three equal buttons.
-
-             Re-apply is primary and first: it runs install plus fan-out only,
-             never contacts a CA, costs no budget and cannot fail a rate limit,
-             and it fixes the common case (a service holding a stale copy).
-             Renew is next, exempt from the limits. Issuing is neither of these,
-             so it does not live up here at all: it is the last row of the form
-             below, behind a confirmation that states what is left.
-             ============================================================ -->
+        <!-- Re-apply is primary and first: install plus fan-out only, no CA, no
+             budget, no rate limit, and it fixes the common case of a service
+             holding a stale copy. Renew is next, exempt from the limits. -->
         <div class="ssl-actions">
             <div class="ssl-action">
                 <a-button type="primary" :loading="ssl.running && ssl.op === 'reapply'"
@@ -101,6 +192,18 @@
                     <a-icon type="reload"></a-icon>{{ i18n "pages.settings.ssl.renew" }}
                 </a-button>
                 <span class="ssl-action-note">{{ i18n "pages.settings.ssl.renewDesc" }}</span>
+            </div>
+
+            <div class="ssl-action" v-if="sslCurrentProfile() !== 'default'">
+                <a-popconfirm placement="topLeft" :overlay-class-name="themeSwitcher.currentTheme"
+                    :title="sslDeleteProfileConfirm()"
+                    ok-text='{{ i18n "sure" }}' cancel-text='{{ i18n "cancel" }}'
+                    @confirm="sslDeleteProfile(sslCurrentProfile())">
+                    <a-button type="danger" ghost :loading="ssl.busy">
+                        <a-icon type="delete"></a-icon>{{ i18n "pages.settings.ssl.deleteProfile" }}
+                    </a-button>
+                </a-popconfirm>
+                <span class="ssl-action-note">{{ i18n "pages.settings.ssl.deleteProfileDesc" }}</span>
             </div>
         </div>
     </template>
