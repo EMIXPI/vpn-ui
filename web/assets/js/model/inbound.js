@@ -4011,7 +4011,7 @@ Inbound.L2tpSettings = class extends Inbound.Settings {
     dns1 = "8.8.8.8",
     dns2 = "8.8.4.4",
     mtu = 1400,
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
     l2tpUsers = [new Inbound.L2tpSettings.L2tpUser()],
     externalProxy = [],
@@ -4200,7 +4200,7 @@ Inbound.PptpSettings = class extends Inbound.Settings {
     dns1 = "8.8.8.8",
     dns2 = "8.8.4.4",
     mtu = 1400,
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
     pptpUsers = [new Inbound.PptpSettings.PptpUser()],
     externalProxy = [],
@@ -4392,7 +4392,7 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
     separatePorts = false,
     tlsUseFile = false,
@@ -4706,7 +4706,7 @@ Inbound.OcservSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
   ) {
     super(protocol);
@@ -4911,7 +4911,7 @@ Inbound.SstpSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
   ) {
     super(protocol);
@@ -5121,7 +5121,7 @@ Inbound.Ikev2Settings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
   ) {
     super(protocol);
@@ -5338,7 +5338,7 @@ Inbound.WgcSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
     externalProxy = [],
   ) {
@@ -5575,7 +5575,7 @@ Inbound.AwgSettings = class extends Inbound.Settings {
     // maximum (64), which under that rule would mint 64 keypairs and render 64 configs
     // for every account, and would fit only ~3 accounts per /24. Raise it to the number
     // of devices the account should actually run.
-    userLimit = 1,
+    userLimit = 0,
     userLimitStrategy = "accept",
     externalProxy = [],
   ) {
@@ -5840,7 +5840,7 @@ Inbound.GreSettings = class extends Inbound.Settings {
     // K consecutive inner addresses (one per peer). The cap is structural: only K
     // addresses exist, so there is nothing to enforce at connect time. GRE has no session
     // and no auth event, so a runtime limit could not be enforced anyway.
-    userLimit = 1,
+    userLimit = 0,
     // Kept for parity with the shared form; GRE enforces K structurally, so there is no
     // "evict the oldest" admission decision to make.
     userLimitStrategy = "accept",
@@ -6728,7 +6728,7 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
         noKernelTun = false,
         wgClients = [],
         clientNetwork = '10.10.0.0/24',
-        userLimit = 1,
+        userLimit = 0,
     ) {
         super(protocol);
         this.mtu = mtu;

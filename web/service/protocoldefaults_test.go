@@ -42,7 +42,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
   "mtu": 1400,
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept",
   "clients": [],
   "externalProxy": []
@@ -55,7 +55,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
   "mtu": 1400,
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept",
   "clients": [],
   "externalProxy": []
@@ -95,7 +95,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept"
 }`,
 
@@ -114,7 +114,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept"
 }`,
 
@@ -133,7 +133,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept"
 }`,
 
@@ -156,7 +156,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept"
 }`,
 
@@ -171,7 +171,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept",
   "externalProxy": []
 }`,
@@ -196,7 +196,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept",
   "externalProxy": []
 }`,
@@ -213,7 +213,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 1,
+  "userLimit": 0,
   "userLimitStrategy": "accept"
 }`,
 
@@ -347,7 +347,9 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Dns1 != "8.8.8.8" || s.Dns2 != "8.8.4.4" || s.Mtu != 1400 {
 			t.Errorf("dns/mtu: %q %q %d", s.Dns1, s.Dns2, s.Mtu)
 		}
-		if effectiveUserLimit(s.UserLimit) != 1 || s.UserLimitStrategy != "accept" {
+		// An EXPLICIT 0 (no limit), not an absent field: absent would resolve to a
+		// single device, which is the opposite reading.
+		if s.UserLimit == nil || *s.UserLimit != 0 || s.UserLimitStrategy != "accept" {
 			t.Errorf("user limit: %v %q", s.UserLimit, s.UserLimitStrategy)
 		}
 	})
@@ -358,7 +360,9 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Dns1 != "8.8.8.8" || s.Dns2 != "8.8.4.4" || s.Mtu != 1400 {
 			t.Errorf("dns/mtu: %q %q %d", s.Dns1, s.Dns2, s.Mtu)
 		}
-		if effectiveUserLimit(s.UserLimit) != 1 || s.UserLimitStrategy != "accept" {
+		// An EXPLICIT 0 (no limit), not an absent field: absent would resolve to a
+		// single device, which is the opposite reading.
+		if s.UserLimit == nil || *s.UserLimit != 0 || s.UserLimitStrategy != "accept" {
 			t.Errorf("user limit: %v %q", s.UserLimit, s.UserLimitStrategy)
 		}
 	})
@@ -386,7 +390,9 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Dns1 != "8.8.8.8" || s.Mtu != 1420 || s.TlsUseFile {
 			t.Errorf("dns/mtu/tls: %q %d %v", s.Dns1, s.Mtu, s.TlsUseFile)
 		}
-		if effectiveUserLimit(s.UserLimit) != 1 || s.UserLimitStrategy != "accept" {
+		// An EXPLICIT 0 (no limit), not an absent field: absent would resolve to a
+		// single device, which is the opposite reading.
+		if s.UserLimit == nil || *s.UserLimit != 0 || s.UserLimitStrategy != "accept" {
 			t.Errorf("user limit: %v %q", s.UserLimit, s.UserLimitStrategy)
 		}
 	})
@@ -792,7 +798,7 @@ func TestAddInboundFillsDefaultsForAMinimalBody(t *testing.T) {
 	if !stored.IpsecEnable || len(stored.IpsecPsk) != 16 {
 		t.Errorf("ipsec was not defaulted: enable=%v psk=%q", stored.IpsecEnable, stored.IpsecPsk)
 	}
-	if effectiveUserLimit(stored.UserLimit) != 1 || stored.UserLimitStrategy != "accept" {
+	if stored.UserLimit == nil || *stored.UserLimit != 0 || stored.UserLimitStrategy != "accept" {
 		t.Errorf("user limit was not defaulted: %v %q", stored.UserLimit, stored.UserLimitStrategy)
 	}
 	if len(stored.Clients) != 1 || stored.Clients[0].ID != "bob" {

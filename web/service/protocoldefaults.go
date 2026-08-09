@@ -87,7 +87,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
 			def("mtu", 1400),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 			def("clients", noClients()),
 			def("externalProxy", emptyList()),
@@ -102,7 +102,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
 			def("mtu", 1400),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 			def("clients", noClients()),
 			def("externalProxy", emptyList()),
@@ -155,7 +155,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -176,7 +176,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -199,7 +199,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -227,7 +227,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -248,7 +248,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 			def("externalProxy", emptyList()),
 		}
@@ -277,7 +277,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 			def("externalProxy", emptyList()),
 		}
@@ -302,7 +302,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 1),
+			def("userLimit", 0),
 			def("userLimitStrategy", "accept"),
 		}
 
