@@ -135,3 +135,47 @@ func TestEncodeURIComponentGoMatchesJS(t *testing.T) {
 		}
 	}
 }
+
+// The inbound-level External Proxy is the default for accounts that name none of
+// their own, so an account with an empty list gets the inbound's endpoints rather
+// than the panel host.
+func TestGenMtprotoLinkFallsBackToTheInboundExternalProxy(t *testing.T) {
+	s := &SubService{address: "panel.host"}
+	const secret = "3333333333333333333333333333333a"
+	inbound := mtprotoInbound(443,
+		`"modeClassic":true,"externalProxy":[{"dest":"relay.example","port":8443}],`,
+		`{"email":"u","secret":"`+secret+`"}`)
+	got := s.genMtprotoLink(inbound, "u")
+	want := "tg://proxy?server=relay.example&port=8443&secret=" + secret
+	if got != want {
+		t.Fatalf("the inbound's endpoint was not used for an account with none:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// And the account's own list REPLACES the inbound's rather than adding to it: both
+// answer "where do this account's links point", so a merge would keep handing out the
+// endpoint the operator overrode.
+func TestGenMtprotoLinkClientExternalProxyOverridesTheInbound(t *testing.T) {
+	s := &SubService{address: "panel.host"}
+	const secret = "444444444444444444444444444444ab"
+	inbound := mtprotoInbound(443,
+		`"modeClassic":true,"externalProxy":[{"dest":"shared.example","port":8443}],`,
+		`{"email":"u","secret":"`+secret+`","externalProxy":[{"dest":"mine.example","port":9443}]}`)
+	got := s.genMtprotoLink(inbound, "u")
+	want := "tg://proxy?server=mine.example&port=9443&secret=" + secret
+	if got != want {
+		t.Fatalf("the account's own endpoint did not win:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// With neither list set nothing changes: the panel's own address stands.
+func TestGenMtprotoLinkNoExternalProxyUsesPanelHost(t *testing.T) {
+	s := &SubService{address: "panel.host"}
+	const secret = "55555555555555555555555555555abc"
+	inbound := mtprotoInbound(443, `"modeClassic":true,`, `{"email":"u","secret":"`+secret+`"}`)
+	got := s.genMtprotoLink(inbound, "u")
+	want := "tg://proxy?server=panel.host&port=443&secret=" + secret
+	if got != want {
+		t.Fatalf("panel-host fallback mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}

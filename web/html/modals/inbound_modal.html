@@ -272,6 +272,29 @@
                     inModal.inbound.settings.externalProxy = [];
                 }
             },
+            // MTProto's inbound-level list, which is the DEFAULT for its accounts: an
+            // account carrying its own External Proxy (set in the client form) replaces
+            // this one for that account. Same storage shape as the others, so the same
+            // getter/setter pair, kept separate for the comment.
+            get mtprotoExternalProxy() {
+                return (
+                    Array.isArray(inModal.inbound.settings.externalProxy) &&
+                    inModal.inbound.settings.externalProxy.length > 0
+                );
+            },
+            set mtprotoExternalProxy(value) {
+                if (value) {
+                    inModal.inbound.settings.externalProxy = [
+                        {
+                            dest: window.location.hostname,
+                            port: inModal.inbound.port,
+                            remark: "",
+                        },
+                    ];
+                } else {
+                    inModal.inbound.settings.externalProxy = [];
+                }
+            },
         },
         computed: {
             // form/client is shared with the client modal, and it reads these two

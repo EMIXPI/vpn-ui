@@ -163,7 +163,7 @@ func TestMtprotoApiAddKeepsLegacyShapeValues(t *testing.T) {
 // every add the panel makes, and a rewrite here would reorder keys on every inbound
 // anyone creates.
 func TestMtprotoApiAddLeavesTheCurrentShapeAlone(t *testing.T) {
-	const body = `{"modeClassic":false,"modeSecure":true,"modeTls":false,"tlsDomain":"a.example","userLimit":2,"clients":[]}`
+	const body = `{"modeClassic":false,"modeSecure":true,"modeTls":false,"tlsDomain":"a.example","userLimit":2,"clients":[],"externalProxy":[]}`
 	inbound := mtprotoInboundFrom(body)
 	if err := NormalizeInboundSettings(inbound); err != nil {
 		t.Fatalf("NormalizeInboundSettings: %v", err)

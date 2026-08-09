@@ -328,6 +328,9 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("tlsDomain", "www.google.com"),
 			def("userLimit", 0),
 			def("clients", noClients()),
+			// The inbound-wide link endpoints, overridden per account by the client's
+			// own externalProxy.
+			def("externalProxy", emptyList()),
 		}
 
 	case model.SSH:

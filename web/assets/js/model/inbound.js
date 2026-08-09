@@ -6106,6 +6106,7 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
     tlsDomain = "www.google.com",
     userLimit = 0,
     mtprotoUsers = [new Inbound.MtprotoSettings.MtprotoUser()],
+    externalProxy = [],
   ) {
     super(protocol);
     this.modeClassic = modeClassic;
@@ -6114,6 +6115,9 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
     this.tlsDomain = tlsDomain;
     this.userLimit = userLimit;
     this.mtprotoUsers = mtprotoUsers;
+    // The inbound-wide link endpoints, used by every account that names none of its
+    // own. An account's own list replaces this one rather than extending it.
+    this.externalProxy = externalProxy;
   }
 
   // Whether ANY account on this inbound carries an ad tag, which is the condition
@@ -6216,6 +6220,7 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
       json.tlsDomain ?? legacy.tlsDomain,
       json.userLimit ?? legacy.userLimit,
       Inbound.MtprotoSettings.MtprotoUser.fromJson(json.clients),
+      Array.isArray(json.externalProxy) ? json.externalProxy : [],
     );
   }
 
@@ -6227,6 +6232,7 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
       tlsDomain: this.tlsDomain,
       userLimit: this.userLimit,
       clients: Inbound.MtprotoSettings.MtprotoUser.toJsonArray(this.mtprotoUsers),
+      externalProxy: this.externalProxy,
     };
   }
 };
@@ -6342,9 +6348,19 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
   // no links at all rather than the wrong ones.
   links(host, port, settings) {
     if (!settings || typeof settings.enabledModes !== "function") return [];
+    // Most specific wins, and wins OUTRIGHT: this account's own endpoints, else the
+    // inbound's, else this server. The two lists are alternative answers to the same
+    // question, so merging them would keep advertising the endpoint the account was
+    // configured to replace. genMtprotoLink in sub/subService.go mirrors this exactly.
+    const own = Array.isArray(this.externalProxy) ? this.externalProxy : [];
+    const shared =
+      settings && Array.isArray(settings.externalProxy)
+        ? settings.externalProxy
+        : [];
+    const chosen = own.length > 0 ? own : shared;
     const endpoints =
-      Array.isArray(this.externalProxy) && this.externalProxy.length > 0
-        ? this.externalProxy.map((p) => ({
+      chosen.length > 0
+        ? chosen.map((p) => ({
             host: p.dest,
             port: p.port,
             remark: p.remark || "",

@@ -111,5 +111,64 @@
         ></a-input-number>
     </a-form-item>
 
+    <!-- The inbound-wide default endpoint set. An account that names its own External
+         Proxy in the client form replaces this list for that account; everyone else's
+         links are built from it. Link generation only: telemt never sees any of it. -->
+    <a-form-item>
+        <template slot="label">
+            <a-tooltip>
+                <template slot="title">
+                    Alternate Endpoint(s) (a relay/CDN host:port) written into every
+                    account's tg:// links instead of this server's address. An account
+                    with its own External Proxy set uses that instead of this. Leave off
+                    to use the panel host.
+                </template>
+                External Proxy
+                <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+        </template>
+        <a-switch v-model="mtprotoExternalProxy"></a-switch>
+        <a-button
+            icon="plus"
+            v-if="mtprotoExternalProxy"
+            type="primary"
+            :style="{ marginLeft: '10px' }"
+            size="small"
+            @click="inbound.settings.externalProxy.push({dest: '', port: inbound.port, remark: ''})"
+        ></a-button>
+    </a-form-item>
+    <a-input-group
+        :style="{ margin: '8px 0' }"
+        compact
+        v-for="(row, index) in inbound.settings.externalProxy"
+    >
+        <a-input
+            :style="{ width: '45%' }"
+            v-model.trim="row.dest"
+            placeholder='{{ i18n "host" }}'
+        ></a-input>
+        <a-tooltip title='{{ i18n "pages.inbounds.port" }}'>
+            <a-input-number
+                :style="{ width: '20%' }"
+                v-model.number="row.port"
+                min="1"
+                max="65535"
+            ></a-input-number>
+        </a-tooltip>
+        <a-input
+            :style="{ width: '30%', top: '0' }"
+            v-model.trim="row.remark"
+            placeholder='{{ i18n "remark" }}'
+        >
+            <template slot="addonAfter">
+                <a-button
+                    icon="minus"
+                    size="small"
+                    @click="inbound.settings.externalProxy.splice(index, 1)"
+                ></a-button>
+            </template>
+        </a-input>
+    </a-input-group>
+
 </a-form>
 {{end}}

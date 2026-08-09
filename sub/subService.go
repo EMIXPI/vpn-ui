@@ -383,11 +383,20 @@ func (s *SubService) genMtprotoLink(inbound *model.Inbound, email string) string
 	var endpoints []endpoint
 	// Mirror links() EXACTLY: no empty-dest filter, no port fallback. Diverging here
 	// would break byte-for-byte parity with the JS-generated links.
-	if len(c.ExternalProxy) > 0 {
+	//
+	// Three tiers, most specific first. The account's own list wins outright over the
+	// inbound's rather than adding to it: both answer "where do this account's links
+	// point", so merging would keep handing out the endpoint the operator overrode.
+	switch {
+	case len(c.ExternalProxy) > 0:
 		for _, ep := range c.ExternalProxy {
 			endpoints = append(endpoints, endpoint{host: ep.Dest, port: ep.Port})
 		}
-	} else {
+	case len(proxy.ExternalProxy) > 0:
+		for _, ep := range proxy.ExternalProxy {
+			endpoints = append(endpoints, endpoint{host: ep.Dest, port: ep.Port})
+		}
+	default:
 		endpoints = append(endpoints, endpoint{host: s.address, port: inbound.Port})
 	}
 

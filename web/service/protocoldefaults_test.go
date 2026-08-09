@@ -225,7 +225,8 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "modeTls": true,
   "tlsDomain": "www.google.com",
   "userLimit": 0,
-  "clients": []
+  "clients": [],
+  "externalProxy": []
 }`,
 
 	model.SSH: `{

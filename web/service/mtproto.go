@@ -116,6 +116,11 @@ type mtprotoSettings struct {
 	// use: nil=absent(legacy=>1); 0=no limit; else 1..64. Enforced by telemt counting
 	// distinct client source IPs per account, not by the panel's IP allocator.
 	UserLimit *int `json:"userLimit"`
+
+	// ExternalProxy is the inbound-wide default set of link endpoints, used for every
+	// account that does not name its own. Like the per-account list it is
+	// link-generation only: telemt never sees it.
+	ExternalProxy []mtprotoExternalProxy `json:"externalProxy"`
 }
 
 // mtprotoClient is a MINIMAL client struct holding only what this service reads.
@@ -198,6 +203,18 @@ type MtprotoInboundPolicy struct {
 	// UserLimit keeps the RAW reading: nil=absent(=>1 device); 0=no limit; else 1..64.
 	// Resolve it through effectiveUserLimit, never by dereferencing.
 	UserLimit *int
+	// ExternalProxy is the inbound's default link endpoints. An account carrying its
+	// own list overrides this one outright rather than adding to it: the two are
+	// alternative answers to "where do this account's links point", and merging them
+	// would hand a subscriber endpoints the operator meant to replace.
+	ExternalProxy []MtprotoEndpoint
+}
+
+// MtprotoEndpoint is one alternate host:port a tg:// link can advertise.
+type MtprotoEndpoint struct {
+	Dest   string `json:"dest"`
+	Port   int    `json:"port"`
+	Remark string `json:"remark"`
 }
 
 // ModeEnabled reports whether this inbound accepts one of telemt's mode names.
@@ -330,6 +347,7 @@ func resolveMtprotoPolicy(root map[string]json.RawMessage) (MtprotoInboundPolicy
 	get("modeTls", &policy.ModeTls)
 	get("tlsDomain", &policy.TlsDomain)
 	get("userLimit", &policy.UserLimit)
+	get("externalProxy", &policy.ExternalProxy)
 	return policy, false
 }
 

@@ -323,6 +323,11 @@ func validateMtprotoSettings(m map[string]any) error {
 	if err := checkUserLimit(m); err != nil {
 		return err
 	}
+	// The inbound-wide link endpoints. Same shape and same checks as everywhere else;
+	// an account's own list overrides it at link-generation time.
+	if err := checkExternalProxy(m); err != nil {
+		return err
+	}
 	return checkMtprotoModes(m)
 }
 
