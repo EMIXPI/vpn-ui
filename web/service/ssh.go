@@ -477,7 +477,13 @@ func (s *SshService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 		if err != nil {
 			continue
 		}
-		plain := fmt.Sprintf("Host: %s\nPort: %d\nUsername: %s\nPassword: %s\n", t.host, t.port, acct.ID, acct.Password)
+		// The UDPGW line is not decoration: clients that tunnel UDP (HTTP Injector,
+		// NapsternetV and friends) ask for a udpgw endpoint, and users read its
+		// absence as "this server has no UDP support". It does — handleDirectTCPIP
+		// terminates the udpgw protocol in-process on this loopback port — so the
+		// address to enter is published alongside the credentials.
+		plain := fmt.Sprintf("Host: %s\nPort: %d\nUsername: %s\nPassword: %s\nUDPGW: 127.0.0.1:%d\n",
+			t.host, t.port, acct.ID, acct.Password, sshUdpgwPort)
 		label := t.remark
 		if label == "" {
 			label = email
