@@ -353,7 +353,20 @@
                     if (!s.udpEnable && !s.tcpEnable) return false;
                     if (s.udpEnable && !okPort(ib.port)) return false;
                     if (s.tcpEnable && !okPort(s.tcpPort)) return false;
-                    if (!s.caCert || !s.serverCert) return false;
+                    // Which boxes must be filled depends on the cert source, and this
+                    // has to agree with validateInboundConfig in web/service/inbound.go
+                    // or the button is enabled for a body the server then refuses (or,
+                    // as it did, disabled for one the server would accept: File Paths
+                    // mode never fills the inline PEM fields, so demanding them here
+                    // left the OK button dead with all four paths correctly typed in).
+                    const tlsCryptOn = s.tlsCryptEnable !== false;
+                    if (s.tlsUseFile) {
+                        if (!s.caCertFile || !s.serverCertFile || !s.serverKeyFile) return false;
+                        if (tlsCryptOn && !s.tlsCryptFile) return false;
+                    } else {
+                        if (!s.caCert || !s.serverCert) return false;
+                        if (tlsCryptOn && !s.tlsCrypt) return false;
+                    }
                     return true;
                 }
                 if (ib.protocol === "openconnect" || ib.protocol === "sstp" || ib.protocol === "ikev2") {

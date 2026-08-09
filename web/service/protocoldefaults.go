@@ -125,6 +125,12 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("serverCertFile", ""),
 			def("serverKeyFile", ""),
 			def("tlsCryptFile", ""),
+			// On by default: it is what every existing inbound does, and the
+			// self-signed generator mints the key anyway. Turning it off is the
+			// opt-out for an operator who does not want tls-crypt at all.
+			def("tlsCryptEnable", true),
+			// The .ovpn profile name (setenv FRIENDLY_NAME). Empty = emit nothing.
+			def("friendlyName", ""),
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
 			def("mtu", 1500),

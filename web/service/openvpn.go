@@ -51,11 +51,20 @@ type openvpnSettings struct {
 	// TLS cert source (Xray-style): inline PEM content (default) or file paths.
 	// In path mode OpenVPN references these files directly instead of the content
 	// fields written into configDir.
-	TlsUseFile        *bool               `json:"tlsUseFile"`
-	CaCertFile        string              `json:"caCertFile"`
-	ServerCertFile    string              `json:"serverCertFile"`
-	ServerKeyFile     string              `json:"serverKeyFile"`
-	TlsCryptFile      string              `json:"tlsCryptFile"`
+	TlsUseFile     *bool  `json:"tlsUseFile"`
+	CaCertFile     string `json:"caCertFile"`
+	ServerCertFile string `json:"serverCertFile"`
+	ServerKeyFile  string `json:"serverKeyFile"`
+	TlsCryptFile   string `json:"tlsCryptFile"`
+	// tls-crypt wraps the control channel in a pre-shared key. It is optional in
+	// OpenVPN, so it is a toggle here: nil == on, which keeps every inbound created
+	// before the toggle exactly as it was rather than silently dropping the wrapper
+	// out from under clients that already carry the key.
+	TlsCryptEnable *bool `json:"tlsCryptEnable"`
+	// FriendlyName becomes `setenv FRIENDLY_NAME` in the exported .ovpn, which is
+	// the profile name OpenVPN Connect shows in its list. Server-side it means
+	// nothing, so it is written to the client profile only.
+	FriendlyName      string              `json:"friendlyName"`
 	CipherMode        string              `json:"cipherMode"` // old | new | all | custom (informative; Ciphers is authoritative)
 	Ciphers           []string            `json:"ciphers"`
 	ExternalProxy     []ovpnExternalProxy `json:"externalProxy"`
@@ -272,16 +281,43 @@ func (o *openvpnSettings) useCertFiles() bool {
 	return o.TlsUseFile != nil && *o.TlsUseFile
 }
 
+// tlsCryptEnabled reports whether the control channel is wrapped in tls-crypt.
+// Nil (every inbound predating the toggle) == enabled.
+func (o *openvpnSettings) tlsCryptEnabled() bool {
+	return o.TlsCryptEnable == nil || *o.TlsCryptEnable
+}
+
+// friendlyName returns the .ovpn profile name, stripped of everything that would
+// break the directive it is written into: OpenVPN parses a quoted argument, so a
+// quote, backslash or newline inside the value would end it early (or split the
+// config). Empty means "emit no FRIENDLY_NAME at all".
+func (o *openvpnSettings) friendlyName() string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r == '"' || r == '\\' || r < ' ' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, o.FriendlyName))
+}
+
 // certPaths returns the ca/cert/key/tls-crypt file paths OpenVPN's config should
 // reference: the operator's own paths in file mode, else the files writeCertFiles
 // writes into configDir from the inline PEM content.
+//
+// tlsCrypt comes back empty when the inbound has no key, because writeCertFiles
+// only writes tc.key when there is content for it — naming the file anyway would
+// point the directive at something that isn't there.
 func (s *OpenVpnService) certPaths(inbound *model.Inbound, settings *openvpnSettings) (ca, cert, key, tlsCrypt string) {
 	if settings.useCertFiles() {
 		return strings.TrimSpace(settings.CaCertFile), strings.TrimSpace(settings.ServerCertFile),
 			strings.TrimSpace(settings.ServerKeyFile), strings.TrimSpace(settings.TlsCryptFile)
 	}
 	dir := s.configDir(inbound.Id)
-	return dir + "/ca.crt", dir + "/server.crt", dir + "/server.key", dir + "/tc.key"
+	tlsCrypt = ""
+	if strings.TrimSpace(settings.TlsCrypt) != "" {
+		tlsCrypt = dir + "/tc.key"
+	}
+	return dir + "/ca.crt", dir + "/server.crt", dir + "/server.key", tlsCrypt
 }
 
 type openvpnClient struct {
@@ -653,7 +689,13 @@ func (s *OpenVpnService) buildServerConfig(inbound *model.Inbound, settings *ope
 	b.WriteString(fmt.Sprintf("ca %s\n", caPath))
 	b.WriteString(fmt.Sprintf("cert %s\n", certPath))
 	b.WriteString(fmt.Sprintf("key %s\n", keyPath))
-	b.WriteString(fmt.Sprintf("tls-crypt %s\n", tcPath))
+	// tls-crypt is optional. Emitting the directive with an empty path (the shape a
+	// file-mode inbound that left the key box blank used to produce) makes openvpn
+	// refuse the whole config, so the line is written only when there is a key to
+	// point it at.
+	if settings.tlsCryptEnabled() && tcPath != "" {
+		b.WriteString(fmt.Sprintf("tls-crypt %s\n", tcPath))
+	}
 	b.WriteString("dh none\n")
 	ciphers := s.effectiveCiphers(settings.dataCiphers())
 	_, legacyOK := s.cipherSupport()
@@ -827,8 +869,16 @@ func (s *OpenVpnService) GenerateClientConfig(inbound *model.Inbound, proto stri
 	}
 
 	caContent, tcContent := s.clientCertContent(settings)
-	if strings.TrimSpace(caContent) == "" || strings.TrimSpace(tcContent) == "" {
-		return "", fmt.Errorf("certificates not available — generate a self-signed CA or set the CA/tls-crypt file paths first")
+	if strings.TrimSpace(caContent) == "" {
+		return "", fmt.Errorf("certificates not available — generate a self-signed CA or set the CA file path first")
+	}
+	// The tls-crypt key is only part of the profile when the inbound uses tls-crypt.
+	tcContent = strings.TrimSpace(tcContent)
+	if settings.tlsCryptEnabled() && tcContent == "" {
+		return "", fmt.Errorf("TLS-Crypt is enabled but no key is set — generate a self-signed CA, set the TLS-Crypt key file path, or turn TLS-Crypt off")
+	}
+	if !settings.tlsCryptEnabled() {
+		tcContent = ""
 	}
 
 	// Refuse to hand out a profile for a transport the admin has switched off.
@@ -910,6 +960,11 @@ func (s *OpenVpnService) GenerateClientConfig(inbound *model.Inbound, proto stri
 	// certificate"; this directive tells it no client certificate is expected.
 	// The community CLI just treats it as a harmless env var.
 	b.WriteString("setenv CLIENT_CERT 0\n")
+	// The name OpenVPN Connect lists the imported profile under. Without it the app
+	// falls back to the file name, so every inbound's profile looks alike.
+	if name := settings.friendlyName(); name != "" {
+		b.WriteString(fmt.Sprintf("setenv FRIENDLY_NAME %q\n", name))
+	}
 	ciphers := s.effectiveCiphers(settings.dataCiphers())
 	_, legacyOK := s.cipherSupport()
 	joined := strings.Join(ciphers, ":")
@@ -937,9 +992,11 @@ func (s *OpenVpnService) GenerateClientConfig(inbound *model.Inbound, proto stri
 	b.WriteString("<ca>\n")
 	b.WriteString(strings.TrimSpace(caContent))
 	b.WriteString("\n</ca>\n")
-	b.WriteString("<tls-crypt>\n")
-	b.WriteString(strings.TrimSpace(tcContent))
-	b.WriteString("\n</tls-crypt>\n")
+	if tcContent != "" {
+		b.WriteString("<tls-crypt>\n")
+		b.WriteString(tcContent)
+		b.WriteString("\n</tls-crypt>\n")
+	}
 
 	return b.String(), nil
 }

@@ -114,7 +114,7 @@ func validateOpenvpnSettings(m map[string]any) error {
 	if err := checkAddressedVpnCommon(m); err != nil {
 		return err
 	}
-	for _, key := range []string{"udpEnable", "tcpEnable", "separatePorts", "tlsUseFile", "clientToClient", "crossInbound"} {
+	for _, key := range []string{"udpEnable", "tcpEnable", "separatePorts", "tlsUseFile", "tlsCryptEnable", "clientToClient", "crossInbound"} {
 		if _, _, err := optBool(m, key); err != nil {
 			return err
 		}
@@ -135,7 +135,7 @@ func validateOpenvpnSettings(m map[string]any) error {
 	if present && len(ciphers) == 0 {
 		return common.NewError(`"ciphers" must list at least one cipher`)
 	}
-	for _, key := range []string{"caCert", "caKey", "serverCert", "serverKey", "tlsCrypt", "caCertFile", "serverCertFile", "serverKeyFile", "tlsCryptFile"} {
+	for _, key := range []string{"caCert", "caKey", "serverCert", "serverKey", "tlsCrypt", "caCertFile", "serverCertFile", "serverKeyFile", "tlsCryptFile", "friendlyName"} {
 		if _, _, err := optString(m, key); err != nil {
 			return err
 		}

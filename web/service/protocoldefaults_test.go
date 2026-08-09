@@ -71,6 +71,8 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "serverCertFile": "",
   "serverKeyFile": "",
   "tlsCryptFile": "",
+  "tlsCryptEnable": true,
+  "friendlyName": "",
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
   "mtu": 1500,

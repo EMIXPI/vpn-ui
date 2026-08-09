@@ -1137,11 +1137,20 @@ func (s *InboundService) validateInboundConfig(inbound *model.Inbound) error {
 
 	if inbound.Protocol == "openvpn" {
 		var st struct {
-			TcpEnable  bool   `json:"tcpEnable"`
-			TcpPort    int    `json:"tcpPort"`
-			UdpEnable  bool   `json:"udpEnable"`
-			CaCert     string `json:"caCert"`
-			ServerCert string `json:"serverCert"`
+			TcpEnable      bool   `json:"tcpEnable"`
+			TcpPort        int    `json:"tcpPort"`
+			UdpEnable      bool   `json:"udpEnable"`
+			TlsUseFile     bool   `json:"tlsUseFile"`
+			CaCert         string `json:"caCert"`
+			ServerCert     string `json:"serverCert"`
+			CaCertFile     string `json:"caCertFile"`
+			ServerCertFile string `json:"serverCertFile"`
+			ServerKeyFile  string `json:"serverKeyFile"`
+			TlsCryptFile   string `json:"tlsCryptFile"`
+			TlsCrypt       string `json:"tlsCrypt"`
+			// Absent on every inbound created before the toggle, which all carry a
+			// tls-crypt key, so absent has to read as enabled.
+			TlsCryptEnable *bool `json:"tlsCryptEnable"`
 		}
 		if err := json.Unmarshal([]byte(inbound.Settings), &st); err != nil {
 			return common.NewError("Invalid OpenVPN settings:", err)
@@ -1155,8 +1164,24 @@ func (s *InboundService) validateInboundConfig(inbound *model.Inbound) error {
 		if st.TcpEnable && !validPort(st.TcpPort) {
 			return common.NewError("Invalid OpenVPN TCP port (must be 1-65535):", st.TcpPort)
 		}
-		if strings.TrimSpace(st.CaCert) == "" || strings.TrimSpace(st.ServerCert) == "" {
-			return common.NewError("OpenVPN certificate is required: generate or provide a certificate before saving")
+		// Which boxes have to be filled depends on the cert source the admin picked:
+		// file mode never populates the inline PEM fields, so demanding them there
+		// made a file-mode inbound unsaveable.
+		tlsCryptOn := st.TlsCryptEnable == nil || *st.TlsCryptEnable
+		if st.TlsUseFile {
+			if strings.TrimSpace(st.CaCertFile) == "" || strings.TrimSpace(st.ServerCertFile) == "" || strings.TrimSpace(st.ServerKeyFile) == "" {
+				return common.NewError("OpenVPN certificate file paths are required: set the CA, server certificate and server key files before saving")
+			}
+			if tlsCryptOn && strings.TrimSpace(st.TlsCryptFile) == "" {
+				return common.NewError("OpenVPN TLS-Crypt is enabled but no key file is set: provide the key file or turn TLS-Crypt off")
+			}
+		} else {
+			if strings.TrimSpace(st.CaCert) == "" || strings.TrimSpace(st.ServerCert) == "" {
+				return common.NewError("OpenVPN certificate is required: generate or provide a certificate before saving")
+			}
+			if tlsCryptOn && strings.TrimSpace(st.TlsCrypt) == "" {
+				return common.NewError("OpenVPN TLS-Crypt is enabled but no key was generated: generate a self-signed CA or turn TLS-Crypt off")
+			}
 		}
 		return nil
 	}

@@ -4400,6 +4400,8 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
     serverCertFile = "",
     serverKeyFile = "",
     tlsCryptFile = "",
+    tlsCryptEnable = true,
+    friendlyName = "",
   ) {
     super(protocol);
     this.udpEnable = udpEnable;
@@ -4416,6 +4418,13 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
     this.serverCertFile = serverCertFile;
     this.serverKeyFile = serverKeyFile;
     this.tlsCryptFile = tlsCryptFile;
+    // tls-crypt wraps the control channel in a pre-shared key. OpenVPN runs fine
+    // without it, so it is optional; on by default because that is what every
+    // inbound created before the toggle does.
+    this.tlsCryptEnable = tlsCryptEnable;
+    // Profile name written into the exported .ovpn as `setenv FRIENDLY_NAME`,
+    // which is what OpenVPN Connect lists the imported profile under.
+    this.friendlyName = friendlyName;
     this.dns1 = dns1;
     this.dns2 = dns2;
     this.mtu = mtu;
@@ -4472,6 +4481,8 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
       json.serverCertFile ?? "",
       json.serverKeyFile ?? "",
       json.tlsCryptFile ?? "",
+      json.tlsCryptEnable ?? true,
+      json.friendlyName ?? "",
     );
   }
 
@@ -4486,6 +4497,8 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
       serverCertFile: this.serverCertFile,
       serverKeyFile: this.serverKeyFile,
       tlsCryptFile: this.tlsCryptFile,
+      tlsCryptEnable: this.tlsCryptEnable,
+      friendlyName: this.friendlyName,
       dns1: this.dns1,
       dns2: this.dns2,
       mtu: this.mtu,

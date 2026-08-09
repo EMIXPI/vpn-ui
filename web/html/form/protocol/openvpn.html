@@ -51,6 +51,23 @@
         <template slot="label">
             <a-tooltip>
                 <template slot="title">
+                    Name shown for the imported profile in OpenVPN Connect, written
+                    into the .ovpn as `setenv FRIENDLY_NAME`. Leave blank to omit it,
+                    and the app falls back to the file name.
+                </template>
+                Friendly Name
+                <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+        </template>
+        <a-input
+            v-model.trim="inbound.settings.friendlyName"
+            placeholder="My VPN"
+        ></a-input>
+    </a-form-item>
+    <a-form-item>
+        <template slot="label">
+            <a-tooltip>
+                <template slot="title">
                     Simultaneous devices per account (each gets its own IP). 1 = one IP per account (default, best capacity). Higher values reserve that many consecutive IPs per account, so fewer accounts fit the pool; 0 reserves a 16-IP block. Max 64.
                 </template>
                 User Limit
@@ -232,8 +249,28 @@
         </a-radio-group>
     </a-form-item>
 
-    <!-- File-path mode: reference existing cert files on disk. Server needs all
-         four; the client .ovpn embeds the CA + tls-crypt read from these paths. -->
+    <!-- tls-crypt is optional in OpenVPN, so it is a toggle: off drops the directive
+         from the server config and the <tls-crypt> block from the .ovpn, and the key
+         box below stops being required. Existing clients carry the key, so turning it
+         off on a live inbound locks them out until they re-import their profile. -->
+    <a-form-item>
+        <template slot="label">
+            <a-tooltip>
+                <template slot="title">
+                    Wrap the TLS control channel in a pre-shared key, which hides the
+                    handshake from probes. Optional: turn it off and no key is needed.
+                    Changing this on a live inbound means every client must re-import
+                    its profile.
+                </template>
+                TLS-Crypt
+                <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+        </template>
+        <a-switch v-model="inbound.settings.tlsCryptEnable"></a-switch>
+    </a-form-item>
+
+    <!-- File-path mode: reference existing cert files on disk. The client .ovpn
+         embeds the CA (and the tls-crypt key, when enabled) read from these paths. -->
     <template v-if="inbound.settings.tlsUseFile">
         <a-form-item label="CA Certificate File">
             <a-input v-model="inbound.settings.caCertFile" placeholder="/path/to/ca.crt"></a-input>
@@ -244,7 +281,7 @@
         <a-form-item label="Server Key File">
             <a-input v-model="inbound.settings.serverKeyFile" placeholder="/path/to/server.key"></a-input>
         </a-form-item>
-        <a-form-item label="TLS-Crypt Key File">
+        <a-form-item label="TLS-Crypt Key File" v-if="inbound.settings.tlsCryptEnable">
             <a-input v-model="inbound.settings.tlsCryptFile" placeholder="/path/to/tc.key"></a-input>
         </a-form-item>
     </template>
@@ -281,7 +318,7 @@
                 placeholder="Auto-generated from CA"
             ></a-textarea>
         </a-form-item>
-        <a-form-item label="TLS-Crypt Key">
+        <a-form-item label="TLS-Crypt Key" v-if="inbound.settings.tlsCryptEnable">
             <a-textarea
                 v-model="inbound.settings.tlsCrypt"
                 :rows="3"
