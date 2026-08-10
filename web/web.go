@@ -461,6 +461,7 @@ func (s *Server) startTask() {
 	// until TLS is already dead.
 	sslRenewJob := job.NewCheckSSLRenewJob()
 	s.cron.AddJob(job.SSLRenewSchedule, sslRenewJob)
+
 	go func() {
 		// cron's first "@every" tick is one whole interval away, so without this a box
 		// that reboots more often than the interval would never renew at all. Bound to

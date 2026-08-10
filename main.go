@@ -243,6 +243,22 @@ func runWebServer() {
 	// account. See web/service/wgxray.go.
 	service.ReconcileAllWireguardXrayKeys()
 
+	// Take over the certificate deploy.sh or the vpn-ui.sh menu installed, so the
+	// panel manages and renews it instead of leaving it to acme.sh's own cron.
+	//
+	// HERE, AND NOT IN web.go, for one reason that decides it: the TLS reloader is
+	// built once from webCertFile when the server starts, and watches THAT path for
+	// the life of the process (network/cert_reloader.go:69-83). Adopting after the
+	// listener exists rewrites the setting without moving the listener, so the panel
+	// would keep serving the legacy path while the panel's own renewals went into
+	// the store copy, and the two would drift apart until the next restart. Running
+	// before server.Start() means this boot already serves the managed path.
+	//
+	// Idempotent, so it is safe on every start: adoption skips any certificate whose
+	// issuer and serial a profile already holds.
+	var sslSync service.SSLService
+	sslSync.SyncLegacyCertificates()
+
 	// Extract the pinned Xray core + base geo files baked into the panel. The
 	// core is overwritten on every start so the bundled (patched) fork is always
 	// what runs — switching/updating it from the dashboard is disabled. Geo files
