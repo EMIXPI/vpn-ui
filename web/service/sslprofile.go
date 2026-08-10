@@ -95,6 +95,11 @@ type SSLProfileSummary struct {
 	// profile, which is the question the page exists to answer.
 	UsedByPanel bool `json:"usedByPanel"`
 	UsedBySub   bool `json:"usedBySub"`
+
+	// AutoRenew reports whether the panel renews this one on its own. Absence of
+	// the marker means yes, so every certificate that existed before the toggle
+	// did keeps renewing. See sslautorenew.go.
+	AutoRenew bool `json:"autoRenew"`
 }
 
 // ListSSLProfiles returns every profile that exists on disk, default first and the
@@ -148,6 +153,7 @@ func ListSSLProfiles() []SSLProfileSummary {
 			StoreRoot: root,
 			CertPath:  filepath.Join(root, sslActiveLink, sslCertFileName),
 			KeyPath:   filepath.Join(root, sslActiveLink, sslKeyFileName),
+			AutoRenew: sslAutoRenewEnabledAt(root),
 		}
 		// Read-only: opening the store would CREATE the layout, which would turn
 		// listing into a side effect that resurrects a profile someone deleted.
