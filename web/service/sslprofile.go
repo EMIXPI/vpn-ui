@@ -96,6 +96,11 @@ type SSLProfileSummary struct {
 	UsedByPanel bool `json:"usedByPanel"`
 	UsedBySub   bool `json:"usedBySub"`
 
+	// Nickname is the operator's own label for this certificate, empty by
+	// default. It sits BESIDE the certificate's real names rather than replacing
+	// them, so nothing it says can make a row ambiguous. See sslnickname.go.
+	Nickname string `json:"nickname"`
+
 	// AutoRenew reports whether the panel renews this one on its own. Absence of
 	// the marker means yes, so every certificate that existed before the toggle
 	// did keeps renewing. See sslautorenew.go.
@@ -154,6 +159,7 @@ func ListSSLProfiles() []SSLProfileSummary {
 			CertPath:  filepath.Join(root, sslActiveLink, sslCertFileName),
 			KeyPath:   filepath.Join(root, sslActiveLink, sslKeyFileName),
 			AutoRenew: sslAutoRenewEnabledAt(root),
+			Nickname:  sslNicknameAt(root),
 		}
 		// Read-only: opening the store would CREATE the layout, which would turn
 		// listing into a side effect that resurrects a profile someone deleted.

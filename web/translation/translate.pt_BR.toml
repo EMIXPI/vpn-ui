@@ -982,6 +982,13 @@
 "keyEc384" = "Uma curva maior que a P-256. Mais lenta e com suporte em menos clientes."
 "keyRenewNote" = "Uma renovação mantém aquilo com que o certificado foi emitido, então isso só afeta certificados novos."
 "copyLog" = "Copiar"
+"colNickname" = "Apelido"
+"nicknameTitle" = "Apelido"
+"nicknameSave" = "Salvar"
+"nicknamePlaceholder" = "Qualquer coisa que ajude você a reconhecê-lo"
+"nicknameDesc" = "Seu próprio rótulo para este certificado. Ele aparece ao lado dos nomes que o certificado cobre, nunca no lugar deles."
+"nicknameAdd" = "Adicionar um apelido"
+"nicknameEdit" = "Alterar o apelido"
 [pages.settings.ssl.toasts]
 "status" = "Não foi possível ler o estado do certificado."
 "consumers" = "Não foi possível listar os serviços que usam este certificado."
@@ -994,6 +1001,7 @@
 "unassign" = "Esse serviço não tem mais certificado."
 "autoAssigned" = "O novo certificado já está sendo servido."
 "autoRenew" = "Renovação automática atualizada."
+"nickname" = "O apelido foi salvo."
 [pages.settings.security]
 "admin" = "Credenciais de administrador"
 "twoFactor" = "Autenticação de dois fatores"

@@ -983,6 +983,13 @@
 "keyEc384" = "Đường cong lớn hơn P-256. Chậm hơn và ít client hỗ trợ hơn."
 "keyRenewNote" = "Việc gia hạn giữ nguyên thuật toán mà chứng chỉ đã được cấp, nên mục này chỉ ảnh hưởng tới chứng chỉ mới."
 "copyLog" = "Sao chép"
+"colNickname" = "Biệt danh"
+"nicknameTitle" = "Biệt danh"
+"nicknameSave" = "Lưu"
+"nicknamePlaceholder" = "Bất cứ điều gì giúp bạn nhận ra nó"
+"nicknameDesc" = "Nhãn riêng của bạn cho chứng chỉ này. Nó hiển thị bên cạnh các tên mà chứng chỉ bao gồm, chứ không bao giờ thay cho chúng."
+"nicknameAdd" = "Thêm biệt danh"
+"nicknameEdit" = "Đổi biệt danh"
 [pages.settings.ssl.toasts]
 "status" = "Không đọc được trạng thái chứng chỉ."
 "consumers" = "Không liệt kê được các dịch vụ dùng chứng chỉ này."
@@ -995,6 +1002,7 @@
 "unassign" = "Trình lắng nghe đó không còn chứng chỉ."
 "autoAssigned" = "Chứng chỉ mới đã được đưa vào phục vụ."
 "autoRenew" = "Đã cập nhật tự động gia hạn."
+"nickname" = "Đã lưu biệt danh."
 [pages.settings.security]
 "admin" = "Thông tin đăng nhập quản trị viên"
 "twoFactor" = "Xác thực hai yếu tố"

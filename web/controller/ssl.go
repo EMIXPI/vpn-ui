@@ -239,6 +239,16 @@ func (a *SettingController) sslSuggest(c *gin.Context) {
 	jsonObj(c, a.sslService.Suggest(c.PostFormArray("identifiers")), nil)
 }
 
+// sslNickname sets or clears the operator's own label for a certificate.
+//
+// Super-admin like every other mutation here for consistency, though this one
+// writes no certificate material: it is a label in the certificate's own store
+// directory, and the store is where the private keys live.
+func (a *SettingController) sslNickname(c *gin.Context) {
+	err := service.SetSSLNickname(sslProfileParam(c), c.PostForm("nickname"))
+	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.nickname"), err)
+}
+
 // sslAdopt takes a certificate this host is already serving, but that no profile
 // owns, into the store: the deploy.sh / vpn-ui-menu case.
 //

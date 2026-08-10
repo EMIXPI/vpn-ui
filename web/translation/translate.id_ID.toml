@@ -982,6 +982,13 @@
 "keyEc384" = "Kurva yang lebih besar daripada P-256. Lebih lambat, dan didukung lebih sedikit klien."
 "keyRenewNote" = "Perpanjangan mempertahankan apa pun yang dipakai saat sertifikat diterbitkan, jadi ini hanya berpengaruh pada sertifikat baru."
 "copyLog" = "Salin"
+"colNickname" = "Julukan"
+"nicknameTitle" = "Julukan"
+"nicknameSave" = "Simpan"
+"nicknamePlaceholder" = "Apa saja yang membantu Anda mengenalinya"
+"nicknameDesc" = "Label Anda sendiri untuk sertifikat ini. Ditampilkan di samping nama-nama yang dicakup sertifikat, tidak pernah menggantikannya."
+"nicknameAdd" = "Tambahkan julukan"
+"nicknameEdit" = "Ubah julukan"
 [pages.settings.ssl.toasts]
 "status" = "Status sertifikat tidak dapat dibaca."
 "consumers" = "Layanan yang memakai sertifikat ini tidak dapat didaftar."
@@ -994,6 +1001,7 @@
 "unassign" = "Listener itu tidak lagi memiliki sertifikat."
 "autoAssigned" = "Sertifikat baru sudah disajikan."
 "autoRenew" = "Perpanjang otomatis diperbarui."
+"nickname" = "Julukan telah disimpan."
 [pages.settings.security]
 "admin" = "Kredensial admin"
 "twoFactor" = "Autentikasi dua faktor"

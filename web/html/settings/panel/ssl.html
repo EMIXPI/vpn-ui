@@ -58,6 +58,7 @@
 
         <div class="ssl-row ssl-row-head">
             <span>{{ i18n "pages.settings.ssl.colName" }}</span>
+            <span>{{ i18n "pages.settings.ssl.colNickname" }}</span>
             <span>{{ i18n "pages.settings.ssl.colIssuer" }}</span>
             <span>{{ i18n "pages.settings.ssl.colLife" }}</span>
             <span class="ssl-col-mid">{{ i18n "pages.settings.ssl.colAutoRenew" }}</span>
@@ -85,6 +86,22 @@
                          the one certificate it is true of. -->
                     <a-tag v-if="row.chainIncomplete" color="orange">{{ i18n "pages.settings.ssl.chainLeafOnly" }}</a-tag>
                 </span>
+            </span>
+
+            <!-- NICKNAME. The operator's own label, empty until they set one, and
+                 beside the certificate's real names rather than instead of them:
+                 a made-up name that REPLACED the real one would make a row
+                 ambiguous exactly when it matters. The pencil is always there, so
+                 an empty cell is still obviously editable. -->
+            <span class="ssl-cell-nick">
+                <span class="ssl-nick" :class="{ 'ssl-nick-empty': !row.nickname }"
+                    :title="row.nickname">[[ row.nickname ]]</span>
+                <a-tooltip :title="sslNicknameTip(row)">
+                    <a-button size="small" class="ssl-nick-btn" :disabled="ssl.busy"
+                        @click="sslEditNickname(row)">
+                        <a-icon type="edit"></a-icon>
+                    </a-button>
+                </a-tooltip>
             </span>
 
             <span class="ssl-cell-issuer" :title="row.issuer">[[ row.issuer || '-' ]]</span>
@@ -179,6 +196,19 @@
     </a-tooltip>
 </div>
 <div class="ssl-new-note">{{ i18n "pages.settings.ssl.getCertNote" }}</div>
+
+<!-- THE NICKNAME EDITOR. A modal rather than an inline input in the cell: the
+     row is already dense with switches, and an input that appears in place would
+     shift every column beside it while being typed into. -->
+<a-modal v-model="ssl.nick.open" :title="sslNicknameTitle()"
+    :class="themeSwitcher.currentTheme" wrap-class-name="ssl-nick-modal"
+    :ok-text="sslNicknameSave()" cancel-text='{{ i18n "cancel" }}'
+    :confirm-loading="ssl.busy" @ok="sslSaveNickname">
+    <div class="ssl-nick-for">[[ ssl.nick.forName ]]</div>
+    <a-input v-model="ssl.nick.value" :maxLength="48"
+        :placeholder="sslNicknamePlaceholder()" @pressEnter="sslSaveNickname"></a-input>
+    <div class="ssl-nick-hint">{{ i18n "pages.settings.ssl.nicknameDesc" }}</div>
+</a-modal>
 
 <!-- KEY ALGORITHM. Portals to document.body like every antd overlay, so its rules
      live under .ssl-key-modal at the top level of components.css rather than under

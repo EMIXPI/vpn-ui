@@ -982,6 +982,13 @@
 "keyEc384" = "P-256 より大きい曲線です。遅く、対応するクライアントも少なくなります。"
 "keyRenewNote" = "更新では発行時の鍵の種類がそのまま引き継がれるため、この設定が効くのは新しい証明書だけです。"
 "copyLog" = "コピー"
+"colNickname" = "ニックネーム"
+"nicknameTitle" = "ニックネーム"
+"nicknameSave" = "保存"
+"nicknamePlaceholder" = "見分けるのに役立つものなら何でも"
+"nicknameDesc" = "この証明書に付ける自分用の名前です。証明書が対象とする名前の横に表示されるだけで、それらの代わりになることはありません。"
+"nicknameAdd" = "ニックネームを追加"
+"nicknameEdit" = "ニックネームを変更"
 [pages.settings.ssl.toasts]
 "status" = "証明書の状態を読み取れませんでした。"
 "consumers" = "この証明書を使っているサービスを一覧できませんでした。"
@@ -994,6 +1001,7 @@
 "unassign" = "そのリスナーには証明書がなくなりました。"
 "autoAssigned" = "新しい証明書の提供を開始しました。"
 "autoRenew" = "自動更新の設定を変更しました。"
+"nickname" = "ニックネームを保存しました。"
 [pages.settings.security]
 "admin" = "管理者の資格情報"
 "twoFactor" = "二段階認証"

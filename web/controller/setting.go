@@ -99,6 +99,7 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	// material and can re-point a listener, so it takes the same gate as issuing.
 	g.POST("/ssl/sync", requireSuperAdmin(), a.sslSync)
 	g.POST("/ssl/auto-renew", requireSuperAdmin(), a.sslAutoRenew)
+	g.POST("/ssl/nickname", requireSuperAdmin(), a.sslNickname)
 }
 
 // serviceStatus returns the current systemd unit state for the panel.

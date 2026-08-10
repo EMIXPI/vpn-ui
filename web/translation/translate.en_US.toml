@@ -1243,6 +1243,13 @@
 "keyEc384" = "A larger curve than P-256. Slower, and supported by fewer clients."
 "keyRenewNote" = "A renewal keeps whatever the certificate was issued with, so this only affects new certificates."
 "copyLog" = "Copy"
+"colNickname" = "Nickname"
+"nicknameTitle" = "Nickname"
+"nicknameSave" = "Save"
+"nicknamePlaceholder" = "Anything that helps you recognise it"
+"nicknameDesc" = "Your own label for this certificate. It is shown beside the names the certificate covers, never instead of them."
+"nicknameAdd" = "Add a nickname"
+"nicknameEdit" = "Change the nickname"
 [pages.settings.ssl.toasts]
 "status" = "The certificate status could not be read."
 "consumers" = "The services using this certificate could not be listed."
@@ -1255,6 +1262,7 @@
 "unassign" = "That listener no longer has a certificate."
 "autoAssigned" = "The new certificate is now being served."
 "autoRenew" = "Auto renew updated."
+"nickname" = "The nickname was saved."
 [pages.settings.security]
 "admin" = "Admin credentials"
 "twoFactor" = "Two-factor authentication"

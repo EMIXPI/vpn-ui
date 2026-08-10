@@ -159,6 +159,10 @@
         // cover several, and Let's Encrypt meters the EXACT set, so they are
         // gathered before anything is asked of a CA rather than one at a time.
         newNames: [],
+        // The nickname editor: which row it is for, and what is being typed.
+        // Copied in when it opens so a status refresh landing behind it cannot
+        // change what is being edited.
+        nick: { open: false, profile: '', forName: '', value: '' },
         // The key algorithm the next certificate will carry, and the gear that
         // sets it. RSA-2048 by default for client compatibility, not for
         // cryptography: legacy Windows is exactly the audience for the SSTP and
@@ -440,6 +444,7 @@
             extraNames: Math.max(0, ids.length - 1),
             identifiers: ids,
             issuer: a.issuer || '',
+            nickname: p.nickname || '',
             level: this.sslHealthLevel(a),
             health: this.sslHealthText(a),
             lifePct: this.sslLifePct(a),
@@ -781,6 +786,39 @@
       // Auto renew, per certificate. Turning it OFF only stops the unattended
       // scheduler: Renew in the row menu keeps working, because "do not renew this
       // on your own" is a different statement from "never renew this".
+      // --- The nickname -------------------------------------------------------
+      sslNicknameTitle() { return '{{ i18n "pages.settings.ssl.nicknameTitle" }}'; },
+      sslNicknameSave() { return '{{ i18n "pages.settings.ssl.nicknameSave" }}'; },
+      sslNicknamePlaceholder() { return '{{ i18n "pages.settings.ssl.nicknamePlaceholder" }}'; },
+      sslNicknameTip(row) {
+        return row.nickname
+          ? '{{ i18n "pages.settings.ssl.nicknameEdit" }}'
+          : '{{ i18n "pages.settings.ssl.nicknameAdd" }}';
+      },
+      sslEditNickname(row) {
+        this.ssl.nick = {
+          open: true,
+          profile: row.profile,
+          // The certificate's REAL name, so the dialog says which one is being
+          // labelled even when the label being replaced is itself confusing.
+          forName: row.name,
+          value: row.nickname || '',
+        };
+      },
+      // Empty clears it, which is why this does not refuse a blank value: the way
+      // to remove a nickname is to empty the box, and refusing that would leave no
+      // way back to no label at all.
+      async sslSaveNickname() {
+        const n = this.ssl.nick;
+        this.ssl.busy = true;
+        const msg = await HttpUtil.post('/panel/setting/ssl/nickname', {
+          profile: n.profile, nickname: n.value || '',
+        });
+        this.ssl.busy = false;
+        if (!msg || !msg.success) return;
+        this.ssl.nick.open = false;
+        await this.loadSslStatus();
+      },
       async sslToggleAutoRenew(row, on) {
         this.ssl.busy = true;
         const msg = await HttpUtil.post('/panel/setting/ssl/auto-renew', {

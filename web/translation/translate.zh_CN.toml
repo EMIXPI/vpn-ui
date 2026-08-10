@@ -983,6 +983,13 @@
 "keyEc384" = "比 P-256 更大的曲线。速度更慢，支持的客户端也更少。"
 "keyRenewNote" = "续期会沿用证书签发时所用的算法，因此这里只影响新签发的证书。"
 "copyLog" = "复制"
+"colNickname" = "备注"
+"nicknameTitle" = "备注"
+"nicknameSave" = "保存"
+"nicknamePlaceholder" = "任何方便你认出它的内容"
+"nicknameDesc" = "你为这张证书自定的标签。它会显示在证书所覆盖的名称旁边，而不会取代它们。"
+"nicknameAdd" = "添加备注"
+"nicknameEdit" = "修改备注"
 [pages.settings.ssl.toasts]
 "status" = "无法读取证书状态。"
 "consumers" = "无法列出使用该证书的服务。"
@@ -995,6 +1002,7 @@
 "unassign" = "该监听端已不再使用证书。"
 "autoAssigned" = "新证书已投入使用。"
 "autoRenew" = "自动续期设置已更新。"
+"nickname" = "备注已保存。"
 [pages.settings.security]
 "admin" = "管理员凭据"
 "twoFactor" = "双重验证"

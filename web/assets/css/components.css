@@ -1624,7 +1624,7 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 .settings-page .ssl-table { overflow-x: auto; margin-bottom: 16px; }
 
 .settings-page .ssl-grid {
-  min-width: 720px;
+  min-width: 860px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -1637,7 +1637,7 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
      action columns. The three stay fixed while the first three take the slack, so
      the switches never drift apart as the window widens. */
   grid-template-columns:
-    minmax(180px, 2.2fr) minmax(100px, 1fr) minmax(120px, 1.2fr) 84px 74px 74px 52px;
+    minmax(170px, 2fr) minmax(120px, 1.3fr) minmax(95px, .9fr) minmax(115px, 1.1fr) 84px 74px 74px 52px;
   align-items: center;
   gap: 12px;
   padding: 11px 16px;
@@ -1680,6 +1680,32 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
   flex: none;
   background: currentColor;
 }
+
+/* NICKNAME. The pencil is always present, including on an empty cell, so a blank
+   nickname still reads as something you can set rather than as missing data. */
+.settings-page .ssl-cell-nick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.settings-page .ssl-nick {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-page .ssl-nick-empty::before {
+  /* An em dash would read as a value. This is a placeholder for absence. */
+  content: "-";
+  color: var(--text-3);
+}
+.settings-page .ssl-nick-btn {
+  padding: 0 6px;
+  flex: none;
+  opacity: .55;
+}
+.settings-page .ssl-nick-btn:hover,
+.settings-page .ssl-nick-btn:focus-visible { opacity: 1; }
 
 .settings-page .ssl-cell-issuer {
   font-size: var(--fs-sm);
@@ -1809,6 +1835,21 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 
 /* The log window. Rules are NOT scoped under .settings-page: antd portals a modal
    to document.body, outside #app. */
+/* The nickname editor. Outside .settings-page: antd portals it to document.body. */
+.ssl-nick-modal .ssl-nick-for {
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  word-break: break-all;
+}
+.ssl-nick-modal .ssl-nick-hint {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+
 /* THE LOG WINDOW. One <pre> of the real output rather than a styled step list:
    what an operator opens a log for is what the tool actually printed. */
 .ssl-log-modal .ant-modal-body { padding: 16px; }

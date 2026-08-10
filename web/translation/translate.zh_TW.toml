@@ -982,6 +982,13 @@
 "keyEc384" = "比 P-256 更大的曲線。速度較慢，支援的用戶端也較少。"
 "keyRenewNote" = "續期會沿用憑證簽發時所用的設定，因此這裡只影響新的憑證。"
 "copyLog" = "複製"
+"colNickname" = "暱稱"
+"nicknameTitle" = "暱稱"
+"nicknameSave" = "儲存"
+"nicknamePlaceholder" = "任何能幫你認出它的內容"
+"nicknameDesc" = "你為這張憑證自訂的標籤。它會顯示在憑證涵蓋的名稱旁邊，絕不會取代那些名稱。"
+"nicknameAdd" = "新增暱稱"
+"nicknameEdit" = "修改暱稱"
 [pages.settings.ssl.toasts]
 "status" = "無法讀取憑證狀態。"
 "consumers" = "無法列出使用此憑證的服務。"
@@ -994,6 +1001,7 @@
 "unassign" = "該監聽端已不再使用憑證。"
 "autoAssigned" = "新憑證已開始提供。"
 "autoRenew" = "自動續期設定已更新。"
+"nickname" = "暱稱已儲存。"
 [pages.settings.security]
 "admin" = "管理員憑證"
 "twoFactor" = "雙重驗證"

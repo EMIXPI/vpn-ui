@@ -982,6 +982,13 @@
 "keyEc384" = "P-256 eğrisinden daha büyük bir eğri. Daha yavaş ve daha az istemci tarafından destekleniyor."
 "keyRenewNote" = "Yenileme, sertifikanın verilirken aldığı anahtarı korur; bu yüzden buradaki seçim yalnızca yeni sertifikaları etkiler."
 "copyLog" = "Kopyala"
+"colNickname" = "Takma ad"
+"nicknameTitle" = "Takma ad"
+"nicknameSave" = "Kaydet"
+"nicknamePlaceholder" = "Tanımanıza yardımcı olacak herhangi bir şey"
+"nicknameDesc" = "Bu sertifika için kendi etiketiniz. Sertifikanın kapsadığı adların yanında gösterilir, asla onların yerine geçmez."
+"nicknameAdd" = "Takma ad ekle"
+"nicknameEdit" = "Takma adı değiştir"
 [pages.settings.ssl.toasts]
 "status" = "Sertifika durumu okunamadı."
 "consumers" = "Bu sertifikayı kullanan servisler listelenemedi."
@@ -994,6 +1001,7 @@
 "unassign" = "O dinleyicinin artık sertifikası yok."
 "autoAssigned" = "Yeni sertifika artık sunuluyor."
 "autoRenew" = "Otomatik yenileme güncellendi."
+"nickname" = "Takma ad kaydedildi."
 [pages.settings.security]
 "admin" = "Yönetici kimlik bilgileri"
 "twoFactor" = "İki adımlı doğrulama"
