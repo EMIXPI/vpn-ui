@@ -448,3 +448,34 @@ func TestSSLSetDirNameDistinguishesSets(t *testing.T) {
 		}
 	}
 }
+
+// A CA's intermediate carries the brand in the Organization and a bare code in
+// the CommonName. Let's Encrypt's Generation Y intermediates are named YR1, YE1
+// and so on, so preferring the CommonName reported a perfectly good certificate
+// as issued by "YR1", which names nothing to the operator reading it.
+func TestIssuerNameKeepsTheBrand(t *testing.T) {
+	name := func(org, cn string) string {
+		c := &x509.Certificate{}
+		c.Issuer.CommonName = cn
+		if org != "" {
+			c.Issuer.Organization = []string{org}
+		}
+		return sslIssuerName(c)
+	}
+	cases := []struct{ org, cn, want string }{
+		{"Let's Encrypt", "YR1", "Let's Encrypt (YR1)"},
+		{"Let's Encrypt", "R11", "Let's Encrypt (R11)"},
+		{"Google Trust Services", "WE1", "Google Trust Services (WE1)"},
+		// Nothing to add in parentheses.
+		{"Let's Encrypt", "", "Let's Encrypt"},
+		{"", "YR1", "YR1"},
+		// A self-signed certificate commonly repeats itself; saying it twice
+		// would read as two different things.
+		{"panel.example.com", "panel.example.com", "panel.example.com"},
+	}
+	for _, c := range cases {
+		if got := name(c.org, c.cn); got != c.want {
+			t.Errorf("sslIssuerName(O=%q, CN=%q) = %q, want %q", c.org, c.cn, got, c.want)
+		}
+	}
+}

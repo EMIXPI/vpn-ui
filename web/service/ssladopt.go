@@ -197,7 +197,24 @@ func SSLProfileNameFor(identifiers []string) string {
 	if primary == "" {
 		return "imported"
 	}
+	// A WILDCARD IS ITS OWN CERTIFICATE, and must not share a store with the bare
+	// name. Every non-alphanumeric turns into a dash below and the leading run is
+	// then trimmed, so "*.example.com" and "example.com" both slugged to
+	// "example-com": issuing for one silently took over the other's store, moved
+	// the active link, and re-pointed whatever listener was serving it. They are
+	// separate certificates covering different names (a wildcard does NOT cover
+	// the bare domain), so they get separate stores.
+	// The hash below disambiguates names too long to slug, so it is taken over the
+	// identifier AS GIVEN, asterisk included.
+	original := primary
+	wildcard := strings.HasPrefix(primary, "*.")
+	if wildcard {
+		primary = strings.TrimPrefix(primary, "*.")
+	}
 	var b strings.Builder
+	if wildcard {
+		b.WriteString("wildcard-")
+	}
 	for _, r := range strings.ToLower(primary) {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
@@ -213,7 +230,7 @@ func SSLProfileNameFor(identifiers []string) string {
 		slug = "imported"
 	}
 	if len(slug) > 32 {
-		sum := sha256.Sum256([]byte(primary))
+		sum := sha256.Sum256([]byte(original))
 		slug = slug[:27] + "-" + hex.EncodeToString(sum[:2])
 	}
 	// "default" is the reserved profile at the original root; a wildcard cert whose

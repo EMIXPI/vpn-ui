@@ -146,3 +146,25 @@ func TestAdoptRefusesAPathInsideTheStore(t *testing.T) {
 		t.Errorf("adopting a path inside the store returned %v, want a refusal naming the store", err)
 	}
 }
+
+// A wildcard and its bare domain are DIFFERENT certificates covering different
+// names, so they must not share a store. They used to both slug to "example-com",
+// which meant issuing for one took over the other's store and re-pointed whatever
+// listener was serving it.
+func TestSSLProfileNameForSeparatesWildcardFromBareDomain(t *testing.T) {
+	bare := SSLProfileNameFor([]string{"example.com"})
+	wild := SSLProfileNameFor([]string{"*.example.com"})
+	if bare == wild {
+		t.Fatalf("example.com and *.example.com both produced %q, so one would overwrite the other", bare)
+	}
+	if norm, err := NormalizeSSLProfile(wild); err != nil || norm != wild {
+		t.Errorf("wildcard slug %q is not a name the store accepts: %v", wild, err)
+	}
+	if !strings.Contains(wild, "wildcard") {
+		t.Errorf("wildcard slug %q does not say it is a wildcard, so the row is unreadable", wild)
+	}
+	// Different wildcards still have to be distinct from each other.
+	if SSLProfileNameFor([]string{"*.a.example.com"}) == SSLProfileNameFor([]string{"*.b.example.com"}) {
+		t.Error("two different wildcards collapsed onto one profile")
+	}
+}

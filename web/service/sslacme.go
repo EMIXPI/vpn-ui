@@ -66,11 +66,23 @@ const (
 	// the lock on a run that is merely slow (DNS-01 propagation waits are minutes)
 	// would let a second acme.sh race the first for port 80, and two racing
 	// standalone servers produce validation FAILURES, which is the expensive kind.
-	sslLockStaleAfter = 20 * time.Minute
+	sslLockStaleAfter = 30 * time.Minute
 
 	// sslAcmeTimeout kills the child before the lock goes stale, so the lock is
 	// always released by the owner rather than broken by the next caller.
-	sslAcmeTimeout = 15 * time.Minute
+	//
+	// LONGER THAN acme.sh's OWN DNS WINDOW, and that is the whole reason for the
+	// value. _check_dns_entries polls for the challenge TXT record for up to 20
+	// minutes (acme.sh:4700). At the previous 15 minutes this timeout fired FIRST
+	// on any zone slow to propagate, and killing acme.sh mid-poll means it never
+	// reaches dns_cf_rm, so the _acme-challenge records it created are left behind
+	// in the zone, one pair per attempt, accumulating with every retry.
+	//
+	// Only DNS-01 runs anywhere near this long, so in practice this was a
+	// wildcard-only defect: a wildcard has no other validation method available.
+	// 25 minutes covers the full poll plus the issuance and the cleanup after it,
+	// and sslLockStaleAfter stays strictly greater so the invariant above holds.
+	sslAcmeTimeout = 25 * time.Minute
 
 	// sslAcmeRenewSkip is acme.sh's RENEW_SKIP (acme.sh:93): --renew decided the
 	// certificate is not due yet and returned WITHOUT contacting the CA. Benign,
@@ -206,6 +218,15 @@ type SSLIssueRequest struct {
 	Op        string `json:"op"`
 	Staging   bool   `json:"staging"`
 	Email     string `json:"email"`
+
+	// KeyType is the certificate's key algorithm, as one of the SSLKey* values.
+	// Empty means RSA-2048, which is what every certificate issued before this
+	// field existed got.
+	//
+	// ISSUE ONLY. acme.sh records the choice in the per-domain conf as
+	// Le_Keylength and reads it back on --renew (acme.sh:6257-6260), so a renewal
+	// keeps the algorithm on its own and the panel does not have to store it.
+	KeyType string `json:"keyType"`
 
 	// CloudflareToken is used only by the DNS-01 path and is passed to acme.sh in
 	// the ENVIRONMENT, never in argv: a command line is world-readable through
@@ -491,9 +512,52 @@ func (d *sslAcmeDriver) issueArgs(req SSLIssueRequest) ([]string, error) {
 		return nil, fmt.Errorf("unknown challenge %q", req.Challenge)
 	}
 
-	// RSA-2048 for the widest client trust. Legacy Windows, which is precisely the
-	// audience for the SSTP and IKEv2 consumers, is the constraint here.
-	return append(args, "--keylength", "2048"), nil
+	return append(args, "--keylength", sslKeyLength(req.KeyType)), nil
+}
+
+// The key algorithm, and the values acme.sh will accept for it.
+//
+// acme.sh decides RSA vs EC by exclusion: _isEccKey (acme.sh:1172-1184) treats a
+// length as EC unless it is one of 1024/2048/3072/4096/8192, and _createkey
+// (acme.sh:1197-1207) maps the ec- spellings onto prime256v1, secp384r1 and
+// secp521r1. So the accepted set is fixed and small, and anything outside it
+// silently becomes an EC request for a curve openssl does not know.
+const (
+	// SSLKeyRSA2048 is the DEFAULT, and it stays the default for compatibility
+	// rather than for cryptography. Legacy Windows is precisely the audience for
+	// the SSTP and IKEv2 consumers on this box, and it is the client most likely
+	// to refuse an EC certificate.
+	SSLKeyRSA2048 = "2048"
+	SSLKeyRSA4096 = "4096"
+	SSLKeyEC256   = "ec-256"
+	SSLKeyEC384   = "ec-384"
+)
+
+// sslKeyLength maps a requested key type onto the --keylength acme.sh wants,
+// falling back to RSA-2048 for anything unrecognised.
+//
+// FALLS BACK RATHER THAN ERRORING on purpose: this runs after the preflight, with
+// the CA about to be contacted, and refusing an issuance at that point over a
+// spelling would waste the whole run. An unknown value can only come from a
+// hand-made request, and the safest answer to one is the most compatible key.
+func sslKeyLength(keyType string) string {
+	switch strings.ToLower(strings.TrimSpace(keyType)) {
+	case SSLKeyRSA4096:
+		return SSLKeyRSA4096
+	case SSLKeyEC256:
+		return SSLKeyEC256
+	case SSLKeyEC384:
+		return SSLKeyEC384
+	default:
+		return SSLKeyRSA2048
+	}
+}
+
+// SSLKeyTypeValid reports whether a key type is one this panel offers, so a form
+// can be refused BEFORE anything is metered rather than silently downgraded.
+func SSLKeyTypeValid(keyType string) bool {
+	k := strings.ToLower(strings.TrimSpace(keyType))
+	return k == "" || k == SSLKeyRSA2048 || k == SSLKeyRSA4096 || k == SSLKeyEC256 || k == SSLKeyEC384
 }
 
 // sslRenewalDays is the --days value for a short-lived certificate, and it is

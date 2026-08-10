@@ -536,12 +536,32 @@ func isSelfSigned(c *x509.Certificate) bool {
 	return string(c.RawSubject) == string(c.RawIssuer)
 }
 
+// sslIssuerName is who signed this certificate, in the words an operator
+// recognises.
+//
+// ORGANISATION FIRST, and that ordering is the whole point. A CA's intermediate
+// carries the brand in the Organization and a bare code in the CommonName: Let's
+// Encrypt's Generation Y intermediates (live since November 2025) are named
+// YE1..YE3 and YR1..YR3, and the ones before them R10, R11, E5, E6. Preferring
+// the CommonName made the panel report a certificate as issued by "YR1", which
+// identifies nothing to the person reading it and looks like a fault.
+//
+// The code is still worth showing, because which intermediate signed a
+// certificate is exactly what matters when a client rejects the chain, so it
+// comes along in parentheses rather than being dropped.
 func sslIssuerName(c *x509.Certificate) string {
-	if n := strings.TrimSpace(c.Issuer.CommonName); n != "" {
-		return n
-	}
+	cn := strings.TrimSpace(c.Issuer.CommonName)
+	var org string
 	if len(c.Issuer.Organization) > 0 {
-		return c.Issuer.Organization[0]
+		org = strings.TrimSpace(c.Issuer.Organization[0])
+	}
+	switch {
+	case org != "" && cn != "" && !strings.EqualFold(org, cn):
+		return org + " (" + cn + ")"
+	case org != "":
+		return org
+	case cn != "":
+		return cn
 	}
 	return c.Issuer.String()
 }
