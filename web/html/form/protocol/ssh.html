@@ -4,13 +4,6 @@
     :label-col="{ md: {span:8} }"
     :wrapper-col="{ md: {span:14} }"
 >
-    <a-alert
-        type="info"
-        show-icon
-        :style="{ marginBottom: '16px' }"
-        message="UDP works without badvpn-udpgw"
-        description="The panel speaks the udpgw protocol itself, so nothing extra has to be installed. In a client that asks for a UDPGW address, enter 127.0.0.1:7300 — the server terminates it in-process and routes the UDP through Xray, metered like the TCP. Clients that use SOCKS instead (ssh -D) need no setting at all."
-    ></a-alert>
     <a-form-item>
         <template slot="label">
             <a-tooltip>
