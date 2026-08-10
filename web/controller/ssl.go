@@ -57,6 +57,10 @@ type sslStartForm struct {
 	Email     string `form:"email" json:"email"`
 	ListenV6  bool   `form:"listenV6" json:"listenV6"`
 
+	// KeyType is the certificate's key algorithm. Absent means RSA-2048, which is
+	// what every request written before this field existed meant.
+	KeyType string `form:"keyType" json:"keyType"`
+
 	// WebrootPath is read only for the webroot challenge, where the operator's own
 	// webserver answers the check and acme.sh only drops a file under this
 	// directory. The service validates it; an absolute path is not enough on its
@@ -89,6 +93,7 @@ func sslOperationRequest(c *gin.Context) (service.SSLOperationRequest, error) {
 			Staging:     f.Staging,
 			Email:       strings.TrimSpace(f.Email),
 			ListenV6:    f.ListenV6,
+			KeyType:     strings.TrimSpace(f.KeyType),
 			WebrootPath: strings.TrimSpace(f.WebrootPath),
 			// Read out of the form directly and never bound into the struct above,
 			// so it cannot ride along into a log line, a response body or a debug
@@ -172,6 +177,15 @@ func (a *SettingController) sslStart(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.start"), err)
 		return
 	}
+	// Refuse an unknown key algorithm HERE, before the run starts. The driver
+	// falls back to the most compatible key rather than failing mid-issuance, so
+	// without this check a typo would quietly produce a different certificate from
+	// the one that was asked for and spend a rate-limit slot doing it.
+	if !service.SSLKeyTypeValid(req.KeyType) {
+		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.start"),
+			errors.New("that is not a key type this panel can issue"))
+		return
+	}
 	if err := a.sslService.Start(req); err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.start"), err)
 		return
@@ -198,6 +212,33 @@ func (a *SettingController) sslUseManaged(c *gin.Context) {
 	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.useManaged"), err)
 }
 
+// sslUnassign clears a listener's certificate setting, so it serves plain HTTP
+// after the next restart.
+//
+// The other half of the switch the page draws. Super-admin like every other
+// mutation, and for the ordinary reason: it decides what the panel's own listener
+// presents as its identity.
+//
+// Takes no profile. Clearing a setting does not depend on which certificate was in
+// it, and reading one here would invite a caller to clear the panel by naming a
+// certificate the panel was never pointed at.
+func (a *SettingController) sslUnassign(c *gin.Context) {
+	targets := c.PostFormArray("targets")
+	err := a.sslService.Unassign(targets)
+	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.unassign"), err)
+}
+
+// sslSuggest picks the validation method for a set of identifiers and says why.
+//
+// A POST because it carries the identifier list, and a READ like sslPreflight: it
+// contacts no CA, writes nothing and costs no budget, so it rides the group's
+// PermPanelSettings gate. It is what replaced the four-way choice the form used to
+// present, and the sentence it returns is what the operator reads in the one
+// confirmation before anything metered happens.
+func (a *SettingController) sslSuggest(c *gin.Context) {
+	jsonObj(c, a.sslService.Suggest(c.PostFormArray("identifiers")), nil)
+}
+
 // sslAdopt takes a certificate this host is already serving, but that no profile
 // owns, into the store: the deploy.sh / vpn-ui-menu case.
 //
@@ -218,13 +259,29 @@ func (a *SettingController) sslAdopt(c *gin.Context) {
 	jsonObj(c, res, nil)
 }
 
-// sslStopLegacyRenewal removes acme.sh's own cron entry, so the panel's job is the
-// only thing renewing. Deliberately its own button rather than part of adopting:
-// that cron renews every domain in the legacy acme home, including any this panel
-// never adopted.
-func (a *SettingController) sslStopLegacyRenewal(c *gin.Context) {
-	err := service.StopLegacyRenewal()
-	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.stopLegacyRenewal"), err)
+// sslSync takes over every certificate deploy.sh or the vpn-ui.sh menu installed,
+// and retires acme.sh's own scheduler once it has nothing left to renew.
+//
+// A POST and super-admin, because it writes certificate material and can re-point a
+// listener. The settings page calls it when the tab opens; the panel also runs it
+// once at startup (web.go), so a box whose operator never opens the tab still ends
+// up with its certificate managed.
+//
+// Idempotent by construction: adoption skips anything whose issuer and serial a
+// profile already holds, so calling this on every page load adopts nothing twice.
+func (a *SettingController) sslSync(c *gin.Context) {
+	jsonObj(c, a.sslService.SyncLegacyCertificates(), nil)
+}
+
+// sslAutoRenew turns unattended renewal on or off for one certificate.
+//
+// Absent means false in Gin's bool binding, which would be the dangerous direction
+// here, so the value is read explicitly rather than bound: a malformed request must
+// not be able to silently stop renewing a live certificate.
+func (a *SettingController) sslAutoRenew(c *gin.Context) {
+	enabled := strings.EqualFold(strings.TrimSpace(c.PostForm("enabled")), "true")
+	err := service.SetSSLAutoRenew(sslProfileParam(c), enabled)
+	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.autoRenew"), err)
 }
 
 // sslDeleteProfile removes a named certificate and everything stored under it. The

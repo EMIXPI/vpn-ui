@@ -81,15 +81,24 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	// A POST only because it carries the identifier list. It contacts no CA and
 	// changes nothing, so it is a read.
 	g.POST("/ssl/preflight", a.sslPreflight)
+	// Also a read: it probes this host and reports which validation method it
+	// would use for a set of names, without contacting anything.
+	g.POST("/ssl/suggest", a.sslSuggest)
 	g.GET("/ssl/consumers", a.sslConsumers)
 	g.POST("/ssl/start", requireSuperAdmin(), a.sslStart)
 	g.POST("/ssl/use-managed", requireSuperAdmin(), a.sslUseManaged)
+	// The other half of the switch: clearing a listener's setting so it stops
+	// serving TLS at all. Same gate, because it decides the panel's own identity.
+	g.POST("/ssl/unassign", requireSuperAdmin(), a.sslUnassign)
 	g.POST("/ssl/rollback", requireSuperAdmin(), a.sslRollback)
 	// Deleting a certificate takes private keys off disk and can strand a listener,
 	// so it sits on the same super-admin gate as everything else that mutates here.
 	g.POST("/ssl/delete-profile", requireSuperAdmin(), a.sslDeleteProfile)
 	g.POST("/ssl/adopt", requireSuperAdmin(), a.sslAdopt)
-	g.POST("/ssl/stop-legacy-renewal", requireSuperAdmin(), a.sslStopLegacyRenewal)
+	// Taking over what deploy.sh and vpn-ui.sh installed. Writes certificate
+	// material and can re-point a listener, so it takes the same gate as issuing.
+	g.POST("/ssl/sync", requireSuperAdmin(), a.sslSync)
+	g.POST("/ssl/auto-renew", requireSuperAdmin(), a.sslAutoRenew)
 }
 
 // serviceStatus returns the current systemd unit state for the panel.

@@ -260,6 +260,60 @@ func (s *SSLService) Assign(profile string, targets []string) error {
 	return nil
 }
 
+// Unassign clears the named listeners' certificate settings, so they fall back to
+// plain HTTP on the next restart.
+//
+// The counterpart to Assign, and it exists because the page now presents
+// assignment as a switch rather than a button. A switch that only travels one way
+// is a lie about the state it is drawing: with Assign alone, an operator who
+// pointed the subscription server at the wrong certificate had no way back except
+// pointing it at a different one.
+//
+// DELIBERATELY NOT VALIDATED against a store. Clearing is the one operation here
+// that cannot leave a setting naming a path that does not resolve, because it
+// leaves no path at all. web.go treats empty as "serve plain HTTP", which is a
+// legible state; a stale path is the silent one.
+//
+// Nothing here restarts anything. The panel keeps serving its current certificate
+// from memory until it is restarted, which gives an operator who clears the wrong
+// listener the whole session to put it back.
+func (s *SSLService) Unassign(targets []string) error {
+	var panel, sub bool
+	for _, t := range targets {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case SSLAssignTargetPanel:
+			panel = true
+		case SSLAssignTargetSub:
+			sub = true
+		case "":
+		default:
+			return fmt.Errorf("%q is not something a certificate can be assigned to", t)
+		}
+	}
+	if !panel && !sub {
+		return fmt.Errorf("pick at least one of the panel or the subscription server")
+	}
+
+	var ss SettingService
+	if panel {
+		if err := ss.SetCertFile(""); err != nil {
+			return err
+		}
+		if err := ss.SetKeyFile(""); err != nil {
+			return err
+		}
+	}
+	if sub {
+		if err := ss.SetSubCertFile(""); err != nil {
+			return err
+		}
+		if err := ss.SetSubKeyFile(""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Rollback re-points a profile's active link at one of its stored versions. The
 // version has to revalidate, so a rollback cannot be the thing that breaks TLS
 // either.
@@ -310,6 +364,11 @@ var sslRun struct {
 	steps   []ProvisionStep
 	failed  bool
 	summary string
+
+	// startedAt and profile are what the current run is, so a refusal can name
+	// what the caller is waiting for rather than only that they are waiting.
+	startedAt time.Time
+	profile   string
 }
 
 // SSLRunState is a snapshot of the background run.
@@ -340,10 +399,17 @@ func (s *SSLService) RunState() SSLRunState {
 // going. Every operation here either costs metered CA budget or restarts a daemon,
 // so a second one the operator did not knowingly start is never the right answer.
 func (s *SSLService) Start(req SSLOperationRequest) error {
-	// Each profile is a separate store with its own acme home, ledger and lock, so
-	// the refusal below is per certificate: issuing for the subscription name does
-	// not block a renewal of the panel's.
-	_, root, err := sslResolveProfile(req.Profile)
+	// Resolve the store first, so a bad profile name is refused before anything
+	// else happens.
+	//
+	// A CORRECTION, because this comment used to claim the opposite and someone
+	// would have acted on it: the refusal below is NOT per certificate. Each
+	// profile does have its own acme home, ledger and lock, and sslAcquireIssuance
+	// below is per store root, but the in-memory guard that actually fires is
+	// global. Issuing for the subscription name DOES block a renewal of the
+	// panel's, deliberately: the standalone and IP challenges both bind port 80,
+	// and two runs racing for it fail validation in the metered way.
+	profileName, root, err := sslResolveProfile(req.Profile)
 	if err != nil {
 		return err
 	}
@@ -352,10 +418,32 @@ func (s *SSLService) Start(req SSLOperationRequest) error {
 		return err
 	}
 
+	// ONE AT A TIME, ACROSS ALL CERTIFICATES, and that is deliberate rather than a
+	// limitation of the implementation. The standalone and IP challenges both bind
+	// port 80, so two issuances in flight race for it and BOTH fail validation,
+	// which is the metered kind of failure (five per hour per identifier, no
+	// override). Serialising is the only safe answer while any request might take
+	// that path.
+	//
+	// Running them one after another is fully supported and shares nothing: each
+	// profile has its own store root, and the acme home, the ledger and the
+	// issuance lock are all derived from it.
+	//
+	// The message names what is running and since when. It used to say only "an SSL
+	// operation is already running", which left an operator whose click did nothing
+	// with no way to tell whether they had hit a stuck run or the renewal job.
 	sslRun.mu.Lock()
 	if sslRun.running {
+		busyOp, busySince, busyFor := sslRun.op, sslRun.startedAt, sslRun.profile
 		sslRun.mu.Unlock()
-		return fmt.Errorf("an SSL operation is already running")
+		if busyOp == "" {
+			busyOp = "operation"
+		}
+		if busyFor == "" {
+			busyFor = SSLDefaultProfile
+		}
+		return fmt.Errorf("an SSL %s for %q started at %s is still running, and only one can run at a time: two at once would race for port 80 and both would fail validation. Wait for it to finish",
+			busyOp, busyFor, busySince.Local().Format("15:04:05"))
 	}
 	sslRun.mu.Unlock()
 
@@ -368,6 +456,7 @@ func (s *SSLService) Start(req SSLOperationRequest) error {
 	sslRun.mu.Lock()
 	sslRun.running, sslRun.done, sslRun.failed = true, false, false
 	sslRun.op, sslRun.steps, sslRun.summary = req.Op, nil, ""
+	sslRun.startedAt, sslRun.profile = time.Now(), profileName
 	sslRun.mu.Unlock()
 
 	go func() {
@@ -392,6 +481,16 @@ func (s *SSLService) Start(req SSLOperationRequest) error {
 func (s *SSLService) run(store *SSLStore, req SSLOperationRequest, emit func(ProvisionStep)) (failed bool, summary string) {
 	root := store.Root()
 	setKey := SSLIdentifierSetKey(req.Identifiers)
+
+	// A RENEWAL HAS TO BE ADDRESSED BY THE NAME acme.sh FILED IT UNDER, which is
+	// the first -d it was given at issue time and not the first entry of the
+	// certificate's own identifier list: that list is sorted when the certificate
+	// is parsed, so a wildcard always sorts to the front and any multi-name set can
+	// reorder. Getting this wrong is invisible, because acme.sh answers with the
+	// same exit code it uses for "not due yet". See sslrenewname.go.
+	if req.Op == SSLOpRenew {
+		req.Identifiers = sslRenewIdentifiers(root, req.Identifiers)
+	}
 
 	ledger, err := OpenSSLLedger(SSLLedgerPath(root))
 	if err != nil {
@@ -465,6 +564,18 @@ func (s *SSLService) run(store *SSLStore, req SSLOperationRequest, emit func(Pro
 	// contacted the CA. Not a failure, and recording it as one would poison the
 	// backoff for an operation that cost nothing.
 	if req.Op == SSLOpRenew && code == sslAcmeRenewSkip {
+		// TWO VERY DIFFERENT THINGS SHARE THIS EXIT CODE, and conflating them is
+		// how a certificate expires while the panel reports success every six
+		// hours. "Not due yet" is routine. "Not an issued domain" means the
+		// renewal was addressed to a name acme.sh has no record of, so it can
+		// never succeed and no amount of waiting will change that.
+		if sslRenewSkipIsMisaddressed(out) {
+			msg := fmt.Sprintf(
+				"acme.sh has no record of %q, so it cannot renew it. The certificate is filed under the first name it was issued with; re-issue it to fix the record.",
+				req.Primary())
+			emit(ProvisionStep{Name: "renew", Msg: msg, Log: strings.TrimSpace(out)})
+			return true, msg
+		}
 		emit(ProvisionStep{Name: "renew", OK: true, Warn: true,
 			Msg: "acme.sh reports this certificate is not due for renewal yet, so it did not contact Let's Encrypt. Nothing was spent.",
 			Log: strings.TrimSpace(out)})
@@ -684,14 +795,65 @@ func sslLastErrorLine(out string) string {
 // validation and both spend budget, which is the exact failure the single-scheduler
 // rule above exists to avoid. A profile that errors does not stop the others, since
 // one misconfigured certificate must not park the renewal of the panel's own.
+// sslRenewWaitStep and sslRenewWaitMax bound how long RenewAllDue waits for one
+// certificate's run before moving to the next. The ceiling is above the acme.sh
+// exec timeout so a run that is genuinely working is never abandoned, and finite so
+// a wedged run cannot stall the whole tick forever.
+const (
+	sslRenewWaitStep = 2 * time.Second
+	sslRenewWaitMax  = 30 * time.Minute
+)
+
+// sslWaitForRun blocks until the background run finishes, or the ceiling passes.
+// Reports whether it actually finished.
+func (s *SSLService) sslWaitForRun() bool {
+	deadline := time.Now().Add(sslRenewWaitMax)
+	for time.Now().Before(deadline) {
+		if !s.RunState().Running {
+			return true
+		}
+		time.Sleep(sslRenewWaitStep)
+	}
+	return false
+}
+
 func (s *SSLService) RenewAllDue() error {
 	var firstErr error
 	for _, p := range ListSSLProfiles() {
+		// The auto-renew switch is honoured HERE, on the unattended path, and
+		// nowhere else. Renew from the row menu is an operator asking for it, and
+		// must keep working on a certificate whose scheduling they turned off:
+		// "do not renew this on your own" is a different statement from "never
+		// renew this".
+		if !p.AutoRenew {
+			logger.Debug("ssl: auto renew is off for", p.Name, "- skipping it")
+			continue
+		}
 		if err := s.RenewIfDue(p.Name); err != nil {
 			logger.Warning("ssl: renewing certificate ", p.Name, ": ", err)
 			if firstErr == nil {
 				firstErr = err
 			}
+			continue
+		}
+		// WAIT FOR IT BEFORE STARTING THE NEXT ONE. RenewIfDue ends in Start,
+		// which returns as soon as the background goroutine is launched, and only
+		// one run is allowed at a time across all certificates. Without this the
+		// loop raced ahead and every profile after the first was refused
+		// milliseconds later, logged as a warning and simply not renewed: at most
+		// ONE certificate renewed per six-hourly tick, so N due certificates took
+		// roughly 6N hours to converge.
+		//
+		// Invisible on 90-day certificates, whose renewal window is thirty days.
+		// Not invisible on a Let's Encrypt IP certificate, which lives 160 hours
+		// and has a 53-hour window: a host holding two of those could miss one
+		// entirely. Taking over the shell flows' certificates made multi-profile
+		// hosts the normal case rather than the exception, which is what turned
+		// this from theoretical into likely.
+		if !s.sslWaitForRun() {
+			logger.Warning("ssl: the renewal of", p.Name, "is still running after",
+				sslRenewWaitMax, "- leaving the rest of this pass for the next tick")
+			return firstErr
 		}
 	}
 	return firstErr

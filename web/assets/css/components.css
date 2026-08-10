@@ -1597,7 +1597,6 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
   grid-column: 1 / -1;
   font-size: 11px; line-height: 1.45; color: var(--text-3);
 }
-
 /* ---------------------------------------------------------------------------
  * SSL certificate manager (Panel Settings, the SSL tab)
  *
@@ -1607,205 +1606,343 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
  * every rule in it is silently dead.
  *
  * Scoped under .settings-page, which settings.html stamps on #app, so nothing
- * here can reach the other pages.
+ * here can reach the other pages. The one exception is the confirmation modal at
+ * the foot of this block: antd portals every overlay to document.body, outside
+ * #app, so a rule scoped under .settings-page would never match it.
  * ------------------------------------------------------------------------ */
 
-/* THE CARDS: the host's certificate inventory, which is what the tab now leads
-   with. A grid rather than a list because the cards are peers — no certificate
-   is more important than another, and a list implies a first one that is.
-   auto-fill with a min track keeps a single-certificate host from stretching one
-   card across the whole page. */
-.settings-page .ssl-cards {
-  display:grid; gap:12px; margin-bottom:16px;
-  grid-template-columns:repeat(auto-fill, minmax(240px, 1fr));
-}
-.settings-page .ssl-card {
-  border:1px solid var(--border); border-radius:10px; background:var(--surface);
-  padding:14px 16px; cursor:pointer; transition:border-color .15s, box-shadow .15s;
-  display:flex; flex-direction:column; min-width:0;
-}
-.settings-page .ssl-card:hover { border-color:var(--accent); }
-/* The selected card carries a ring AND a heavier border: on a monochrome or
-   high-contrast theme a colour change alone is not a state change. */
-.settings-page .ssl-card-on {
-  border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset;
-}
-.settings-page .ssl-card-empty { opacity:.72; }
-/* The two non-certificate tiles are not selectable, so they must not offer the
-   pointer that says they are. */
-.settings-page .ssl-card-adopt,
-.settings-page .ssl-card-new { cursor:default; border-style:dashed; }
-.settings-page .ssl-card-adopt:hover,
-.settings-page .ssl-card-new:hover { border-color:var(--border); }
+.settings-page .ssl-alert { margin: 0 0 14px; }
+.settings-page .ssl-alert-btn { margin-top: 10px; }
 
-.settings-page .ssl-card-top {
-  display:flex; align-items:center; gap:8px; min-width:0;
-}
-.settings-page .ssl-card-name {
-  font-weight:600; font-size:14px; flex:1 1 auto; min-width:0;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-}
-.settings-page .ssl-card-dot {
-  flex:0 0 auto; width:8px; height:8px; border-radius:50%;
-  background:currentColor;
-}
-.settings-page .ssl-card-sub {
-  color:var(--text-2); font-size:12px; margin-top:3px;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-}
-.settings-page .ssl-card-tags { margin-top:8px; }
-.settings-page .ssl-card-tags:empty { display:none; }
-.settings-page .ssl-card-foot {
-  margin-top:auto; padding-top:10px; font-size:12px; color:var(--text-2);
-}
-.settings-page .ssl-card-note {
-  margin-top:8px; font-size:11.5px; line-height:1.5; color:var(--warn);
+/* THE TABLE. A grid, not a-table: three of the six cells are custom controls, and
+   nothing here sorts or paginates, so the table component would carry no weight.
+
+   The scroll container is the OUTER element and the grid inside it holds a
+   min-width. Letting the grid itself shrink instead collapses the two switch
+   columns into each other on a phone, which is the one place a mis-click flips a
+   listener off. */
+.settings-page .ssl-table { overflow-x: auto; margin-bottom: 16px; }
+
+.settings-page .ssl-grid {
+  min-width: 720px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--surface);
 }
 
-/* THE HERO: the answer to "do I have a certificate, is it healthy, is it being
-   used", in that order, in one card. The name is the largest thing on the tab
-   because it is the first thing an operator checks. */
-.settings-page .ssl-hero {
-  border:1px solid var(--border); border-radius:10px; background:var(--surface);
-  padding:18px 20px; margin-bottom:14px;
+.settings-page .ssl-row {
+  display: grid;
+  /* Seven columns now: name, issuer, life, and then three fixed-width switch or
+     action columns. The three stay fixed while the first three take the slack, so
+     the switches never drift apart as the window widens. */
+  grid-template-columns:
+    minmax(180px, 2.2fr) minmax(100px, 1fr) minmax(120px, 1.2fr) 84px 74px 74px 52px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
 }
-.settings-page .ssl-hero-title {
-  font-size:20px; font-weight:600; line-height:1.3; word-break:break-all;
-}
-.settings-page .ssl-hero-sub {
-  color:var(--text-2); font-size:12.5px; line-height:1.6; margin-top:4px;
-  word-break:break-word;
+.settings-page .ssl-row:last-child { border-bottom: none; }
+
+.settings-page .ssl-row-head {
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
-/* Health in one line. The dot inherits the line's colour, and the line always
-   carries the words as well: colour is the second channel here, never the only
-   one. */
-.settings-page .ssl-health {
-  display:flex; align-items:center; gap:8px;
-  margin-top:12px; font-size:15px; font-weight:500;
+/* The two switch columns are centred under centred headers, so the column reads
+   as a column rather than as two ragged controls. */
+.settings-page .ssl-col-mid { text-align: center; }
+
+/* NAME. Wraps rather than truncating: a hostname is the row's identity and half
+   of one identifies nothing. The tags sit on their own line when the name is
+   long, which is why this is a flex row that wraps and not a nowrap ellipsis. */
+.settings-page .ssl-cell-name {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  min-width: 0;
 }
-.settings-page .ssl-health-dot {
-  width:9px; height:9px; border-radius:50%; flex:none;
-  background:currentColor;
+.settings-page .ssl-name {
+  font-weight: var(--fw-medium);
+  word-break: break-all;
 }
-.settings-page .ssl-health-ok { color:var(--ok); }
-.settings-page .ssl-health-warn { color:var(--warn); }
-.settings-page .ssl-health-bad { color:var(--error); }
+.settings-page .ssl-more { font-size: var(--fs-sm); color: var(--text-3); }
+.settings-page .ssl-flags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.settings-page .ssl-flags .ant-tag { margin: 0; }
 
-.settings-page .ssl-flags { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
-.settings-page .ssl-flags .ant-tag { margin:0; }
-
-.settings-page .ssl-inuse {
-  display:flex; align-items:center; gap:8px; margin-top:12px;
-  color:var(--ok); font-size:13px;
-}
-
-/* WHO IS SERVING THIS CERTIFICATE, one quiet row per listener rather than a
-   warning alert: a host whose panel and subscription server hold different
-   certificates is a normal setup, not a misconfiguration. So each row states the
-   fact and offers the button, and neither shouts. */
-.settings-page .ssl-assign { margin:14px 0 4px; }
-.settings-page .ssl-assign-row {
-  display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:8px;
-  font-size:13px;
-}
-/* The icon is never the only channel: the row always carries the listener's name
-   in words, and the button's presence is what actually says "not this one yet". */
-.settings-page .ssl-assign-on { color:var(--ok); }
-.settings-page .ssl-assign-off { color:var(--text-3); }
-
-.settings-page .ssl-alert { margin:12px 0; }
-.settings-page .ssl-alert-btn { margin-top:10px; }
-.settings-page .ssl-alert-list { margin:4px 0 0; padding-inline-start:18px; }
-
-.settings-page .ssl-actions { margin-top:8px; }
-
-/* The disruptive consent, beside the buttons it changes. A row rather than a
-   line in a form, because agreeing to it disconnects live users. */
-.settings-page .ssl-disruptive {
-  border:1px solid var(--border); border-radius:8px; background:var(--surface);
-  padding:10px 14px; margin-bottom:12px;
-}
-.settings-page .ssl-disruptive-sub {
-  color:var(--text-2); font-size:12px; line-height:1.5;
-  margin-top:4px; padding-inline-start:24px;
+.settings-page .ssl-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex: none;
+  background: currentColor;
 }
 
-.settings-page .ssl-console { margin-bottom:14px; }
-.settings-page .ssl-form { margin-bottom:14px; }
-.settings-page .ssl-form-actions { padding:4px 20px; }
-.settings-page .ssl-form-alert { margin:8px 20px 0; }
-
-/* THE VALIDATION CHOICE as four situations to recognise, not four protocols to
-   know. Each is a card the whole width of the form so the sub-line has room to
-   say what the operator is agreeing to. */
-.settings-page .ssl-choices { padding:14px 20px 4px; }
-.settings-page .ssl-choices-label { font-weight:600; margin-bottom:10px; }
-.settings-page .ssl-choices-group { display:flex; flex-direction:column; gap:8px; }
-.settings-page .ssl-choice {
-  display:flex; align-items:flex-start; gap:6px; margin:0;
-  padding:10px 12px; border:1px solid var(--border); border-radius:8px;
-  background:var(--surface); white-space:normal;
-}
-.settings-page .ssl-choice.ant-radio-wrapper-checked {
-  border-color:var(--accent); background:var(--accent-weak);
-}
-.settings-page .ssl-choice > span:last-child {
-  display:flex; flex-direction:column; gap:3px; padding-inline-end:0;
-}
-.settings-page .ssl-choice-title { font-weight:500; line-height:1.4; }
-.settings-page .ssl-choice-sub {
-  color:var(--text-2); font-size:12.5px; line-height:1.5;
+.settings-page .ssl-cell-issuer {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.settings-page .ssl-advanced { background:transparent; }
+/* LIFE LEFT. The bar answers "is this fine" before the number is read, and the
+   number is there because "fine" is not a date. */
+.settings-page .ssl-cell-life { min-width: 0; }
+.settings-page .ssl-days { display: block; font-size: var(--fs-sm); }
+.settings-page .ssl-meter {
+  display: block; height: 3px; margin-top: 5px;
+  border-radius: 2px; background: var(--surface-2); overflow: hidden;
+}
+.settings-page .ssl-meter i { display: block; height: 100%; border-radius: 2px; }
 
-.settings-page .ssl-details { margin-bottom:8px; }
-.settings-page .ssl-section-title { font-weight:600; margin:22px 0 2px; }
-.settings-page .ssl-details .ssl-section-title:first-child { margin-top:0; }
-.settings-page .ssl-section-sub {
-  color:var(--text-2); font-size:12.5px; line-height:1.5; margin-bottom:8px;
-}
-.settings-page .ssl-paths { line-height:1.8; word-break:break-all; }
-.settings-page .ssl-budget {
-  display:flex; flex-wrap:wrap; align-items:center; gap:6px 24px;
-}
-.settings-page .ssl-empty { margin:10px; }
-.settings-page .ssl-refresh { margin-top:16px; text-align:right; }
-.settings-page .ssl-warn-text { color:var(--warn); }
+/* The reserved status scale, and the only place these four hues appear on this
+   page. Every one of them ships with the sentence beside it, never colour alone. */
+.settings-page .ssl-health-ok { color: var(--ok); }
+.settings-page .ssl-health-warn { color: var(--warn); }
+.settings-page .ssl-health-bad { color: var(--error); }
+.settings-page .ssl-health-off { color: var(--off); }
+.settings-page .ssl-meter-ok { background: var(--ok); }
+.settings-page .ssl-meter-warn { background: var(--warn); }
+.settings-page .ssl-meter-bad { background: var(--error); }
+.settings-page .ssl-meter-off { background: var(--off); }
 
-/* Certificate facts as a two-column definition list: label left, value right,
-   wrapping the value rather than the label so a long SAN list cannot push the
-   column out. */
-.settings-page .ssl-kv {
-  display:grid; grid-template-columns:minmax(120px, 180px) 1fr;
-  gap:6px 16px; font-size:13px;
-}
-.settings-page .ssl-kv dt { margin:0; color:var(--text-2); }
-.settings-page .ssl-kv dd { margin:0; word-break:break-word; }
+.settings-page .ssl-cell-act { text-align: end; }
+.settings-page .ssl-menu-btn { padding: 0 8px; }
 
-.settings-page .ssl-mono {
-  font-family:var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size:12px;
+/* NOTHING YET. A table with no rows teaches nothing, and this page is seen for
+   the first time by someone who has never got a certificate before, so the empty
+   state says what is wrong right now and the row below it says what to type. */
+.settings-page .ssl-blank {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 28px 20px;
+  text-align: center;
+  margin-bottom: 16px;
 }
-
-.settings-page .ssl-budget-count { font-size:22px; font-weight:600; line-height:1; }
-
-/* The action hierarchy made visual. The two free actions are normal-sized
-   buttons in the card at the top; the one that spends metered budget is small,
-   quiet, and at the bottom of a form the operator had to open. They are NOT
-   equivalent and they are deliberately not styled as if they were. Each row
-   carries its consequence in the note beside it, since a disabled antd control
-   opens no tooltip and a reason only in a tooltip is a reason nobody reads. */
-.settings-page .ssl-action {
-  display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 12px; padding:10px 0;
+.settings-page .ssl-blank-title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  margin-bottom: 6px;
 }
-.settings-page .ssl-action-note {
-  flex:1 1 320px; min-width:220px; color:var(--text-2);
-  font-size:12.5px; line-height:1.5;
-}
-.settings-page .ssl-action-last {
-  border-top:1px dashed var(--border); margin-top:6px; padding-top:12px;
+.settings-page .ssl-blank-sub {
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  max-width: 62ch;
+  margin: 0 auto;
+  line-height: var(--lh-base);
 }
 
-.settings-page .ssl-term .term-body { height:320px; max-height:320px; }
+/* THE LAST ROW: getting one, on the same surface as managing them. */
+.settings-page .ssl-new { display: flex; gap: 10px; align-items: flex-start; }
+/* The gear sits beside the button it modifies, not in a settings panel somewhere
+   else: it changes what pressing Get SSL is about to do. */
+.settings-page .ssl-gear { flex: none; }
+.settings-page .ssl-new-input { flex: 1; min-width: 0; }
+.settings-page .ssl-new-note {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+
+/* PROGRESS. A bar, a percentage and one sentence. The black terminal that used to
+   sit here answered a question the operator was not asking; it now lives one click
+   away behind the log button, which is where it belongs and where it is still
+   live. */
+.settings-page .ssl-progress {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.settings-page .ssl-progress-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.settings-page .ssl-progress-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: var(--fw-medium);
+  min-width: 0;
+}
+/* The percentage is the one number here, and it sits beside a bar that moves, so
+   it gets tabular figures to stop it jittering as the digits change. */
+.settings-page .ssl-progress-pct {
+  margin-inline-start: auto;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.settings-page .ssl-log-btn { position: relative; }
+/* How many steps failed, on the button that opens the log. Only drawn when it is
+   non-zero, so it is never a decoration. */
+.settings-page .ssl-log-badge {
+  position: absolute;
+  top: -6px;
+  inset-inline-end: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--error);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.settings-page .ssl-progress-step {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: var(--lh-base);
+  /* The sentence changes every few seconds and the lines differ in length, so the
+     block is held at two lines' height: without this the whole page below it
+     jumps each time a shorter step replaces a longer one. */
+  min-height: calc(var(--fs-sm) * var(--lh-base) * 2);
+}
+
+/* The log window. Rules are NOT scoped under .settings-page: antd portals a modal
+   to document.body, outside #app. */
+/* THE LOG WINDOW. One <pre> of the real output rather than a styled step list:
+   what an operator opens a log for is what the tool actually printed. */
+.ssl-log-modal .ant-modal-body { padding: 16px; }
+.ssl-log-modal .ssl-rawlog-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.ssl-log-modal .ssl-rawlog-meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+.ssl-log-modal .ssl-rawlog {
+  margin: 0;
+  padding: 12px 14px;
+  height: 460px;
+  max-height: 62vh;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text);
+  /* The output is the point, so it stays selectable and wraps rather than being
+     cut off; long acme.sh lines are informative right to the end. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* The key-algorithm popup. Also outside .settings-page, for the same reason: antd
+   portals it to document.body. Hand-built rows rather than a-radio-group because
+   each option carries a sentence explaining what it costs, and an antd radio puts
+   its label on one line. */
+.ssl-key-modal .ssl-key-intro {
+  margin-bottom: 14px;
+  color: var(--text-2);
+  line-height: var(--lh-base);
+}
+.ssl-key-modal .ssl-key-opt {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.ssl-key-modal .ssl-key-opt:hover { border-color: var(--border-strong); }
+.ssl-key-modal .ssl-key-on {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+.ssl-key-modal .ssl-key-radio {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  flex: none;
+  margin-top: 3px;
+}
+.ssl-key-modal .ssl-key-on .ssl-key-radio {
+  border-color: var(--accent);
+  border-width: 5px;
+}
+.ssl-key-modal .ssl-key-body { min-width: 0; }
+.ssl-key-modal .ssl-key-name {
+  display: block;
+  font-weight: var(--fw-medium);
+}
+.ssl-key-modal .ssl-key-name .ant-tag { margin-inline-start: 8px; }
+.ssl-key-modal .ssl-key-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+.ssl-key-modal .ssl-key-foot {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+
+/* ---------------------------------------------------------------------------
+ * THE CONFIRMATION, and NOT under .settings-page.
+ *
+ * antd renders a modal into a wrapper appended to document.body, which is
+ * outside #app and therefore outside the .settings-page scope. The template
+ * passes wrap-class-name="ssl-modal" so these rules have something of their own
+ * to hang on; a .settings-page prefix here would match nothing at all.
+ * ------------------------------------------------------------------------ */
+
+.ssl-modal .ssl-modal-names { margin-bottom: 12px; }
+.ssl-modal .ssl-modal-names .ant-tag { margin: 0 6px 6px 0; }
+
+.ssl-modal .ssl-modal-reason {
+  margin: 0 0 12px;
+  line-height: var(--lh-base);
+}
+
+.ssl-modal .ssl-modal-alert { margin-bottom: 12px; }
+.ssl-modal .ssl-modal-list { margin: 4px 0 0; padding-inline-start: 18px; }
+.ssl-modal .ssl-modal-list li { margin-bottom: 4px; }
+
+.ssl-modal .ssl-modal-field { margin-bottom: 12px; }
+.ssl-modal .ssl-modal-field > label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: var(--fw-medium);
+}
+.ssl-modal .ssl-modal-hint {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+
+/* What it costs, last and quiet. It is the one line that is true whatever else
+   the modal is showing, so it reads as a footnote rather than as a warning. */
+.ssl-modal .ssl-modal-cost {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
