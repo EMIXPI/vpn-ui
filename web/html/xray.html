@@ -72,62 +72,114 @@
               </a-card>
             </a-col>
             <a-col>
-              <a-tabs default-active-key="tpl-basic"
-                @change="(activeKey) => { this.changePage(activeKey); }"
-                :class="themeSwitcher.currentTheme">
-                <a-tab-pane key="tpl-basic" :style="{ paddingTop: '20px' }">
-                  <template #tab>
-                    <a-icon type="setting"></a-icon>
-                    <span>{{ i18n "pages.xray.basicTemplate"}}</span>
-                  </template>
-                  {{ template "settings/xray/basics" . }}
-                </a-tab-pane>
-                <a-tab-pane key="tpl-routing" :style="{ paddingTop: '20px' }">
-                  <template #tab>
-                    <a-icon type="swap"></a-icon>
-                    <span>{{ i18n "pages.xray.Routings"}}</span>
-                  </template>
-                  {{ template "settings/xray/routing" . }}
-                </a-tab-pane>
-                <a-tab-pane key="tpl-outbound" force-render="true">
-                  <template #tab>
-                    <a-icon type="upload"></a-icon>
-                    <span>{{ i18n "pages.xray.Outbounds"}}</span>
-                  </template>
-                  {{ template "settings/xray/outbounds" . }}
-                </a-tab-pane>
-                <a-tab-pane key="tpl-reverse" :style="{ paddingTop: '20px' }"
-                  force-render="true">
-                  <template #tab>
-                    <a-icon type="import"></a-icon>
-                    <span>{{ i18n "pages.xray.outbound.reverse"}}</span>
-                  </template>
-                  {{ template "settings/xray/reverse" . }}
-                </a-tab-pane>
-                <a-tab-pane key="tpl-balancer" :style="{ paddingTop: '20px' }"
-                  force-render="true">
-                  <template #tab>
-                    <a-icon type="cluster"></a-icon>
-                    <span>{{ i18n "pages.xray.Balancers"}}</span>
-                  </template>
-                  {{ template "settings/xray/balancers" . }}
-                </a-tab-pane>
-                <a-tab-pane key="tpl-dns" :style="{ paddingTop: '20px' }"
-                  force-render="true">
-                  <template #tab>
-                    <a-icon type="database"></a-icon>
-                    <span>DNS</span>
-                  </template>
-                  {{ template "settings/xray/dns" . }}
-                </a-tab-pane>
-                <a-tab-pane key="tpl-advanced" force-render="true">
-                  <template #tab>
-                    <a-icon type="code"></a-icon>
-                    <span>{{ i18n "pages.xray.advancedTemplate"}}</span>
-                  </template>
-                  {{ template "settings/xray/advanced" . }}
-                </a-tab-pane>
-              </a-tabs>
+              {{/*
+                The section tree. Each entry below is one of the a-tab-panes this
+                replaced, with its key, its icon and its label unchanged. The
+                panes that carried force-render="true" are listed to
+                initSections() instead, because that is what the attribute meant:
+                be in the document from first paint. Two of them are read by id
+                (changeCode reaches for #xraySetting, changeObsCode for
+                #obsSetting), so they cannot wait to be opened.
+
+                The second level is not written here: SectionNavMixin reads it
+                back out of each section's rendered a-collapse headers. Only
+                Basics and DNS have any; the rest are tables and an editor.
+              */}}
+              <div class="bo-secnav-layout">
+                <nav class="bo-secnav" aria-label='{{ i18n "menu.xray"}}'>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-basic' }"
+                      :aria-current="sectionKey === 'tpl-basic'"
+                      @click="selectSection('tpl-basic')">
+                      <a-icon type="setting"></a-icon>
+                      <span class="bo-secnav-label">{{ i18n "pages.xray.basicTemplate"}}</span>
+                      <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                    </button>
+                    <div class="bo-secnav-subs" v-if="sectionKey === 'tpl-basic'">
+                      <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                        :class="{ 'is-active': sectionSub === String(s.i) }"
+                        @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                    </div>
+                  </div>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-routing' }"
+                      :aria-current="sectionKey === 'tpl-routing'"
+                      @click="selectSection('tpl-routing')">
+                      <a-icon type="swap"></a-icon>
+                      <span class="bo-secnav-label">{{ i18n "pages.xray.Routings"}}</span>
+                    </button>
+                  </div>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-outbound' }"
+                      :aria-current="sectionKey === 'tpl-outbound'"
+                      @click="selectSection('tpl-outbound')">
+                      <a-icon type="upload"></a-icon>
+                      <span class="bo-secnav-label">{{ i18n "pages.xray.Outbounds"}}</span>
+                    </button>
+                  </div>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-reverse' }"
+                      :aria-current="sectionKey === 'tpl-reverse'"
+                      @click="selectSection('tpl-reverse')">
+                      <a-icon type="import"></a-icon>
+                      <span class="bo-secnav-label">{{ i18n "pages.xray.outbound.reverse"}}</span>
+                    </button>
+                  </div>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-balancer' }"
+                      :aria-current="sectionKey === 'tpl-balancer'"
+                      @click="selectSection('tpl-balancer')">
+                      <a-icon type="cluster"></a-icon>
+                      <span class="bo-secnav-label">{{ i18n "pages.xray.Balancers"}}</span>
+                    </button>
+                  </div>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-dns' }"
+                      :aria-current="sectionKey === 'tpl-dns'"
+                      @click="selectSection('tpl-dns')">
+                      <a-icon type="database"></a-icon>
+                      <span class="bo-secnav-label">DNS</span>
+                      <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                    </button>
+                    <div class="bo-secnav-subs" v-if="sectionKey === 'tpl-dns'">
+                      <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                        :class="{ 'is-active': sectionSub === String(s.i) }"
+                        @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                    </div>
+                  </div>
+                  <div>
+                    <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === 'tpl-advanced' }"
+                      :aria-current="sectionKey === 'tpl-advanced'"
+                      @click="selectSection('tpl-advanced')">
+                      <a-icon type="code"></a-icon>
+                      <span class="bo-secnav-label">{{ i18n "pages.xray.advancedTemplate"}}</span>
+                    </button>
+                  </div>
+                </nav>
+                <div class="bo-secpanes">
+                  <div v-if="sectionMounted['tpl-basic']" v-show="sectionKey === 'tpl-basic'" data-section="tpl-basic" :style="{ paddingTop: '20px' }">
+                    {{ template "settings/xray/basics" . }}
+                  </div>
+                  <div v-if="sectionMounted['tpl-routing']" v-show="sectionKey === 'tpl-routing'" data-section="tpl-routing" :style="{ paddingTop: '20px' }">
+                    {{ template "settings/xray/routing" . }}
+                  </div>
+                  <div v-if="sectionMounted['tpl-outbound']" v-show="sectionKey === 'tpl-outbound'" data-section="tpl-outbound">
+                    {{ template "settings/xray/outbounds" . }}
+                  </div>
+                  <div v-if="sectionMounted['tpl-reverse']" v-show="sectionKey === 'tpl-reverse'" data-section="tpl-reverse" :style="{ paddingTop: '20px' }">
+                    {{ template "settings/xray/reverse" . }}
+                  </div>
+                  <div v-if="sectionMounted['tpl-balancer']" v-show="sectionKey === 'tpl-balancer'" data-section="tpl-balancer" :style="{ paddingTop: '20px' }">
+                    {{ template "settings/xray/balancers" . }}
+                  </div>
+                  <div v-if="sectionMounted['tpl-dns']" v-show="sectionKey === 'tpl-dns'" data-section="tpl-dns" :style="{ paddingTop: '20px' }">
+                    {{ template "settings/xray/dns" . }}
+                  </div>
+                  <div v-if="sectionMounted['tpl-advanced']" v-show="sectionKey === 'tpl-advanced'" data-section="tpl-advanced">
+                    {{ template "settings/xray/advanced" . }}
+                  </div>
+                </div>
+              </div>
             </a-col>
           </a-row>
         </transition>
@@ -136,6 +188,8 @@
 {{template "page/body_scripts" .}}
 <script
   src="{{ .base_path }}assets/js/model/outbound.js?{{ .asset_ver }}"></script>
+<script
+  src="{{ .base_path }}assets/js/util/section-nav.js?{{ .asset_ver }}"></script>
 <script
   src="{{ .base_path }}assets/codemirror/codemirror.min.js?{{ .asset_ver }}"></script>
 <script src="{{ .base_path }}assets/codemirror/javascript.js"></script>
@@ -239,7 +293,7 @@
 
   const app = new Vue({
     delimiters: ['[[', ']]'],
-    mixins: [MediaQueryMixin],
+    mixins: [MediaQueryMixin, SectionNavMixin],
     el: '#app',
     data: {
       themeSwitcher,
@@ -1491,6 +1545,10 @@
       }
     },
     async mounted() {
+      // 'tpl-basic' was the strip's default-active-key. The five keys after it
+      // are the panes that carried force-render="true" and must exist from the
+      // start; changeCode and changeObsCode reach into two of them by id.
+      this.initSections('tpl-basic', ['tpl-outbound', 'tpl-reverse', 'tpl-balancer', 'tpl-dns', 'tpl-advanced']);
       if (window.location.protocol !== "https:" && !SecAlertDismissal.isDismissed()) {
         this.showAlert = true;
       }

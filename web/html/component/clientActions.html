@@ -538,6 +538,17 @@
       showInfo(dbInboundId, client) {
         dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
         if (!dbInbound) return;
+        // Called two ways. With a client it is ONE MEMBERSHIP, which the redesigned
+        // panel answers; without one it is the Inbounds page asking about a
+        // non-multi-user inbound, which only inboundInfoModal renders (tunnel, socks,
+        // http, Xray-native WireGuard peers, single-config Shadowsocks). The typeof
+        // guard is not defensiveness: the Inbounds page does not include the new
+        // modal, and reaching for an absent global is a ReferenceError, not a no-op.
+        if (client && typeof membershipInfoModal !== 'undefined') {
+          membershipInfoModalApp.app = this;
+          membershipInfoModal.show(this.checkFallback(dbInbound), client);
+          return;
+        }
         index = 0;
         if (dbInbound.isMultiUser()) {
           inbound = dbInbound.toInbound();

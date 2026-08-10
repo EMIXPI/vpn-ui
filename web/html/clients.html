@@ -220,6 +220,16 @@
                         <a-switch size="small" :checked="!!row.enable"
                           @change="v => toggleEnable(row, v)"></a-switch>
                       </a-tooltip>
+                      <!-- The whole account in one panel: its subscription, its
+                           health, and every inbound serving it with whatever that
+                           protocol actually gives the customer. Distinct from the
+                           info-circle inside the expander, which speaks for ONE
+                           membership. Left of the menu because it only reads. -->
+                      <a-tooltip>
+                        <template slot="title">{{ i18n "pages.clients.accountInfo" }}</template>
+                        <a-button size="small" icon="info-circle"
+                          @click="showAccountInfo(row)"></a-button>
+                      </a-tooltip>
                       <a-dropdown :trigger="['click']">
                         <a-button size="small" icon="more" @click="e => e.preventDefault()"></a-button>
                         <a-menu slot="overlay" :theme="themeSwitcher.currentTheme"
@@ -396,6 +406,8 @@
 {{template "modals/textModal"}}
 {{template "modals/qrcodeModal"}}
 {{template "modals/inboundInfoModal"}}
+{{template "modals/accountInfoModal"}}
+{{template "modals/membershipInfoModal"}}
 {{template "modals/clientsBulkModal"}}
 {{template "modals/wgcConfigModal"}}
 {{template "modals/awgConfigModal"}}
@@ -484,7 +496,11 @@
         { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiresCol' }, width: 150 },
         { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'servingCol' } },
         { title: '{{ i18n "lastOnline" }}', scopedSlots: { customRender: 'seenCol' }, width: 100 },
-        { title: '', scopedSlots: { customRender: 'rowCol' }, width: 104, align: 'right' },
+        // 104 fitted a switch and a menu button. The Account Info button made three
+        // controls, which overflowed the cell and gave the whole table a horizontal
+        // scrollbar. Measured, not guessed: switch 28 + gap 6 + button 24 + gap 6 +
+        // button 24 = 88, plus the cell's own padding.
+        { title: '', scopedSlots: { customRender: 'rowCol' }, width: 132, align: 'right' },
       ],
     },
     methods: {
@@ -961,6 +977,13 @@
       // case the icon is hidden for.
       showAccountSub(row) {
         qrModal.showSub(row.email, { subId: row.subId });
+      },
+      // The account panel. It reads everything through this page (inbounds, stats,
+      // exports), so it is handed the page rather than a copy of its state: a
+      // snapshot would go stale the moment a traffic tick landed behind it.
+      showAccountInfo(row) {
+        accountInfoModalApp.app = this;
+        accountInfoModal.show(row);
       },
       clickPageAction(action) {
         switch (action.key) {

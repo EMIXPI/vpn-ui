@@ -47,57 +47,134 @@
                 </a-card>
               </a-col>
               <a-col>
-                <a-tabs default-active-key="1">
-                  <a-tab-pane key="1" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="setting"></a-icon>
-                      <span>{{ i18n "pages.settings.panelSettings" }}</span>
-                    </template>
-                    {{ template "settings/panel/general" . }}
-                  </a-tab-pane>
-                  <a-tab-pane key="2" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="safety"></a-icon>
-                      <span>{{ i18n "pages.settings.securitySettings" }}</span>
-                    </template>
-                    {{ template "settings/panel/security" . }}
-                  </a-tab-pane>
-                  <a-tab-pane key="3" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="message"></a-icon>
-                      <span>{{ i18n "pages.settings.TGBotSettings" }}</span>
-                    </template>
-                    {{ template "settings/panel/telegram" . }}
-                  </a-tab-pane>
-                  <a-tab-pane key="4" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="cloud-server"></a-icon>
-                      <span>{{ i18n "pages.settings.subSettings" }}</span>
-                    </template>
-                    {{ template "settings/panel/subscription/general" . }}
-                  </a-tab-pane>
-                  <a-tab-pane key="5" v-if="allSetting.subJsonEnable || allSetting.subClashEnable" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="code"></a-icon>
-                      <span>{{ i18n "pages.settings.subSettings" }} (Formats)</span>
-                    </template>
-                    {{ template "settings/panel/subscription/json" . }}
-                  </a-tab-pane>
-                  <a-tab-pane key="6" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="cluster"></a-icon>
-                      <span>{{ i18n "pages.settings.serviceSettings" }}</span>
-                    </template>
-                    {{ template "settings/panel/service" . }}
-                  </a-tab-pane>
-                  <a-tab-pane key="7" :style="{ paddingTop: '20px' }">
-                    <template #tab>
-                      <a-icon type="safety-certificate"></a-icon>
-                      <span>{{ i18n "pages.settings.sslSettings" }}</span>
-                    </template>
-                    {{ template "settings/panel/ssl" . }}
-                  </a-tab-pane>
-                </a-tabs>
+                {{/*
+                  The section tree. Each entry below is one of the a-tab-panes
+                  this replaced, with its key, its icon and its label unchanged.
+                  The second level is not written here: SectionNavMixin reads it
+                  back out of each section's rendered a-collapse headers, so the
+                  panels stay the single source of their own names.
+                */}}
+                <div class="bo-secnav-layout">
+                  <nav class="bo-secnav" aria-label='{{ i18n "menu.settings"}}'>
+                    <div>
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '1' }"
+                        :aria-current="sectionKey === '1'"
+                        @click="selectSection('1')">
+                        <a-icon type="setting"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.panelSettings" }}</span>
+                        <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                      </button>
+                      <div class="bo-secnav-subs" v-if="sectionKey === '1'">
+                        <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                          :class="{ 'is-active': sectionSub === String(s.i) }"
+                          @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                      </div>
+                    </div>
+                    <div>
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '2' }"
+                        :aria-current="sectionKey === '2'"
+                        @click="selectSection('2')">
+                        <a-icon type="safety"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.securitySettings" }}</span>
+                        <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                      </button>
+                      <div class="bo-secnav-subs" v-if="sectionKey === '2'">
+                        <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                          :class="{ 'is-active': sectionSub === String(s.i) }"
+                          @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                      </div>
+                    </div>
+                    <div>
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '3' }"
+                        :aria-current="sectionKey === '3'"
+                        @click="selectSection('3')">
+                        <a-icon type="message"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.TGBotSettings" }}</span>
+                        <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                      </button>
+                      <div class="bo-secnav-subs" v-if="sectionKey === '3'">
+                        <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                          :class="{ 'is-active': sectionSub === String(s.i) }"
+                          @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                      </div>
+                    </div>
+                    <div>
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '4' }"
+                        :aria-current="sectionKey === '4'"
+                        @click="selectSection('4')">
+                        <a-icon type="cloud-server"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.subSettings" }}</span>
+                        <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                      </button>
+                      <div class="bo-secnav-subs" v-if="sectionKey === '4'">
+                        <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                          :class="{ 'is-active': sectionSub === String(s.i) }"
+                          @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                      </div>
+                    </div>
+                    <div v-if="allSetting.subJsonEnable || allSetting.subClashEnable">
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '5' }"
+                        :aria-current="sectionKey === '5'"
+                        @click="selectSection('5')">
+                        <a-icon type="code"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.subSettings" }} (Formats)</span>
+                        <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                      </button>
+                      <div class="bo-secnav-subs" v-if="sectionKey === '5'">
+                        <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                          :class="{ 'is-active': sectionSub === String(s.i) }"
+                          @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                      </div>
+                    </div>
+                    <div>
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '6' }"
+                        :aria-current="sectionKey === '6'"
+                        @click="selectSection('6')">
+                        <a-icon type="cluster"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.serviceSettings" }}</span>
+                        <a-icon type="right" class="bo-secnav-chev"></a-icon>
+                      </button>
+                      <div class="bo-secnav-subs" v-if="sectionKey === '6'">
+                        <button type="button" class="bo-secnav-sub" v-for="s in sectionSubList" :key="s.i"
+                          :class="{ 'is-active': sectionSub === String(s.i) }"
+                          @click="gotoSectionSub(s.i)" v-text="s.label"></button>
+                      </div>
+                    </div>
+                    {{/* The SSL manager is not a stack of collapse panels, so it
+                         has no second level and carries no chevron. */}}
+                    <div>
+                      <button type="button" class="bo-secnav-sec" :class="{ 'is-open': sectionKey === '7' }"
+                        :aria-current="sectionKey === '7'"
+                        @click="selectSection('7')">
+                        <a-icon type="safety-certificate"></a-icon>
+                        <span class="bo-secnav-label">{{ i18n "pages.settings.sslSettings" }}</span>
+                      </button>
+                    </div>
+                  </nav>
+                  <div class="bo-secpanes">
+                    <div v-if="sectionMounted['1']" v-show="sectionKey === '1'" data-section="1" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/general" . }}
+                    </div>
+                    <div v-if="sectionMounted['2']" v-show="sectionKey === '2'" data-section="2" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/security" . }}
+                    </div>
+                    <div v-if="sectionMounted['3']" v-show="sectionKey === '3'" data-section="3" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/telegram" . }}
+                    </div>
+                    <div v-if="sectionMounted['4']" v-show="sectionKey === '4'" data-section="4" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/subscription/general" . }}
+                    </div>
+                    <div v-if="(allSetting.subJsonEnable || allSetting.subClashEnable) && sectionMounted['5']" v-show="sectionKey === '5'" data-section="5" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/subscription/json" . }}
+                    </div>
+                    <div v-if="sectionMounted['6']" v-show="sectionKey === '6'" data-section="6" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/service" . }}
+                    </div>
+                    <div v-if="sectionMounted['7']" v-show="sectionKey === '7'" data-section="7" :style="{ paddingTop: '20px' }">
+                      {{ template "settings/panel/ssl" . }}
+                    </div>
+                  </div>
+                </div>
               </a-col>
             </a-row>
           </template>
@@ -108,6 +185,7 @@
 <script src="{{ .base_path }}assets/qrcode/qrious2.min.js?{{ .asset_ver }}"></script>
 <script src="{{ .base_path }}assets/otpauth/otpauth.umd.min.js?{{ .asset_ver }}"></script>
 <script src="{{ .base_path }}assets/js/model/setting.js?{{ .asset_ver }}"></script>
+<script src="{{ .base_path }}assets/js/util/section-nav.js?{{ .asset_ver }}"></script>
 {{template "component/aSidebar" .}}
 {{template "component/aThemeSwitch" .}}
 {{template "component/aSettingListItem" .}}
@@ -115,7 +193,7 @@
 <script>
   const app = new Vue({
     delimiters: ['[[', ']]'],
-    mixins: [MediaQueryMixin],
+    mixins: [MediaQueryMixin, SectionNavMixin],
     el: '#app',
     data: {
       themeSwitcher,
@@ -1440,6 +1518,10 @@
       }
     },
     async mounted() {
+      // Before the first await: the loop at the foot of this hook never returns,
+      // and the section tree has to know its default before the panes can render.
+      // '1' was the strip's default-active-key; no pane here used force-render.
+      this.initSections('1', []);
       this.entryHost = window.location.hostname;
       this.entryPort = window.location.port;
       this.entryProtocol = window.location.protocol;
