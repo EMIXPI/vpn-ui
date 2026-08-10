@@ -113,6 +113,19 @@
             <a-radio-button :value="false">Content</a-radio-button>
         </a-radio-group>
     </a-form-item>
+    <!-- The managed certificate picker. Same list and same stable paths as the
+         Xray TLS form; see form/tls_settings.html for why it writes the active
+         path rather than a version directory. -->
+    <a-form-item v-if="sslCertChoices().length" label='{{ i18n "pages.inbounds.useManagedCert" }}'>
+        <a-select :value="sslCertSelectedSettings()" @change="applyManagedCertSettings"
+            :dropdown-class-name="themeSwitcher.currentTheme">
+            <a-select-option :value="''">{{ i18n "none" }}</a-select-option>
+            <a-select-option v-for="c in sslCertChoices()" :key="c.profile" :value="c.profile">
+                [[ c.label ]]<span v-if="c.expired"> &middot; {{ i18n "pages.settings.ssl.expired" }}</span><span
+                    v-else-if="c.selfSigned"> &middot; {{ i18n "pages.settings.ssl.selfSigned" }}</span>
+            </a-select-option>
+        </a-select>
+    </a-form-item>
     <template v-if="inbound.settings.tlsUseFile">
         <a-form-item label="Certificate Path">
             <a-input

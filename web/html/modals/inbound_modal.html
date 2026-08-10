@@ -674,6 +674,99 @@
                 inModal.inbound.stream.tls.certs[index].certFile = app.defaultCert;
                 inModal.inbound.stream.tls.certs[index].keyFile = app.defaultKey;
             },
+            // --- The managed certificate picker ---------------------------------
+            // app.sslCertificates comes from getDefaultSettings and is WITHHELD from
+            // callers without PermPanelSettings, so an empty list is the normal
+            // state for a reseller rather than an error. Everything below has to
+            // tolerate it being undefined for that reason.
+            sslCertChoices() {
+                return app.sslCertificates || [];
+            },
+            // Which option is currently selected, derived from the PATHS the inbound
+            // stores rather than from a remembered profile name: an inbound records
+            // paths, and they may have been typed by hand or set before this picker
+            // existed. Matching the path back is the only honest answer, and it
+            // means an inbound pointed somewhere else correctly shows nothing
+            // selected instead of a stale name.
+            sslCertSelected(index) {
+                const certs = (this.inModal.inbound.stream.tls || {}).certs || [];
+                const cert = certs[index || 0];
+                if (!cert || !cert.useFile) return '';
+                const path = (cert.certFile || '').trim();
+                if (!path) return '';
+                const hit = this.sslCertChoices().find(c => c.certPath === path);
+                return hit ? hit.profile : '';
+            },
+            // Writes the stable active paths into the FIRST certificate entry, and
+            // switches it to path mode: a managed certificate is a pair of files on
+            // disk, so pasting its contents would freeze a copy that never renews.
+            //
+            // Clearing the select puts the fields back to empty rather than leaving
+            // the last selection behind, so "none" is a state the operator can
+            // actually reach.
+            applyManagedCert(index, profile) {
+                const tls = this.inModal.inbound.stream.tls;
+                if (!tls || !Array.isArray(tls.certs)) return;
+                // SEEDS AN EMPTY ARRAY rather than bailing on it, and that is the
+                // one case where this matters most. TlsStreamSettings.fromJson
+                // guards with ObjectUtil.isEmpty, which treats [] as non-empty, so
+                // a stored inbound carrying "certificates": [] loads with certs = []
+                // and the default single entry never applies. The repeater then
+                // renders no rows, and the "+" button lives INSIDE the repeater
+                // (form/tls_settings.html), so there is no control left to add one.
+                // The picker is the only way out of that state.
+                if (!tls.certs.length) {
+                    tls.certs.push(new TlsStreamSettings.Cert());
+                }
+                const cert = tls.certs[index || 0];
+                if (!cert) return;
+                // None. Empties the pair rather than leaving the last choice
+                // behind, so "no managed certificate" is a state the operator can
+                // actually reach from here.
+                if (!profile) {
+                    cert.certFile = '';
+                    cert.keyFile = '';
+                    return;
+                }
+                const hit = this.sslCertChoices().find(c => c.profile === profile);
+                if (!hit) return;
+                cert.useFile = true;
+                cert.certFile = hit.certPath;
+                cert.keyFile = hit.keyPath;
+            },
+            // The same picker for the native protocols that carry their own cert
+            // path pair on inbound.settings (openconnect, sstp, ikev2) rather than
+            // in the Xray stream.
+            sslCertSelectedSettings() {
+                const s = this.inModal.inbound.settings || {};
+                // In Content mode the path pair is inert, so reporting a selection
+                // would claim a certificate is in use that the daemon never reads.
+                if (!s.tlsUseFile) return '';
+                const path = (s.certificateFile || '').trim();
+                if (!path) return '';
+                const hit = this.sslCertChoices().find(c => c.certPath === path);
+                return hit ? hit.profile : '';
+            },
+            applyManagedCertSettings(profile) {
+                const s = this.inModal.inbound.settings;
+                if (!s) return;
+                if (!profile) {
+                    s.certificateFile = '';
+                    s.keyFile = '';
+                    return;
+                }
+                const hit = this.sslCertChoices().find(c => c.profile === profile);
+                if (!hit) return;
+                // tlsUseFile FIRST, and it is not optional. ocserv, sstp and ikev2
+                // all read the path pair only when this is true (openconnect.go:248,
+                // sstp.go:217, ikev2.go:479) and fall back to the inline PEM fields
+                // otherwise. Writing the paths while the form sits in Content mode
+                // would leave a picker that appears to work and a daemon that
+                // ignores it.
+                s.tlsUseFile = true;
+                s.certificateFile = hit.certPath;
+                s.keyFile = hit.keyPath;
+            },
             async getNewX25519Cert() {
                 inModal.loading(true);
                 const msg = await HttpUtil.get("/panel/api/server/getNewX25519Cert");

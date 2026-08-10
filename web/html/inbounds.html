@@ -922,6 +922,10 @@
       expireDiff: 0,
       trafficDiff: 0,
       defaultCert: '',
+      // The certificates the SSL manager holds, for the inbound TLS picker.
+      // Withheld by getDefaultSettings from callers without PermPanelSettings, so
+      // an empty list here is the normal state for a reseller, not a failure.
+      sslCertificates: [],
       defaultKey: '',
       clientCount: [],
       onlineClients: [],
@@ -1026,6 +1030,7 @@
         // cannot author an inbound, which is the only thing these pre-fill), so keep
         // the empty-string default rather than writing undefined into the form.
         this.defaultCert = settings.defaultCert ?? '';
+        this.sslCertificates = settings.sslCertificates ?? [];
         this.defaultKey = settings.defaultKey ?? '';
         this.tgBotEnable = settings.tgBotEnable;
         this.subSettings = {

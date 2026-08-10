@@ -979,7 +979,7 @@ func extractHostname(host string) string {
 // TLS cert/key PATHS, pre-filled when an inbound enables TLS) and an admin who
 // cannot reach Panel Settings cannot create inbounds either, so withholding them
 // costs nothing and keeps filesystem paths out of a reseller's page source.
-var panelSettingsOnlyDefaults = []string{"defaultCert", "defaultKey"}
+var panelSettingsOnlyDefaults = []string{"defaultCert", "defaultKey", "sslCertificates"}
 
 // GetDefaultSettings returns the read-only defaults every client-rendering page
 // needs: the expiry/traffic warning thresholds, the subscription URIs, the date
@@ -991,22 +991,27 @@ var panelSettingsOnlyDefaults = []string{"defaultCert", "defaultKey"}
 func (s *SettingService) GetDefaultSettings(host string, full bool) (map[string]any, error) {
 	type settingFunc func() (any, error)
 	settings := map[string]settingFunc{
-		"expireDiff":     func() (any, error) { return s.GetExpireDiff() },
-		"trafficDiff":    func() (any, error) { return s.GetTrafficDiff() },
-		"pageSize":       func() (any, error) { return s.GetPageSize() },
-		"defaultCert":    func() (any, error) { return s.GetCertFile() },
-		"defaultKey":     func() (any, error) { return s.GetKeyFile() },
-		"tgBotEnable":    func() (any, error) { return s.GetTgbotEnabled() },
-		"subEnable":      func() (any, error) { return s.GetSubEnable() },
-		"subJsonEnable":  func() (any, error) { return s.GetSubJsonEnable() },
-		"subClashEnable": func() (any, error) { return s.GetSubClashEnable() },
-		"subTitle":       func() (any, error) { return s.GetSubTitle() },
-		"subURI":         func() (any, error) { return s.GetSubURI() },
-		"subJsonURI":     func() (any, error) { return s.GetSubJsonURI() },
-		"subClashURI":    func() (any, error) { return s.GetSubClashURI() },
-		"remarkModel":    func() (any, error) { return s.GetRemarkModel() },
-		"datepicker":     func() (any, error) { return s.GetDatepicker() },
-		"ipLimitEnable":  func() (any, error) { return s.GetIpLimitEnable() },
+		"expireDiff":  func() (any, error) { return s.GetExpireDiff() },
+		"trafficDiff": func() (any, error) { return s.GetTrafficDiff() },
+		"pageSize":    func() (any, error) { return s.GetPageSize() },
+		"defaultCert": func() (any, error) { return s.GetCertFile() },
+		"defaultKey":  func() (any, error) { return s.GetKeyFile() },
+		// Every certificate the SSL manager holds, so an inbound turning TLS on can
+		// PICK one instead of being told to paste two filesystem paths. Rides the
+		// same gate as defaultCert/defaultKey above, which is exactly right: it is
+		// the same class of thing, a list of cert/key paths for inbound authoring.
+		"sslCertificates": func() (any, error) { return sslCertificateChoices(), nil },
+		"tgBotEnable":     func() (any, error) { return s.GetTgbotEnabled() },
+		"subEnable":       func() (any, error) { return s.GetSubEnable() },
+		"subJsonEnable":   func() (any, error) { return s.GetSubJsonEnable() },
+		"subClashEnable":  func() (any, error) { return s.GetSubClashEnable() },
+		"subTitle":        func() (any, error) { return s.GetSubTitle() },
+		"subURI":          func() (any, error) { return s.GetSubURI() },
+		"subJsonURI":      func() (any, error) { return s.GetSubJsonURI() },
+		"subClashURI":     func() (any, error) { return s.GetSubClashURI() },
+		"remarkModel":     func() (any, error) { return s.GetRemarkModel() },
+		"datepicker":      func() (any, error) { return s.GetDatepicker() },
+		"ipLimitEnable":   func() (any, error) { return s.GetIpLimitEnable() },
 		// The overview's access-log viewer reads Xray's access FILE, so this is what
 		// decides whether it has anything to show. It used to ride on ipLimitEnable,
 		// which meant the same thing until IP-limit enforcement moved into the core and
