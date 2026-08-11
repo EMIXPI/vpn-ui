@@ -403,7 +403,7 @@
          however they are stored. External Proxy is genuinely per account: it only
          picks which relay endpoint this account's links advertise. -->
     <template v-if="inbound.protocol === Protocols.MTPROTO">
-        <a-divider>MTProto Proxy</a-divider>
+        <div class="bo-if-sub">MTProto Proxy</div>
 
         <a-form-item>
             <template slot="label">

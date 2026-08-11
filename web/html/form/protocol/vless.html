@@ -80,6 +80,9 @@
       </a-form>
       <a-divider :style="{ margin: '5px 0' }"></a-divider>
     </template>
+{{end}}
+
+{{define "form/vless/security"}}
     <!-- Flow is a property of the INBOUND, not of one client. It used to be set on
          the seed client while the inbound was being created and was unreachable
          afterwards, because the clients moved to their own page and this form only
@@ -158,4 +161,4 @@
       </a-form>
       <a-divider :style="{ margin: '5px 0' }"></a-divider>
     </template>
-    {{end}}
+{{end}}

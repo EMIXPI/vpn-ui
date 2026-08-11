@@ -1365,6 +1365,111 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 
 /* ================================================================== *
+ * inbound form (Inbounds page add / edit)
+ *
+ * The same rail as the client form above, and deliberately so: the two are
+ * the panel's two "make a thing" dialogs and there is no reason for them to
+ * be different controls. Everything structural is reused from .bo-cf-*;
+ * what is added here is what an inbound has and an account does not.
+ *
+ * An account has four sections. An inbound has up to nine, because a VLESS
+ * inbound can render 195 fields against SSH's 25, so the rail carries two
+ * things the client rail has no need for:
+ *
+ *   a count, because "Final mask" and "Identity" look equally weighty in a
+ *   list and one of them is 64 fields;
+ *
+ *   a dot, because an inbound can be unsaveable (a missing certificate, an
+ *   xhttp combination the core refuses) and the old form expressed that as
+ *   a greyed button with no reason attached.
+ *
+ * Sections are grouped under three fixed headings. The groups do not change
+ * with the protocol even though their contents do, so "certificates are
+ * under Security" stays true whether the operator is on OpenVPN or VLESS.
+ * ================================================================== */
+
+/* Group heading. Reads as a label for what follows, not as a row you can click. */
+.bo-if-grp {
+  font-size:10px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--text-3); margin:12px 0 4px; padding-inline-start:11px;
+}
+.bo-if-grp:first-child { margin-top:2px; }
+
+/* The count, pinned right. Tabular so the column of numbers lines up. */
+.bo-if-n {
+  margin-inline-start:auto; padding-inline-start:6px;
+  font-size:11px; font-weight:400; color:var(--text-3);
+  font-variant-numeric:tabular-nums;
+}
+/* The blocker dot sits with the label rather than at the far edge: it qualifies
+   the section, where the count measures it. When a section has both, the dot is
+   next to the name and the number stays in its column. */
+.bo-if-dot {
+  flex:0 0 auto; width:7px; height:7px; border-radius:50%;
+  background:var(--error); margin-inline-start:2px;
+}
+.bo-if-dot + .bo-if-n { margin-inline-start:auto; }
+.bo-if-dot:last-child { margin-inline-start:auto; }
+
+/* 200px does not fit "Security (REALITY)" beside an icon and a count, and an
+   ellipsis in a nine-item rail reads as a defect rather than as truncation. The
+   rail takes a short name and the pane heading carries the full one, so this is
+   a backstop for a protocol whose name is longer than expected, not the plan. */
+.bo-cf-tab .bo-if-lb {
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+/* A summary value that is allowed to use a second line. .bo-cf-ell truncates,
+   which is right for a name the operator typed and wrong for one the panel
+   chose: "OpenConnect (cisco)" and "WireGuard (Xray)" both overrun the 168px a
+   rail row leaves, and an ellipsis there hides the value the row is reporting. */
+.bo-cf-kv b.bo-if-wrap {
+  min-width:0; text-align:end; white-space:normal; overflow-wrap:anywhere;
+}
+
+/* The pane heading. The rail says where you are in two words; this says it in
+   full and adds what the section is for. */
+.bo-if-h { margin:0 0 2px; font-size:15px; font-weight:600; color:var(--text); }
+.bo-if-d { margin:0 0 16px; font-size:11.5px; color:var(--text-3); line-height:1.5; }
+
+/* A group of fields inside a section: Certificates under Security, Masquerade
+   under Transport.
+ *
+ * This replaces <a-divider>Some Title</a-divider>, which ant draws as a centred
+ * caption on a full-bleed rule. In a tinted panel that reads as a grey title bar
+ * stamped across the pane, and it belongs to no other surface in this UI. Same
+ * vocabulary as the rail's group headings instead: a small caps label with a
+ * hairline running out to the edge, so a sub-group is quieter than the section
+ * heading above it rather than louder. */
+.bo-if-sub {
+  display:flex; align-items:center; gap:10px;
+  margin:22px 0 12px;
+  font-size:10.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--text-3);
+}
+.bo-if-sub:first-child { margin-top:0; }
+.bo-if-sub::after {
+  content:""; flex:1 1 auto; height:1px; background:var(--border);
+}
+
+/* Sections are hidden with v-show, so they stay in the DOM. Every field keeps its
+   state while the operator moves around, and the rail can count what is inside a
+   section that has never been opened. v-if would cost both. */
+
+/* The footer says why Create is disabled. The old form disabled the button and
+   left the operator to guess, which is the defect this whole dialog exists to
+   fix; the button alone cannot carry a reason. */
+.bo-if-foot { display:flex; align-items:center; gap:12px; }
+.bo-if-why { font-size:12px; color:var(--error); text-align:start; }
+.bo-if-why.ok { color:var(--ok); }
+.bo-if-why b { font-weight:600; }
+.bo-if-btns { margin-inline-start:auto; display:flex; gap:8px; flex:0 0 auto; }
+
+/* The ant modal footer is right-aligned by default, which would push the reason
+   into the buttons instead of giving it the row. */
+.bo-inbound-modal .ant-modal-footer { text-align:start; }
+
+/* ================================================================== *
  * clients ledger (the Clients page table)
  *
  * The row used to spend its width on a badge, a wrapping tag list and five

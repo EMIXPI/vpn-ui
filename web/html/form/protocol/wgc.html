@@ -1,4 +1,5 @@
-{{define "form/wgc"}}
+{{define "form/wgc"}}{{end}}
+{{define "form/wgc/network"}}
 <a-form
     :colon="false"
     :label-col="{ md: {span:8} }"
@@ -41,6 +42,49 @@
             :max="1500"
         ></a-input-number>
     </a-form-item>
+</a-form>
+{{end}}
+{{define "form/wgc/security"}}
+<a-form
+    :colon="false"
+    :label-col="{ md: {span:8} }"
+    :wrapper-col="{ md: {span:14} }"
+>
+    <a-form-item>
+        <template slot="label">
+            <a-tooltip>
+                <template slot="title">
+                    Add a preshared key (an extra symmetric layer on top of the
+                    keypair). The server generates one PSK per account automatically;
+                    nothing to enter here.
+                </template>
+                Preshared Key
+                <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+        </template>
+        <a-switch v-model="inbound.settings.pskEnable"></a-switch>
+    </a-form-item>
+    <a-form-item v-if="inbound.settings.serverPubKey">
+        <template slot="label">
+            <a-tooltip>
+                <template slot="title">
+                    The server's public key. Generated automatically on save; keys
+                    are never created in the browser.
+                </template>
+                Server Public Key
+                <a-icon type="question-circle"></a-icon>
+            </a-tooltip>
+        </template>
+        <a-input :value="inbound.settings.serverPubKey" read-only></a-input>
+    </a-form-item>
+</a-form>
+{{end}}
+{{define "form/wgc/access"}}
+<a-form
+    :colon="false"
+    :label-col="{ md: {span:8} }"
+    :wrapper-col="{ md: {span:14} }"
+>
     <a-form-item>
         <template slot="label">
             <a-tooltip>
@@ -111,33 +155,14 @@
             :disabled="!inbound.settings.clientToClient"
         ></a-switch>
     </a-form-item>
-    <a-form-item>
-        <template slot="label">
-            <a-tooltip>
-                <template slot="title">
-                    Add a preshared key (an extra symmetric layer on top of the
-                    keypair). The server generates one PSK per account automatically;
-                    nothing to enter here.
-                </template>
-                Preshared Key
-                <a-icon type="question-circle"></a-icon>
-            </a-tooltip>
-        </template>
-        <a-switch v-model="inbound.settings.pskEnable"></a-switch>
-    </a-form-item>
-    <a-form-item v-if="inbound.settings.serverPubKey">
-        <template slot="label">
-            <a-tooltip>
-                <template slot="title">
-                    The server's public key. Generated automatically on save; keys
-                    are never created in the browser.
-                </template>
-                Server Public Key
-                <a-icon type="question-circle"></a-icon>
-            </a-tooltip>
-        </template>
-        <a-input :value="inbound.settings.serverPubKey" read-only></a-input>
-    </a-form-item>
+</a-form>
+{{end}}
+{{define "form/wgc/reach"}}
+<a-form
+    :colon="false"
+    :label-col="{ md: {span:8} }"
+    :wrapper-col="{ md: {span:14} }"
+>
     <a-form-item>
         <template slot="label">
             <a-tooltip>
