@@ -337,6 +337,24 @@ func (s *CoreService) l2tpConfigTargets() []coreConfigTarget {
 	// The swanctl connection exists only while some enabled inbound has IPsec on:
 	// without a PSK the generator deletes the file rather than writing an empty one,
 	// so offering an editor over it would be offering to edit nothing.
+	//
+	// It also splits into one file per inbound when each has its own listen address, so
+	// the editor follows whichever shape writeL2tpSwanctlConn is actually writing —
+	// otherwise the operator would be editing a path that no longer exists.
+	if peers := l2tpPerListenPeers(svc.l2tpIpsecPeers(inbounds, true)); len(peers) > 0 {
+		for _, peer := range peers {
+			p := peer
+			file := fmt.Sprintf("l2tp-%d.conf", p.inbound.Id)
+			out = append(out, coreConfigTarget{
+				Core: "l2tp", InboundId: p.inbound.Id, File: file,
+				Label: file + " (IPsec, swanctl)", Remark: coreConfigRemark(p.inbound),
+				Path: swanctlConfDir + "/" + file, Format: "swanctl",
+				render:   func() (string, error) { return svc.buildL2tpSwanctlConnFor(p), nil },
+				validate: validateSwanctlBraces,
+			})
+		}
+		return out
+	}
 	if svc.buildL2tpSwanctlConn(inbounds) != "" {
 		out = append(out, coreConfigTarget{
 			Core: "l2tp", File: "l2tp.conf", Label: "l2tp.conf (IPsec, swanctl)",

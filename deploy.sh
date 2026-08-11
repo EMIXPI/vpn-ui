@@ -6,7 +6,13 @@ REPO="Sir-MmD/vpn-ui"
 ASSET="vpn-ui-amd64"
 DEST_DIR="/opt/vpn-ui"
 DEST="$DEST_DIR/$ASSET"
-UNIT="vpn-ui"
+# The DEFAULT systemd unit name, and ONLY a fallback. The operator can rename the
+# service from the panel (settings key systemdServiceName), and `$DEST --systemd`
+# below installs the unit under THAT name — so a literal pinned here would have this
+# script configure one unit and then restart another. Every systemctl call goes
+# through unit_name() instead; this is what it answers with when there is no binary
+# to ask yet.
+UNIT_FALLBACK="vpn-ui"
 # The management menu (`vpn-ui`). Installed from INSIDE the binary we just placed
 # ($DEST install-menu), never curled from the repo's default branch: that would pin
 # a menu from a different release than the binary it drives.
@@ -310,10 +316,43 @@ else
 fi
 ok "downloaded $(fmt_bytes "$DL_BYTES") in $(fmt_time "$DL_SECS")  (avg $(fmt_bytes "$DL_RATE")/s)"
 
-# Install the binary (stop the unit first if we're upgrading in place)
-if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
-    act "stopping running ${UNIT} for replacement"
-    systemctl stop "$UNIT" || true
+# The panel's systemd unit name, resolved LAZILY (once per call) rather than pinned
+# at the top of the script, because the answer changes underneath us: before the
+# download there may be no binary to ask, and `$DEST --systemd` further below writes
+# the unit under whatever name the operator configured. `info --get <field>` is the
+# stable CLI contract for shells (it needs root, which we already have) and prints the
+# very name the panel acts on. Anything it cannot answer — no binary, a DB it cannot
+# open — falls back to the default name, so a broken read degrades to the historical
+# behaviour instead of a `systemctl restart ""`.
+#
+# Deliberately NOT named panel_unit: vpn-ui.sh, sourced below for
+# obtain_letsencrypt_cert, defines a panel_unit() of its own that warns and returns
+# non-zero with no fallback. Sourcing would silently replace ours, and this set -e
+# script would then die at the restart on any host whose panel could not be read.
+unit_name() {
+    local u=""
+    if [[ -x "$DEST" ]]; then
+        u="$("$DEST" info --get systemdUnit 2>/dev/null | tr -d '[:space:]')" || u=""
+    fi
+    if [[ -n "$u" ]]; then printf '%s' "$u"; else printf '%s' "$UNIT_FALLBACK"; fi
+}
+
+# Install the binary (stop the unit first if we're upgrading in place).
+#
+# This runs BEFORE the new binary is in place, so the name comes from the OLD binary
+# on an update and from the fallback on a fresh install. Both are stopped when they
+# differ: an install renamed after its first deploy can still have a stale
+# default-named unit holding the web port, and leaving that one running would collide
+# with the unit we start further below.
+stop_unit_if_active() {
+    systemctl is-active --quiet "$1" 2>/dev/null || return 0
+    act "stopping running ${1} for replacement"
+    systemctl stop "$1" || true
+}
+old_unit="$(unit_name)"
+stop_unit_if_active "$old_unit"
+if [[ "$old_unit" != "$UNIT_FALLBACK" ]]; then
+    stop_unit_if_active "$UNIT_FALLBACK"
 fi
 # Also reap a panel launched OUTSIDE systemd (a bare ./vpn-ui): the stop above only
 # touches the unit, so a hand-launched panel would keep the web + Xray ports bound and
@@ -482,13 +521,17 @@ else
     "$DEST" --systemd
 fi
 
-msg "Starting ${UNIT}"
-systemctl restart "$UNIT"
+# Resolved only NOW, from the binary that is finally in place and has just written
+# its unit: on a renamed install this is the operator's own name, and the whole
+# start/verify/report tail below has to speak it.
+unit="$(unit_name)"
+msg "Starting ${unit}"
+systemctl restart "$unit"
 sleep 1
-if systemctl is-active --quiet "$UNIT"; then
-    ok "${UNIT} is running"
+if systemctl is-active --quiet "$unit"; then
+    ok "${unit} is running"
 else
-    die "${UNIT} failed to start — inspect with: journalctl -u ${UNIT} -e"
+    die "${unit} failed to start — inspect with: journalctl -u ${unit} -e"
 fi
 
 # Done
@@ -520,6 +563,6 @@ fi
 if [[ -x "$MENU" ]]; then
     act "manage:  ${TEAL}vpn-ui${R}  (update, login, start/stop, Xray, SSL)"
 fi
-act "status:  ${TEAL}systemctl status ${UNIT}${R}"
-act "logs:    ${TEAL}journalctl -u ${UNIT} -f${R}"
+act "status:  ${TEAL}systemctl status ${unit}${R}"
+act "logs:    ${TEAL}journalctl -u ${unit} -f${R}"
 hr

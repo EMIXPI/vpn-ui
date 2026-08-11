@@ -4081,11 +4081,46 @@ Inbound.NaiveSettings.Naive = class extends Inbound.ClientBase {
     }
 };
 
+// sharedL2tpIpsecPsk is the IPsec key a NEW l2tp inbound starts with: the one an enabled
+// l2tp inbound already has, and only a fresh random key when there is none. The Go twin
+// is sharedL2tpIpsecPsk() in web/service/sharedconfig.go, which fills the same default
+// for an API caller who omits the field.
+//
+// Minting a random key here was a guaranteed dead end, not a risk of one. The server
+// refuses two different keys on one IKE listen address (IKEv1 Main Mode picks the key
+// from the IP addresses before the client has said who it is, so nothing else can tell
+// two inbounds apart), and a new inbound listens on every address, so creating or
+// cloning a second l2tp inbound always failed to save until the operator went and
+// hand-copied the first one's key.
+//
+// It inherits regardless of what the Listen field says, matching the server's own
+// default. An operator who wants a genuinely separate key gives the inbound its own
+// listen address and then changes the key, which the server now accepts.
+//
+// Reads the inbound list off the page (`app` on the Inbounds page). No fetch: this runs
+// inside a constructor, so it has to answer synchronously, and every value it needs is
+// already loaded. Anywhere the list is absent it simply mints, as before.
+Inbound.sharedL2tpIpsecPsk = function () {
+  const rows =
+    typeof app !== "undefined" && app && Array.isArray(app.dbInbounds) ? app.dbInbounds : [];
+  for (const row of rows) {
+    if (row.protocol !== Protocols.L2TP || !row.enable) continue;
+    let settings;
+    try {
+      settings = JSON.parse(row.settings);
+    } catch (e) {
+      continue;
+    }
+    if (settings && settings.ipsecEnable && settings.ipsecPsk) return settings.ipsecPsk;
+  }
+  return RandomUtil.randomSeq(16);
+};
+
 Inbound.L2tpSettings = class extends Inbound.Settings {
   constructor(
     protocol,
     ipsecEnable = true,
-    ipsecPsk = RandomUtil.randomSeq(16),
+    ipsecPsk = Inbound.sharedL2tpIpsecPsk(),
     allowRaw = false,
     clientToClient = false,
     crossInbound = false,
@@ -4490,7 +4525,8 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
     this.tcpEnable = tcpEnable;
     this.tcpPort = tcpPort;
     // TCP + UDP share one port by default (both can bind the same number); flip
-    // this to give TCP its own tcpPort.
+    // this to give TCP its own tcpPort. Only in the separate mode does either
+    // transport carry an enable switch - see the port block in form/inbound.html.
     this.separatePorts = separatePorts;
     // TLS cert source, mirroring the Xray model: inline content (default) or file
     // paths. Path mode points OpenVPN at existing cert files instead of the
@@ -4994,7 +5030,12 @@ Inbound.SstpSettings = class extends Inbound.Settings {
     protocol,
     dns1 = "8.8.8.8",
     dns2 = "8.8.4.4",
-    mtu = 1420,
+    // 1400, not OpenConnect's 1420: SSTP is PPP inside a 4-byte SSTP header
+    // inside TLS inside TCP, so a 1500 byte path pays 20 (IP) + 20 (TCP) + 5
+    // (TLS record) + 16 (IV) + 32 (MAC) + 4 (SSTP) + 4 (PPP) and lands just
+    // under 1400. It is also the number sstp.go already falls back to when no
+    // MTU is set, which the old 1420 made unreachable by always posting one.
+    mtu = 1400,
     tlsUseFile = false,
     certificateFile = "",
     keyFile = "",
@@ -5036,7 +5077,7 @@ Inbound.SstpSettings = class extends Inbound.Settings {
       Protocols.SSTP,
       json.dns1 ?? "8.8.8.8",
       json.dns2 ?? "8.8.4.4",
-      json.mtu ?? 1420,
+      json.mtu ?? 1400,
       json.tlsUseFile ?? false,
       json.certificateFile ?? "",
       json.keyFile ?? "",
@@ -5200,7 +5241,12 @@ Inbound.Ikev2Settings = class extends Inbound.Settings {
     protocol,
     dns1 = "8.8.8.8",
     dns2 = "8.8.4.4",
-    mtu = 1420,
+    // 1400, not the WireGuard 1420 this used to carry. An IKEv2 client in the
+    // field is behind a NAT, so its ESP rides inside UDP and costs 73-100 bytes
+    // on a 1500 byte path. The panel's own IKEv2 OUTBOUND driver has always used
+    // 1400 for the same reason. It is enforced as a TCP MSS clamp in nftables:
+    // IKEv2 cannot push an MTU to a client, so nothing else could apply it.
+    mtu = 1400,
     authMode = "eap-mschapv2",
     psk = "",
     serverAddr = "",
@@ -5252,7 +5298,7 @@ Inbound.Ikev2Settings = class extends Inbound.Settings {
       Protocols.IKEV2,
       json.dns1 ?? "8.8.8.8",
       json.dns2 ?? "8.8.4.4",
-      json.mtu ?? 1420,
+      json.mtu ?? 1400,
       json.authMode ?? "eap-mschapv2",
       json.psk ?? "",
       json.serverAddr ?? "",

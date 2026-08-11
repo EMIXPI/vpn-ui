@@ -563,11 +563,7 @@ func (s *AwgService) SetupRouting() error {
 	s.runCmd("sysctl", "-w", "net.ipv4.ip_forward=1")
 	s.runCmd("modprobe", amneziawgModule)
 
-	output, _ := exec.Command("ip", "rule", "show").Output()
-	if !strings.Contains(string(output), "fwmark 0x1 lookup 100") {
-		s.runCmd("ip", "rule", "add", "fwmark", "1", "lookup", "100")
-	}
-	s.runCmd("ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+	ensureVpnPolicyRoute(s.runCmd)
 	return s.nftService.ApplyNftRules()
 }
 

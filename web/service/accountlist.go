@@ -49,6 +49,32 @@ type AccountMembershipView struct {
 	ClientId string `json:"clientId"`
 }
 
+// AccountCredentials is the account's own credential columns, reported ONLY for an
+// account no inbound serves.
+//
+// Every other row leaves them out and the page reads them off the stored client
+// entries instead (see loadCredentialsFrom in modals/client_membership_modal.html),
+// because those entries are what the daemon actually authenticates and the two can
+// legitimately differ - a 2022-blake3 membership holds a PSK minted for itself
+// alone. An account on no inbound has no stored entry anywhere, so the columns are
+// the only copy there is, and without them the edit form opens with every credential
+// box blank. That is not cosmetic: ticking an inbound then mints a fresh credential
+// for a field that only LOOKED empty, and every config the customer already
+// installed stops authenticating.
+//
+// No new exposure. The same page already loads every inbound's settings blob to
+// render the credentials in its expander, so this is the same data for the one kind
+// of account that is in no blob.
+type AccountCredentials struct {
+	UUID        string `json:"uuid,omitempty"`
+	Password    string `json:"password,omitempty"`
+	VpnUsername string `json:"vpnUsername,omitempty"`
+	Auth        string `json:"auth,omitempty"`
+	Secret      string `json:"secret,omitempty"`
+	NaiveUser   string `json:"naiveUsername,omitempty"`
+	Security    string `json:"security,omitempty"`
+}
+
 // AccountRow is one line of the Clients table.
 type AccountRow struct {
 	Id         int    `json:"id"`
@@ -82,6 +108,8 @@ type AccountRow struct {
 	Up                int64                   `json:"up"`
 	Down              int64                   `json:"down"`
 	Memberships       []AccountMembershipView `json:"memberships"`
+	// Credentials is set only when Memberships is empty. See AccountCredentials.
+	Credentials *AccountCredentials `json:"credentials,omitempty"`
 	// OwnedByReseller is the reseller's user id, or 0 for a house account. Shown
 	// only to whoever may already see resellers.
 	OwnedByReseller int `json:"ownedByReseller"`
@@ -200,6 +228,16 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search, 
 			SpeedLimitDown: account.SpeedLimitDown, SpeedLimitUp: account.SpeedLimitUp,
 			UserLimitOverride: account.UserLimitOverride,
 			Memberships:       mine, OwnedByReseller: owner[key],
+		}
+		if len(mine) == 0 {
+			// Nothing serves it, so no settings blob carries its credentials and this
+			// row is the only place the edit form can read them from.
+			row.Credentials = &AccountCredentials{
+				UUID: account.UUID, Password: account.Password,
+				VpnUsername: account.VpnUsername, Auth: account.Auth,
+				Secret: account.Secret, NaiveUser: account.NaiveUser,
+				Security: account.Security,
+			}
 		}
 		// client_traffics is one row per account panel-wide, and it is what the
 		// enforcement paths actually read, so it wins over the account row for the

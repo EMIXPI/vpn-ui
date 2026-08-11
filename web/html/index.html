@@ -797,6 +797,24 @@
       <a-collapse-panel key="2" header='Geofiles'>
         <a-alert type="info" show-icon class="mb-10"
           message='{{ i18n "pages.index.geofileBundledHint" }}'></a-alert>
+        <!-- Auto-update. On by default, because these files go stale SILENTLY: a
+             routing rule naming a geosite category keeps parsing and the core keeps
+             starting, the categories are just months out of date and the rule
+             quietly stops matching what the operator thinks it matches. -->
+        <div class="mb-10"
+          :style="{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }">
+          <!-- The reason lives in the "?" rather than under the label: it explains a
+               failure mode nobody is looking for, which is worth a sentence when you
+               go looking and worth no vertical space when you do not. -->
+          <span>
+            {{ i18n "pages.index.geofileAutoUpdate" }}
+            <a-tooltip :title="geofileText.autoUpdateDesc">
+              <a-icon type="question-circle" :style="{ marginInlineStart: '4px', opacity: 0.65 }"></a-icon>
+            </a-tooltip>
+          </span>
+          <a-switch :checked="geofileAutoUpdate" :loading="geofileAutoUpdateSaving"
+            @change="toggleGeofileAutoUpdate"></a-switch>
+        </div>
         <a-list class="ant-version-list w-100" bordered>
           <a-list-item class="ant-version-list-item"
             v-for="file in ['geosite.dat', 'geoip.dat', 'geosite_IR.dat', 'geoip_IR.dat', 'geosite_RU.dat', 'geoip_RU.dat']">
@@ -807,8 +825,15 @@
             <a-icon type="reload" @click="updateGeofile(file)" class="mr-8" />
           </a-list-item>
         </a-list>
-        <div class="mt-5 d-flex justify-end"><a-button @click="updateGeofile('')">{{ i18n
-            "pages.index.geofilesUpdateAll" }}</a-button></div>
+        <!-- Reads the SERVER's job state, not a local boolean, so it is still here
+             after the operator left the overview and came back mid-download. -->
+        <div v-if="geofileRun.running || geofileRun.done" class="mt-5">
+          <a-progress :percent="geofileRunPercent()" size="small"
+            :status="geofileRun.running ? 'active' : (geofileRun.failed ? 'exception' : 'success')"></a-progress>
+          <div :style="{ fontSize: '12px', opacity: 0.65 }">[[ geofileRunText() ]]</div>
+        </div>
+        <div class="mt-5 d-flex justify-end"><a-button @click="updateGeofile('')"
+            :loading="geofileRun.running">{{ i18n "pages.index.geofilesUpdateAll" }}</a-button></div>
       </a-collapse-panel>
       <a-collapse-panel key="3" header='{{ i18n "pages.index.customGeoTitle" }}'>
         <div class="custom-geo-section">
@@ -1416,6 +1441,7 @@
       this.cpuCores = 0;
       this.logicalPro = 0;
       this.cpuSpeedMhz = 0;
+      this.cpuSpeedCurMhz = 0;
       this.disk = new CurTotal(0, 0);
       this.loads = [0, 0, 0];
       this.mem = new CurTotal(0, 0);
@@ -1451,6 +1477,7 @@
       this.cpuCores = data.cpuCores;
       this.logicalPro = data.logicalPro;
       this.cpuSpeedMhz = data.cpuSpeedMhz;
+      this.cpuSpeedCurMhz = data.cpuSpeedCurMhz;
       this.cpuModel = data.cpuModel || "";
       this.osName = data.osName || "";
       this.osVersion = data.osVersion || "";
@@ -1828,7 +1855,29 @@
       geofileText: {
         installed: '{{ i18n "pages.index.geofileInstalled" }}',
         notInstalled: '{{ i18n "pages.index.geofileNotInstalled" }}',
+        // Emitted here, not into the a-tooltip's :title, for the reason above: a
+        // translation with an apostrophe pasted into a Vue attribute expression
+        // ends the attribute's string and blanks the whole page with an empty console.
+        autoUpdateDesc: '{{ i18n "pages.index.geofileAutoUpdateDesc" }}',
       },
+      // The server-side geofile download, mirrored here so the dialog can show a
+      // transfer it did not start. Leaving the overview destroys this whole Vue
+      // instance (navigation is a full page load, see aSidebar.openLink), so the
+      // ONLY way progress can survive is to re-read it from the server - which is
+      // what geofileRunPoll does on open and on mount.
+      geofileRun: { running: false, done: false, files: [], current: '', fetched: [], failed: false, summary: '' },
+      geofileRunTimer: null,
+      geofileRunSeq: 0,
+      // True only between "we sent the POST" and "it answered". Until the server has
+      // claimed the run, its progress endpoint still describes the previous one.
+      geofileRunPosting: false,
+      // Drives watchPanelUpdate, which follows a self-update this page did not start.
+      panelUpdateTimer: null,
+      panelUpdateReloadArmed: false,
+      // Whether the panel refreshes the geo data on its own. On by default; the real
+      // value arrives with the defaultSettings call in mounted().
+      geofileAutoUpdate: true,
+      geofileAutoUpdateSaving: false,
       distroModal: { visible: false, pretty: '', tested: '' },
 
       // --- redesign shell + bento tiles ---------------------------------
@@ -2037,7 +2086,20 @@
           {
             key: 'cpu', icon: 'cpu', label: '{{ i18n "pages.index.cpu" }}',
             percent: this.status.cpu.percent,
-            meta: CPUFormatter.cpuCoreFormat(this.status.cpuCores),
+            // Cores  ·  clock, the same two-part shape the swap and disk rows use.
+            //
+            // cpuSpeedCurMhz FIRST, and that is the whole point of the field: this
+            // row is a live readout, and cpuSpeedMhz is the speed the chip is RATED
+            // for, which never moves (4900 on the machine this was written on, the
+            // literal cpuinfo_max_freq). The spec tile above still shows the rated
+            // one, where it belongs. Falls back to it only on a host with no
+            // cpufreq and no "cpu MHz" - usually a VM, where there is no live clock
+            // to read - and shows nothing at all rather than a confident 0.00 MHz.
+            meta: CPUFormatter.cpuCoreFormat(this.status.cpuCores)
+              + ((this.status.cpuSpeedCurMhz || this.status.cpuSpeedMhz)
+                ? '  ·  ' + CPUFormatter.cpuSpeedFormat(
+                    this.status.cpuSpeedCurMhz || this.status.cpuSpeedMhz)
+                : ''),
           },
           {
             key: 'mem', icon: 'ram', label: '{{ i18n "pages.index.memory" }}',
@@ -2446,20 +2508,7 @@
         // start failing - harmless, they're ignored - until the page reloads.
         // A terminal phase left over from a previous attempt is ignored: this run
         // hasn't reached the server yet, so only forward progress is adopted.
-        const poll = setInterval(async () => {
-          try {
-            const p = await HttpUtil.get('/panel/api/server/updateProgress');
-            if (p && p.success && p.obj) {
-              const phase = p.obj.phase;
-              if (phase === 'error' || phase === 'cancelled') return;
-              if (typeof p.obj.percent === 'number') this.panelUpdate.percent = p.obj.percent;
-              if (phase) this.panelUpdate.phase = phase;
-              if (typeof p.obj.speed === 'number') this.panelUpdate.speed = p.obj.speed;
-              if (typeof p.obj.bytes === 'number') this.panelUpdate.bytes = p.obj.bytes;
-              if (typeof p.obj.total === 'number') this.panelUpdate.total = p.obj.total;
-            }
-          } catch (e) { /* panel restarting - ignore */ }
-        }, 700);
+        const poll = setInterval(() => this.readPanelUpdateProgress(), 700);
         try {
           const msg = await HttpUtil.post('/panel/api/server/updatePanel');
           clearInterval(poll);
@@ -2501,7 +2550,99 @@
           this.panelUpdate.cancelling = false;
         }
       },
+      // One read of the server's self-update progress into panelUpdate. Returns the
+      // raw object so a caller can decide what a phase change means; returns null
+      // when the panel could not answer (which, mid-update, usually means it is
+      // restarting).
+      async readPanelUpdateProgress() {
+        try {
+          const p = await HttpUtil.get('/panel/api/server/updateProgress');
+          if (!p || !p.success || !p.obj) return null;
+          const phase = p.obj.phase;
+          // error/cancelled are written once by UpdatePanel's deferred block and then
+          // never cleared for the life of the process, so they are not evidence about
+          // THIS run. Only forward progress is adopted.
+          if (phase === 'error' || phase === 'cancelled') return p.obj;
+          if (typeof p.obj.percent === 'number') this.panelUpdate.percent = p.obj.percent;
+          if (phase) this.panelUpdate.phase = phase;
+          if (typeof p.obj.speed === 'number') this.panelUpdate.speed = p.obj.speed;
+          if (typeof p.obj.bytes === 'number') this.panelUpdate.bytes = p.obj.bytes;
+          if (typeof p.obj.total === 'number') this.panelUpdate.total = p.obj.total;
+          return p.obj;
+        } catch (e) {
+          return null; // panel restarting - ignore
+        }
+      },
+      // Re-attach to a self-update that was already running when this page loaded.
+      //
+      // Needed because the thing that normally drives the UI - the blocked POST to
+      // /updatePanel - belongs to a page that no longer exists. The download does not
+      // care: its context is context.Background(), and Gin does not kill a handler
+      // when the browser leaves. So the server keeps pulling the binary while the
+      // overview, rebuilt from scratch, shows an idle tile. `running` is what tells
+      // the two apart; the phase alone cannot, because terminal phases stick.
+      async resumePanelUpdate() {
+        let st = null;
+        try {
+          const p = await HttpUtil.get('/panel/api/server/updateProgress');
+          if (p && p.success && p.obj) st = p.obj;
+        } catch (e) { /* nothing to resume if we cannot ask */ }
+        if (!st || !st.running) return;
+        this.panelUpdate.updating = true;
+        this.panelUpdate.error = '';
+        this.panelUpdate.percent = typeof st.percent === 'number' ? st.percent : 0;
+        this.panelUpdate.phase = st.phase || 'downloading';
+        this.panelUpdate.speed = st.speed || 0;
+        this.panelUpdate.bytes = st.bytes || 0;
+        this.panelUpdate.total = st.total || 0;
+        this.watchPanelUpdate();
+      },
+      // Follows a resumed update to its end. Recursive setTimeout rather than
+      // setInterval so a slow answer cannot stack requests behind a panel that is
+      // busy installing.
+      //
+      // The outcome has to be read off the phase here, because nobody is holding the
+      // request that would otherwise report it: `installing`/`restarting` mean the
+      // swap is armed, so hold the bar and reload once the panel should be back.
+      watchPanelUpdate() {
+        clearTimeout(this.panelUpdateTimer);
+        this.panelUpdateTimer = setTimeout(async () => {
+          const st = await this.readPanelUpdateProgress();
+          if (!st) {
+            // No answer. Mid-restart this is expected and the reload below is already
+            // armed; otherwise keep watching.
+            this.watchPanelUpdate();
+            return;
+          }
+          if (st.phase === 'installing' || st.phase === 'restarting') {
+            this.panelUpdate.phase = st.phase;
+            this.panelUpdate.percent = 100;
+            this.panelUpdate.speed = 0;
+            if (!this.panelUpdateReloadArmed) {
+              this.panelUpdateReloadArmed = true;
+              setTimeout(() => location.reload(), 9000);
+            }
+            return;
+          }
+          if (!st.running) {
+            if (st.phase === 'cancelled') { this.resetPanelUpdate(); return; }
+            if (st.phase === 'error') {
+              this.panelUpdate.updating = false;
+              this.panelUpdate.cancelling = false;
+              this.panelUpdate.speed = 0;
+              this.panelUpdate.error = '{{ i18n "pages.index.updateFailed" }}';
+              return;
+            }
+            if (st.phase === 'staged') return; // waiting on the operator to apply it
+            this.resetPanelUpdate();
+            return;
+          }
+          this.watchPanelUpdate();
+        }, 700);
+      },
       resetPanelUpdate() {
+        clearTimeout(this.panelUpdateTimer);
+        this.panelUpdateReloadArmed = false;
         this.panelUpdate.updating = false;
         this.panelUpdate.cancelling = false;
         this.panelUpdate.error = '';
@@ -2828,6 +2969,81 @@
         this.geofilesModal.visible = true;
         this.loadCustomGeo();
         this.fetchGeofileStatus();
+        // Re-attach to a download already in flight. Opening the dialog is the most
+        // likely moment for that: the operator started one, went to look at their
+        // inbounds while it ran, and came back.
+        this.geofileRunPoll();
+      },
+      // One poll of the server's geofile job, rescheduling itself while the job is
+      // live. Recursive setTimeout rather than setInterval, matching pollSsl in
+      // settings.html: an interval keeps firing while a slow response is still in
+      // flight and stacks requests behind a panel that is busy restarting Xray.
+      async geofileRunPoll() {
+        clearTimeout(this.geofileRunTimer);
+        // One chain at a time. Without this a call made while an earlier one is still
+        // awaiting its response leaves the earlier one to schedule a timer of its own
+        // after the clearTimeout above has already run, and the two chains then poll
+        // in parallel. openGeofiles and mounted can both land inside the same tick.
+        const seq = ++this.geofileRunSeq;
+        let st = null;
+        try {
+          const msg = await HttpUtil.get('/panel/api/server/geofileProgress');
+          if (msg && msg.success && msg.obj) st = msg.obj;
+        } catch (e) { /* panel busy or restarting - try again on the next tick */ }
+        if (seq !== this.geofileRunSeq) return; // superseded while we waited
+        // While our own POST is still outstanding the server may not have claimed the
+        // run yet, and what it reports is the PREVIOUS run's terminal state. Adopting
+        // that would flash "done" over a download that has not started and stop the
+        // poll before it ever sees one, so only forward progress is taken.
+        if (st && (!this.geofileRunPosting || st.running)) {
+          const wasRunning = this.geofileRun.running;
+          this.geofileRun = st;
+          // The run ended while we were watching: the badges are stale now, because a
+          // download is the one thing that flips a row to installed.
+          if (wasRunning && !st.running) this.fetchGeofileStatus();
+        }
+        if (this.geofileRunPosting || !st || st.running) {
+          this.geofileRunTimer = setTimeout(() => this.geofileRunPoll(), 900);
+        }
+      },
+      // The label under the progress bar: which file is moving right now, or how the
+      // finished run went.
+      geofileRunText() {
+        const r = this.geofileRun;
+        if (r.running) {
+          const done = (r.fetched || []).length;
+          const total = (r.files || []).length;
+          const of = total > 1 ? ' (' + (done + 1) + '/' + total + ')' : '';
+          if (r.current) return r.current + of;
+          // No current file: either nothing has started yet, or every file is in and
+          // what is left is the Xray restart UpdateGeofile ends with.
+          return total && done >= total
+            ? '{{ i18n "pages.index.geofileRestarting" }}'
+            : '{{ i18n "pages.index.geofileRunStarting" }}';
+        }
+        if (r.failed) return r.summary || '{{ i18n "pages.index.geofileRunFailed" }}';
+        return '{{ i18n "pages.index.geofileRunDone" }}';
+      },
+      geofileRunPercent() {
+        const r = this.geofileRun;
+        const total = (r.files || []).length;
+        if (!total) return 0;
+        return Math.round(((r.fetched || []).length / total) * 100);
+      },
+      async toggleGeofileAutoUpdate(checked) {
+        const previous = this.geofileAutoUpdate;
+        // Optimistic, then rolled back on refusal: the switch is the only feedback
+        // there is, so it must not sit on the old value while the request is in
+        // flight and then jump.
+        this.geofileAutoUpdate = checked;
+        this.geofileAutoUpdateSaving = true;
+        try {
+          const msg = await HttpUtil.post('/panel/api/server/geofileAutoUpdate', { enabled: checked });
+          if (!msg || !msg.success) this.geofileAutoUpdate = previous;
+        } catch (e) {
+          this.geofileAutoUpdate = previous;
+        }
+        this.geofileAutoUpdateSaving = false;
       },
       async fetchGeofileStatus() {
         try {
@@ -3063,16 +3279,28 @@
           class: themeSwitcher.currentTheme,
           cancelText: '{{ i18n "cancel"}}',
           onOk: async () => {
-            this.geofilesModal.visible = false;
-            this.loading(true, '{{ i18n "pages.index.dontRefresh"}}');
+            // The dialog STAYS OPEN and the full-page spinner is gone. The transfer
+            // runs server-side and outlives this request, so freezing the whole panel
+            // behind it bought nothing - and it was what made leaving the page look
+            // like the update had been cancelled. Progress now comes from the server,
+            // which means it is still there when the operator comes back.
+            this.geofileRun = {
+              running: true, done: false, current: fileName,
+              files: isSingleFile ? [fileName] : [], fetched: [], failed: false, summary: '',
+            };
+            this.geofileRunPosting = true;
+            this.geofileRunPoll();
             const url = isSingleFile
               ? `/panel/api/server/updateGeofile/${fileName}`
               : `/panel/api/server/updateGeofile`;
-            await HttpUtil.post(url);
+            try {
+              await HttpUtil.post(url);
+            } catch (e) { /* the poll below reports how it actually went */ }
+            this.geofileRunPosting = false;
+            await this.geofileRunPoll();
             // A download is the one thing that flips a row from not-installed to
             // installed, so re-read rather than leaving the badges stale.
             await this.fetchGeofileStatus();
-            this.loading(false);
           },
         });
       },
@@ -3268,6 +3496,9 @@
       if (msg.success) {
         this.ipLimitEnable = msg.obj.ipLimitEnable;
         this.xrayAccessLogEnable = !!msg.obj.xrayAccessLogEnable;
+        if (typeof msg.obj.geofileAutoUpdate === 'boolean') {
+          this.geofileAutoUpdate = msg.obj.geofileAutoUpdate;
+        }
       }
 
       // Initial status fetch
@@ -3283,6 +3514,13 @@
       // not answer for, which is the one thing this list exists to tell apart.
       // openGeofiles() still refreshes on open.
       this.fetchGeofileStatus();
+      // Pick back up whatever was already running when this page loaded. Leaving the
+      // overview destroys this Vue instance (navigation is a full page load), but it
+      // does NOT stop the work: both downloads run on contexts of their own and Gin
+      // does not kill a handler when the browser walks away. Without these two the
+      // panel looked idle while it was still pulling a binary or 74MB of geo data.
+      this.resumePanelUpdate();
+      this.geofileRunPoll();
       this.checkForUpdate(false); // best-effort update check on every overview load
       this.announceUpdateResult(); // "Updated to vX" if this load follows a self-update
 

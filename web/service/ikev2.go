@@ -55,6 +55,18 @@ type ikev2Settings struct {
 	Dns1 string `json:"dns1"`
 	Dns2 string `json:"dns2"`
 
+	// Mtu is the tunnel MTU an IKEv2 client should be held to. 0 means the protocol
+	// default (ikev2DefaultMtu).
+	//
+	// IT IS NOT WRITTEN INTO ANY DAEMON CONFIG, because there is nowhere to write it.
+	// IKEv2 has no configuration attribute for an MTU, so a gateway cannot tell a client
+	// what to use; and this panel sets `install_routes = no` in strongswan.conf (the
+	// routing is ours, via nftables TPROXY), so there is not even a strongSwan-installed
+	// route to hang an `mtu`/`advmss` metric on. What the server CAN do is bound the
+	// segments each side sends, which is what clampMss is for and what the nftables rules
+	// in GenerateVpnRules do with it. See effectiveMtu.
+	Mtu int `json:"mtu"`
+
 	// AuthMode selects how clients authenticate:
 	//   "eap-mschapv2" (default) — username/password via RADIUS; server presents a cert
 	//   "psk"                     — a shared pre-shared key (no per-account RADIUS)
@@ -84,6 +96,40 @@ type ikev2Settings struct {
 }
 
 func (o *ikev2Settings) effectiveRanges() []string { return o.IpRanges }
+
+// ikev2DefaultMtu is what an IKEv2 tunnel gets when the operator names no MTU.
+//
+// 1400, not the 1420 this used to default to. 1420 is the WireGuard number and it does not
+// transfer: WireGuard's overhead is a fixed 60 bytes, while IKEv2 in the field is almost
+// always ESP inside UDP because a NAT sits somewhere on the path, and that costs 20 (outer
+// IP) + 8 (UDP) + 4 (non-ESP marker/SPI framing) + 8 (sequence) + IV + padding + the
+// integrity check value: roughly 73-100 bytes on a 1500 byte path, and more again with
+// AES-CBC's block padding. 1420 therefore produces packets the peer has to fragment or
+// drop, which is the classic "it connects, small requests work, downloads hang".
+//
+// The panel's own IKEv2 OUTBOUND driver has always used 1400 for exactly this reason
+// (vpnout_ikev2.go, ensureXfrmLink), so the two sides of the same protocol now agree.
+const ikev2DefaultMtu = 1400
+
+// effectiveMtu is the inner MTU this inbound's clients are held to: the operator's value,
+// else the protocol default.
+func (o *ikev2Settings) effectiveMtu() int {
+	if o.Mtu > 0 {
+		return o.Mtu
+	}
+	return ikev2DefaultMtu
+}
+
+// clampMss is the largest TCP payload that fits the tunnel, i.e. the value to force onto a
+// SYN's MSS option. The 40 bytes are the inner IPv4 and TCP headers.
+//
+// This is the ONLY lever an IKEv2 gateway has over what its clients send (see Mtu), and it
+// is the same one the GRE inbound pulls, for the same reason: neither protocol negotiates
+// an MTU, and path-MTU discovery through a tunnel is unreliable because the learned value
+// lives in a route cache that expires, after which the black hole comes back.
+func (o *ikev2Settings) clampMss() int {
+	return o.effectiveMtu() - 40
+}
 
 // authMode returns the effective auth mode (default eap-mschapv2).
 func (o *ikev2Settings) authMode() string {
@@ -838,11 +884,7 @@ func (s *Ikev2Service) SetupRouting() error {
 	s.runCmd("modprobe", "esp4")
 	s.runCmd("modprobe", "xfrm_user")
 
-	output, _ := exec.Command("ip", "rule", "show").Output()
-	if !strings.Contains(string(output), "fwmark 0x1 lookup 100") {
-		s.runCmd("ip", "rule", "add", "fwmark", "1", "lookup", "100")
-	}
-	s.runCmd("ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+	ensureVpnPolicyRoute(s.runCmd)
 	return s.nftService.ApplyNftRules()
 }
 

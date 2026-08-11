@@ -103,19 +103,30 @@ func (s *InboundService) MigrationCleanupOrphans() {
 			return err
 		}
 		// The prune is skipped when there are accounts but not a single membership
-		// left. pruneOrphanAccounts reads that as "every account is an orphan" and
-		// deletes the lot, which is right where it is normally called (straight after
-		// removing the last membership) and wrong here: on a panel whose mirror never
-		// got its memberships written, it would take out every account row and the
-		// per-account credentials that hang off them. Nothing can reach those accounts
-		// either way, so leaving them costs nothing and the next reconcile fixes them.
+		// left. Every account then reads as an orphan and the pass would delete the
+		// lot, which is right where the prune is normally called (straight after
+		// removing the memberships that emptied them) and wrong here: on a panel whose
+		// mirror never got its memberships written, it would take out every account row
+		// and the per-account credentials that hang off them. Nothing can reach those
+		// accounts either way, so leaving them costs nothing and the next reconcile
+		// fixes them.
 		if accountCount > 0 && membershipCount == 0 {
 			logger.Warningf("MigrationCleanupOrphans - %d account(s) and no memberships at all; the prune is skipped rather than emptying the accounts table", accountCount)
 			return nil
 		}
 
+		// Every account is a candidate here, which is the one place that is still the
+		// right question to ask: this is a ONE-SHOT repair of a database written before
+		// an account could deliberately hold no membership (the setting key above is
+		// what stops it running twice), so an empty account in it is a leftover of the
+		// bug this pass exists to clean up and not an operator's decision.
+		var allAccounts []int
+		if err := tx.Session(&gorm.Session{NewDB: true}).
+			Model(&model.Account{}).Pluck("id", &allAccounts).Error; err != nil {
+			return err
+		}
 		var accountService AccountService
-		if err := accountService.pruneOrphanAccounts(tx); err != nil {
+		if err := accountService.pruneOrphanAccounts(tx, allAccounts); err != nil {
 			return err
 		}
 		var after int64

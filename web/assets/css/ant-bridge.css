@@ -491,3 +491,13 @@
 :is(.bo-shell,.login-app,.ant-modal,.ant-drawer,.ant-select-dropdown,.ant-dropdown,.ant-popover) .bo-proto--vpn {
   background:var(--ok-weak); border-color:var(--ok); color:var(--ok);
 }
+/* An account served by NO inbound, in the column that otherwise holds one tag per
+ * inbound serving it. Drawn as an empty outline rather than in a status hue,
+ * because it belongs to the same family as the tags it stands in for and the rule
+ * above holds: identity never wears warn or error. The dash is what separates
+ * "nothing here, on purpose" from a protocol tag whose colour failed to load. The
+ * account's own lamp, two columns left, is where the status reading lives. */
+:is(.bo-shell,.login-app,.ant-modal,.ant-drawer,.ant-select-dropdown,.ant-dropdown,.ant-popover) .bo-proto--none {
+  background:transparent; border-style:dashed; border-color:var(--border-strong);
+  color:var(--text-3);
+}

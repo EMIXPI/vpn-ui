@@ -474,6 +474,25 @@ func (s *Server) startTask() {
 		}
 	}()
 
+	// Refresh the built-in geo data files. Registered unconditionally and gated
+	// INSIDE the job rather than here, so flipping the switch in the overview's
+	// Geofiles dialog takes effect on the next tick instead of on the next panel
+	// restart. Placed above the Telegram block for the same reason the SSL job is:
+	// that block returns early on a bad tgbot cron string.
+	geofileJob := job.NewUpdateGeofileJob()
+	s.cron.AddJob(job.GeofileUpdateSchedule, geofileJob)
+
+	go func() {
+		// Same reasoning as the SSL startup run above: cron's first "@every" tick is a
+		// whole interval away, and the context binding keeps a SIGHUP restart from
+		// firing this into the next Server.
+		select {
+		case <-time.After(job.GeofileUpdateStartupDelay):
+			geofileJob.Run()
+		case <-s.ctx.Done():
+		}
+	}()
+
 	// LDAP sync scheduling
 	if ldapEnabled, _ := s.settingService.GetLdapEnable(); ldapEnabled {
 		runtime, err := s.settingService.GetLdapSyncCron()

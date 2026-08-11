@@ -13,6 +13,7 @@ import (
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/util/common"
+	"github.com/mhsanaei/3x-ui/v2/xray"
 
 	"gorm.io/gorm"
 )
@@ -420,6 +421,11 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 			// The inbound is gone: drop every membership pointing at it. An account
 			// that is on OTHER inbounds survives, which is why the memberships go
 			// rather than the accounts.
+			var orphaned []int
+			if derr := tx.Session(&gorm.Session{NewDB: true}).Model(&model.AccountInbound{}).
+				Where("inbound_id = ?", inboundId).Distinct().Pluck("account_id", &orphaned).Error; derr != nil {
+				return derr
+			}
 			if derr := tx.Where("inbound_id = ?", inboundId).Delete(&model.AccountInbound{}).Error; derr != nil {
 				return derr
 			}
@@ -427,7 +433,7 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 			// served by nothing, and returning here without pruning left it
 			// listed forever on the Clients page and blocking revert-accounts.
 			// Found by deleting a test inbound on a live panel.
-			return s.pruneOrphanAccounts(tx)
+			return s.pruneOrphanAccounts(tx, orphaned)
 		}
 		return err
 	}
@@ -459,6 +465,11 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 	if err := tx.Where("inbound_id = ?", inboundId).Find(&existing).Error; err != nil {
 		return err
 	}
+	// The accounts this sync just took OFF this inbound, and the only ones it may
+	// prune. See pruneOrphanAccounts: "holds no membership" is a legitimate state
+	// now, so the sweep has to be about the memberships this call removed rather
+	// than about every empty account in the table.
+	var dropped []int
 	for _, membership := range existing {
 		if present[membership.AccountId] {
 			continue
@@ -467,8 +478,9 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 			Delete(&model.AccountInbound{}).Error; err != nil {
 			return err
 		}
+		dropped = append(dropped, membership.AccountId)
 	}
-	return s.pruneOrphanAccounts(tx)
+	return s.pruneOrphanAccounts(tx, dropped)
 }
 
 // upsertAccountFromEntry creates or refreshes the account a client entry belongs
@@ -482,8 +494,21 @@ func (s *AccountService) SyncInboundAccounts(tx *gorm.DB, inboundId int) error {
 // (clientIdentity returns "", so edit and delete stop matching it) and, for the
 // native protocols, leaves a client the core cannot authenticate. It silently
 // corrupts the entry the request was not even about.
+//
+// inbound may be nil, and that is the account with NO inbound: an entry posted by
+// the Clients form for an account nothing serves yet. The protocol is then empty,
+// which every credential helper below already handles as "no protocol owns a
+// column here" - extractAccountCredential and overwriteAccountCredential fall
+// through to their default, and liftCarriedCredentials takes every carried field
+// rather than leaving the addressed protocol's own to the switch that follows it.
+// That is exactly right for an account whose credentials are not yet keyed to
+// anything.
 func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]any, inbound *model.Inbound) (*model.Account, error) {
-	protocol := inbound.Protocol
+	protocol := model.Protocol("")
+	inboundId := 0
+	if inbound != nil {
+		protocol, inboundId = inbound.Protocol, inbound.Id
+	}
 	email, _ := entry["email"].(string)
 	key := accountKey(email)
 
@@ -528,7 +553,11 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 	// would lower the account and take every other inbound down with it, which is
 	// the exact bug the per-membership column exists to end. So a disabled
 	// membership explains the false, and the account keeps what it had.
-	if !s.membershipEnabledFor(tx, account.Id, inbound.Id) {
+	//
+	// An account with no inbound has no membership to explain anything, and
+	// membershipEnabledFor answers "enabled" for a row that is not there, so the
+	// posted entry decides - which is right: nothing else can.
+	if !s.membershipEnabledFor(tx, account.Id, inboundId) {
 		updated.Enable = account.Enable
 	}
 	// Credentials are per FIELD and are filled from whichever protocol supplies
@@ -750,32 +779,54 @@ func (s *AccountService) upsertMembership(tx *gorm.DB, accountId int, inbound *m
 		}).Error
 }
 
-// pruneOrphanAccounts deletes accounts that hold no membership at all.
+// pruneOrphanAccounts deletes the CANDIDATE accounts that hold no membership at
+// all: the mirror's way of noticing that a client entry it was tracking has gone
+// from settings.clients for good.
 //
-// An account with no membership is served by nothing and addressable by nothing;
-// leaving it would make the email look taken and refuse a later re-create of the
-// same customer.
+// candidates is not an optimisation, it is the whole rule. "No membership" used to
+// be an impossible state and so was proof the account was a leftover; an account
+// may now be deliberately left on no inbound at all (see ApplyMemberships), and a
+// panel-wide sweep on every sync of every inbound would delete exactly those
+// accounts, minutes after an operator created them, with nothing reporting it.
+// So the sweep is scoped to the accounts whose membership the CALLER just removed,
+// which is the only population it was ever meant to be about: the deliberate case
+// removes its rows through SetMemberships, so it is never in this list.
+//
+// An empty list prunes nothing, deliberately: "I removed no memberships" must not
+// read as "consider every account".
+//
 // Resolved in two explicit steps rather than as a NOT IN sub-select built from
 // the same *gorm.DB. That form reuses the caller's statement, and when this runs
 // straight after a Delete on that same tx (the deleted-inbound path) the
 // leftover statement state poisons the sub-select: it matched nothing, so EVERY
 // account was treated as an orphan and accounts still serving other inbounds
 // were deleted. Two queries, no shared statement, no ambiguity.
-func (s *AccountService) pruneOrphanAccounts(tx *gorm.DB) error {
+func (s *AccountService) pruneOrphanAccounts(tx *gorm.DB, candidates []int) error {
+	if len(candidates) == 0 {
+		return nil
+	}
 	var live []int
 	if err := tx.Session(&gorm.Session{NewDB: true}).
 		Model(&model.AccountInbound{}).
+		Where("account_id IN ?", candidates).
 		Distinct().Pluck("account_id", &live).Error; err != nil {
 		return err
 	}
-
-	db := tx.Session(&gorm.Session{NewDB: true})
-	if len(live) == 0 {
-		// No memberships at all, so every account is an orphan. Expressed
-		// explicitly because "NOT IN ()" is not valid SQL everywhere.
-		return db.Where("1 = 1").Delete(&model.Account{}).Error
+	stillServed := make(map[int]bool, len(live))
+	for _, id := range live {
+		stillServed[id] = true
 	}
-	return db.Where("id NOT IN ?", live).Delete(&model.Account{}).Error
+	orphans := make([]int, 0, len(candidates))
+	for _, id := range candidates {
+		if !stillServed[id] {
+			orphans = append(orphans, id)
+		}
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+	return tx.Session(&gorm.Session{NewDB: true}).
+		Where("id IN ?", orphans).Delete(&model.Account{}).Error
 }
 
 // inboundVlessFlow is the inbound-level vless flow, which every account served on
@@ -976,16 +1027,59 @@ func shadowsocksUserKey(inbound *model.Inbound) string {
 // see, and an edit that simply omitted it must not silently take the account off
 // another admin's inbound. The controller resolves it by intersecting the
 // account's current memberships with what the caller owns.
+//
+// The mirror anchor is wanted[0], the inbound whose settings the legacy write just
+// changed. A caller whose anchor is NOT in the wanted set - the one write that takes
+// an account off every inbound it has - has to name it, and calls
+// ApplyMembershipsFrom directly.
 func (s *AccountService) ApplyMemberships(email string, wanted []int, removable []int, explicit bool) ([]int, error) {
-	if email == "" || len(wanted) == 0 {
+	anchor := 0
+	if len(wanted) > 0 {
+		anchor = wanted[0]
+	}
+	return s.ApplyMembershipsFrom(email, anchor, wanted, removable, explicit)
+}
+
+// ApplyMembershipsFrom is ApplyMemberships with the mirror anchor named separately:
+// the inbound whose settings.clients the caller just wrote, which is where the
+// account-wide fields of this edit (quota, expiry, comment, the limit overrides)
+// are still sitting when this runs. It is normally the first of the wanted ids and
+// has to be passed in when it is not one of them at all.
+//
+// An anchor of 0 means "no inbound was written", which is the create-an-account-on
+// -nothing case: there is no settings blob to mirror and the account row is already
+// the truth.
+//
+// EMPTYING THE SET. An account may deliberately be left on no inbound: created that
+// way, or reduced to it by unticking its last membership. What survives is the whole
+// point - the accounts row, its credentials and its client_traffics row all stay, so
+// the customer's uuid, password and usage history are still there when an inbound is
+// attached again later. That is the difference between this and a delete.
+//
+// wanted may therefore be empty, but ONLY when the caller said so. The guard this
+// replaced refused every empty set, and it was protecting the IMPLICIT path: a write
+// that names no memberships at all (the Telegram bot, a script posting one client,
+// any caller predating the accounts layer) means "leave the SET alone and just
+// re-project", and reading its silence as "take this account off everything" would
+// unprovision a customer on every inbound serving them, from a request that never
+// mentioned memberships. So the guard survives, narrowed to exactly that case:
+// explicit=false with nothing wanted is still a no-op, and only a caller that
+// SPOKE about memberships can empty an account.
+func (s *AccountService) ApplyMembershipsFrom(email string, anchorInboundId int, wanted []int, removable []int, explicit bool) ([]int, error) {
+	if email == "" {
+		return nil, nil
+	}
+	if len(wanted) == 0 && !explicit {
 		return nil, nil
 	}
 	var touched []int
 	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
 		// Mirror the inbound the legacy write just touched, so the account row and
 		// its first membership exist before memberships are set.
-		if err := s.SyncInboundAccounts(tx, wanted[0]); err != nil {
-			return err
+		if anchorInboundId > 0 {
+			if err := s.SyncInboundAccounts(tx, anchorInboundId); err != nil {
+				return err
+			}
 		}
 		account, err := s.GetAccountByEmailTx(tx, email)
 		if err != nil {
@@ -1028,6 +1122,125 @@ func (s *AccountService) ApplyMemberships(email string, wanted []int, removable 
 		return nil
 	})
 	return touched, err
+}
+
+// SaveAccountWithoutInbound writes the account one posted client entry describes,
+// with no inbound in the picture at all: the create half of "an account may exist
+// on nothing", and the only edit an account in that state can be given.
+//
+// Everything else that writes a client is addressed to an inbound - /addClient
+// splices the entry into that inbound's settings and /updateClient/:clientId matches
+// it there by the identity its protocol keys on. An account on no inbound has
+// neither: no settings blob carries it and no protocol gives it an identity, so
+// there is nothing for those routes to be about. This is the one path that can
+// write it, and it writes the two rows that hold an account when no settings blob
+// does:
+//
+//   - the accounts row, through the same mirror the inbound-addressed writes use
+//     (upsertAccountFromEntry with no inbound), so the credential columns, the
+//     presence guards on subId and the three limit overrides all behave identically;
+//   - the client_traffics row, which is the account's quota, expiry, enable flag and
+//     usage counter panel-wide. It is created here rather than left to the first
+//     membership because it IS the account as far as every enforcement path is
+//     concerned, and an account whose quota exists nowhere is one that cannot be
+//     billed the moment an inbound is attached.
+//
+// The membership set is the CALLER's next call (ApplyMembershipsFrom): this writes
+// the account, that decides what serves it, and keeping them apart is what lets the
+// same handler create an account on nothing and re-attach one to three inbounds.
+func (s *AccountService) SaveAccountWithoutInbound(entry map[string]any) (*model.Account, error) {
+	email, _ := entry["email"].(string)
+	key := accountKey(email)
+	if key == "" {
+		return nil, common.NewError("a client needs an email")
+	}
+	var saved *model.Account
+	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		existing, err := s.GetAccountByEmailTx(tx, email)
+		if err != nil {
+			return err
+		}
+		var traffic xray.ClientTraffic
+		trafficErr := tx.Where("LOWER(TRIM(email)) = ?", key).First(&traffic).Error
+		if trafficErr != nil && trafficErr != gorm.ErrRecordNotFound {
+			return trafficErr
+		}
+		hasTraffic := trafficErr == nil
+		if existing == nil && hasTraffic {
+			// A counter row with no account behind it means the email is spoken for by
+			// something this layer cannot see - a client written straight into an
+			// inbound's settings, or a row a delete left behind. Creating an account
+			// over it would silently adopt that usage history and that quota.
+			return common.NewErrorf("the email %q is already in use", email)
+		}
+
+		account, err := s.upsertAccountFromEntry(tx, entry, nil)
+		if err != nil {
+			return err
+		}
+
+		if !hasTraffic {
+			// InboundId 0, and it is a truthful 0: the column is documented as the
+			// account's HOME inbound, "whichever one it was created on", and this one
+			// was created on none. Nothing resolves service by it (every enforcement
+			// path keys on the email), and the has-many preload behind the Inbounds
+			// page simply never matches it.
+			traffic = xray.ClientTraffic{InboundId: 0, Email: account.Email}
+		}
+		// Up/Down/AllTime are deliberately untouched on an edit: they are the
+		// customer's usage history, and the whole reason an account may sit on no
+		// inbound rather than being deleted is that this row survives.
+		traffic.Email = account.Email
+		traffic.Enable = account.Enable
+		traffic.Total = account.TotalGB
+		traffic.ExpiryTime = account.ExpiryTime
+		traffic.Reset = account.Reset
+		if err := tx.Save(&traffic).Error; err != nil {
+			return err
+		}
+		saved = account
+		return nil
+	})
+	return saved, err
+}
+
+// DeleteAccountWithoutInbound removes an account nothing serves, with its counter
+// row, and refuses one that is still on an inbound.
+//
+// The refusal is what keeps there being ONE destructive path for a served account:
+// DelInboundClientByEmail also takes the entry out of settings.clients, drops the IP
+// bindings and pulls the user out of the running core, and none of that would happen
+// here. An account on no inbound has none of those to clean up, which is exactly why
+// it needs its own removal - the inbound-addressed delete has no inbound to be
+// addressed to.
+func (s *AccountService) DeleteAccountWithoutInbound(email string) error {
+	key := accountKey(email)
+	if key == "" {
+		return common.NewError("no email")
+	}
+	return database.GetDB().Transaction(func(tx *gorm.DB) error {
+		account, err := s.GetAccountByEmailTx(tx, email)
+		if err != nil {
+			return err
+		}
+		if account == nil {
+			return common.NewErrorf("no account for %q", email)
+		}
+		var memberships int64
+		if err := tx.Model(&model.AccountInbound{}).
+			Where("account_id = ?", account.Id).Count(&memberships).Error; err != nil {
+			return err
+		}
+		if memberships > 0 {
+			return common.NewErrorf(
+				"%q is still served on %d inbound(s); delete it from those instead",
+				email, memberships)
+		}
+		if err := tx.Where("LOWER(TRIM(email)) = ?", key).Delete(&xray.ClientTraffic{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", account.Id).Delete(&model.Account{}).Error
+	})
 }
 
 // SetMembershipEnable switches one account on or off on ONE inbound, leaving every

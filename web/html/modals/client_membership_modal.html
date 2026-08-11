@@ -237,6 +237,13 @@
         <a-alert v-if="clientMembershipModal.protocolClash" type="error" show-icon
           :style="{ marginTop: '12px' }"
           message='{{ i18n "pages.clients.sameProtocolRefused" }}'></a-alert>
+        <!-- Ticking nothing is allowed and saves. It is stated here because an empty
+             checklist otherwise reads as a form that is not finished yet, and this
+             one is a decision: the account keeps everything and serves nobody. -->
+        <a-alert v-if="!clientMembershipModal.selected.length" type="warning" show-icon
+          :style="{ marginTop: '12px' }"
+          message='{{ i18n "pages.clients.noInbounds" }}'
+          description='{{ i18n "pages.clients.noInboundsHint" }}'></a-alert>
       </template>
       <!-- Credentials: field-first, because the account stores ONE of each and
            several protocols share them. -->
@@ -881,6 +888,22 @@
           c.password = c.password || e.password;
         }
       }
+
+      // Pass three: the account's OWN columns, which the list reports for an account
+      // no inbound serves. Both passes above walk memberships, so for one of those
+      // they read nothing at all and every box would open blank - and a blank box is
+      // not harmless here: ticking an inbound mints a fresh credential on submit for
+      // any field that looks empty, and the server lifts it onto the account, so the
+      // configs the customer already has installed stop working the moment they are
+      // put back on an inbound. Last, and never overwriting, like the others.
+      const own = row.credentials || {};
+      c.id = c.id || own.uuid || '';
+      c.password = c.password || own.password || '';
+      c.vpnUsername = c.vpnUsername || own.vpnUsername || '';
+      c.auth = c.auth || own.auth || '';
+      c.secret = c.secret || own.secret || '';
+      c.naiveUsername = c.naiveUsername || own.naiveUsername || '';
+      c.security = c.security || own.security || '';
     },
 
     // The 2022-blake3 key length one ticked inbound demands, or 0. Keyed by inbound
@@ -909,7 +932,10 @@
     async ok() {
       const email = (this.client.email || '').trim();
       if (!email) return;
-      if (!this.selected.length) return;
+      // NOT a check on the inbound count. An account is allowed to be on none: it
+      // keeps its credentials, its quota and its usage row and simply serves no
+      // traffic until an inbound is ticked, which is what the Inbounds tab says in
+      // place of this refusal. The server enforces who may leave one that way.
       if (this.protocolClash) return;
 
       const ids = this.selected.slice().sort((a, b) => a - b);
@@ -1099,6 +1125,7 @@
     // memberships are the server's to fill, and the credential columns it fills
     // them from are the ones this entry just carried.
     async saveNew(email, ids) {
+      if (!ids.length) return await this.saveAccount(email, ids);
       const first = this.assignable.find(x => x.inboundId === ids[0]);
       const client = this.entryFor(first ? first.protocol : '', email, ids[0]);
       const msg = await HttpUtil.post('/panel/api/inbounds/addClient',
@@ -1107,27 +1134,76 @@
       return (await this.writeAdtag(email, ids, ids[0])) || msg;
     },
 
+    // The account written on its own, with no inbound addressing it.
+    //
+    // Every other write here is posted TO an inbound: addClient splices the entry
+    // into that inbound's settings and updateClient finds it there by the identity
+    // its protocol keys on. Neither can express an account that is on nothing -
+    // there is no blob to splice into and no protocol to have an identity in - so
+    // the two cases that have no anchor at all come here instead:
+    //
+    //   - a new account with nothing ticked;
+    //   - any edit of an account that is ALREADY on nothing, ticking inbounds
+    //     included. Re-attaching cannot go through addClient because the email is
+    //     taken, by the very account being re-attached.
+    //
+    // The entry is built with no protocol, so it carries the account's own columns
+    // and nothing protocol-shaped: the server keys the credentials to a protocol
+    // when a membership that needs one is created.
+    async saveAccount(email, ids) {
+      const client = this.entryFor('', email, ids[0] || 0);
+      const body = { settings: JSON.stringify({ clients: [client] }) };
+      if (ids.length) {
+        body.inboundIds = ids;
+      } else {
+        // Qs.stringify drops an empty array entirely, so "none" cannot be said with
+        // the list; the flag is what tells it apart from a request that simply did
+        // not mention memberships.
+        body.noInbounds = true;
+      }
+      const msg = await HttpUtil.post('/panel/api/inbounds/saveAccount', body);
+      if (!msg || !msg.success) return msg;
+      // The tag rides the mtproto entry itself and no account column holds it, so it
+      // still needs its own write once the membership exists. 0 is "no addressed
+      // inbound", which no membership can equal.
+      return (await this.writeAdtag(email, ids, 0)) || msg;
+    },
+
     // The anchor also decides which stored entry the posted client is built from:
     // an account on vmess and trojan has a uuid on one and a password on the
     // other, and only the anchor's own credential can address it.
     async saveEdit(email, ids) {
       const memberships = (this.row && this.row.memberships) || [];
       const anchor = memberships.find(m => ids.includes(m.inboundId)) || memberships[0];
-      if (!anchor) return { success: false };
+      // Nothing serves this account, so there is no entry anywhere for updateClient
+      // to match and no protocol to address it by. saveAccount is that case, and it
+      // is also how the inbounds now being ticked get attached.
+      if (!anchor) return await this.saveAccount(email, ids);
       const anchorIb = this.assignable.find(x => x.inboundId === anchor.inboundId);
       const client = this.entryFor(anchorIb ? anchorIb.protocol : anchor.protocol,
                                    email, anchor.inboundId);
 
+      const body = { id: anchor.inboundId, inboundIds: ids,
+                     settings: JSON.stringify({ clients: [client] }) };
+      // Unticking everything. The server force-includes the addressed inbound in the
+      // membership set otherwise (it is the one the modal was opened from), so the
+      // empty set has to be stated outright - and stating it is also what stops the
+      // fallback below running, which used to take the account off the anchor with a
+      // DELETE and destroy the client_traffics row carrying its whole usage history.
+      if (!ids.length) {
+        delete body.inboundIds;
+        body.noInbounds = true;
+      }
       const msg = await HttpUtil.post(
-        '/panel/api/inbounds/updateClient/' + encodeURIComponent(anchor.clientId || email),
-        { id: anchor.inboundId, inboundIds: ids, settings: JSON.stringify({ clients: [client] }) });
+        '/panel/api/inbounds/updateClient/' + encodeURIComponent(anchor.clientId || email), body);
       if (!msg || !msg.success) return msg;
 
       const tagMsg = await this.writeAdtag(email, ids, anchor.inboundId);
       if (tagMsg && !tagMsg.success) return tagMsg;
 
-      // Every current membership was kept, so nothing is left to drop.
-      if (ids.includes(anchor.inboundId)) return msg;
+      // Every current membership was kept, so nothing is left to drop. The empty set
+      // is in the same position: the write above already removed every one of them.
+      if (!ids.length || ids.includes(anchor.inboundId)) return msg;
       // Otherwise the anchor is the one inbound the update could not remove, and
       // it comes off on its own.
       return await HttpUtil.post(

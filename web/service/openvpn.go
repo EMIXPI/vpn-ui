@@ -35,6 +35,13 @@ type OpenVpnService struct {
 }
 
 // openvpnSettings represents the OpenVPN-specific settings stored in the inbound's Settings JSON.
+// ovpnMaxMssfix is the largest encapsulated packet the server will let a tunnelled TCP
+// session produce, whatever the tun MTU says. 1400 leaves ~100 bytes under a 1500 byte
+// path, which is enough for the UDP/IP/OpenVPN headers plus the common paths that are not
+// really 1500 (PPPoE 1492, DS-Lite, a carrier tunnel). See the mssfix line in
+// genServerConfig for why this is a clamp on the OUTER size rather than a smaller tun-mtu.
+const ovpnMaxMssfix = 1400
+
 type openvpnSettings struct {
 	UdpEnable     *bool  `json:"udpEnable"` // nil == enabled (back-compat with pre-toggle inbounds)
 	TcpEnable     *bool  `json:"tcpEnable"` // nil == enabled
@@ -325,7 +332,7 @@ type openvpnClient struct {
 	Password string `json:"password"` // OpenVPN password
 	Email    string `json:"email"`    // tracking identifier
 	Enable   bool   `json:"enable"`
-	Slot     *int   `json:"slot"`     // address-pool slot; nil = fall back to list index
+	Slot     *int   `json:"slot"` // address-pool slot; nil = fall back to list index
 	// This account's own device cap. nil = inherit the inbound's K, and it can only
 	// LOWER it: see resolveUserLimitOverride.
 	UserLimitOverride *int `json:"userLimitOverride"`
@@ -697,6 +704,33 @@ func (s *OpenVpnService) buildServerConfig(inbound *model.Inbound, settings *ope
 	// route, bypassing Xray entirely (mirrors the L2TP/PPTP noipv6 fix).
 	b.WriteString("push \"block-ipv6\"\n")
 	b.WriteString(fmt.Sprintf("tun-mtu %d\n", mtu))
+	// mssfix, explicitly, INSTEAD of lowering tun-mtu.
+	//
+	// 1500 is the right INNER size and is OpenVPN's own default: it is what a client's
+	// stack expects on a LAN-like link, and shrinking it would cost every packet on every
+	// path, including the paths that never needed it. What is wrong at 1500 is the OUTER
+	// size, and mssfix is the knob for that.
+	//
+	// This build's default mssfix is "tun-mtu size or --fragment max value, whichever is
+	// lower" (openvpn --help), so with tun-mtu 1500 and no --fragment it lets the
+	// ENCAPSULATED packet reach exactly 1500 bytes: the whole path budget, with nothing
+	// left over for a path that is even slightly smaller. PPPoE at 1492, DS-Lite, a mobile
+	// carrier's own tunnel and any GRE/IPsec hop upstream are all under it, and the symptom
+	// is the one this protocol gets reported for: the tunnel connects, small requests work,
+	// and anything with full-size segments hangs.
+	//
+	// It does NOT make UDP safe at a 1500 inner MTU. Nothing but --fragment would, and that
+	// costs 4 bytes on every datagram and is refused by DCO, so it is not worth paying for
+	// every user to fix the rarer half. TCP is where the hangs are reported.
+	//
+	// Written bare rather than as `mssfix 1400 mtu`: the mtu/fixed flag is 2.6+, and the
+	// bare form means the same thing on every openvpn this panel might be running. Verified
+	// accepted by the bundled 2.6.12 in both udp and tcp-server mode.
+	mssfix := mtu
+	if mssfix > ovpnMaxMssfix {
+		mssfix = ovpnMaxMssfix
+	}
+	b.WriteString(fmt.Sprintf("mssfix %d\n", mssfix))
 	caPath, certPath, keyPath, tcPath := s.certPaths(inbound, settings)
 	b.WriteString(fmt.Sprintf("ca %s\n", caPath))
 	b.WriteString(fmt.Sprintf("cert %s\n", certPath))
@@ -808,11 +842,7 @@ func (s *OpenVpnService) SetupRouting() error {
 
 	// Deliver fwmark-1 packets locally so TPROXY can hand them to the dokodemo
 	// socket (shared table 100 with L2TP/PPTP; add/replace are idempotent).
-	output, _ := exec.Command("ip", "rule", "show").Output()
-	if !strings.Contains(string(output), "fwmark 0x1 lookup 100") {
-		s.runCmd("ip", "rule", "add", "fwmark", "1", "lookup", "100")
-	}
-	s.runCmd("ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+	ensureVpnPolicyRoute(s.runCmd)
 
 	return s.nftService.ApplyNftRules()
 }

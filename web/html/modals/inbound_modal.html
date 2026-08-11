@@ -510,7 +510,10 @@
                     const s = ib.settings || {};
                     if (!s.udpEnable && !s.tcpEnable) at("identity", "Identity", "enable TCP, UDP or both");
                     if (s.udpEnable && !okPort(ib.port)) at("identity", "Identity", "the UDP port must be 1 to 65535");
-                    if (s.tcpEnable && !okPort(s.tcpPort)) at("identity", "Identity", "the TCP port must be 1 to 65535");
+                    // tcpPort is only a listener in the separate mode. Shared mode puts
+                    // TCP on inbound.Port and leaves tcpPort untouched and out of sight,
+                    // so a stale value in there must not block a save the server accepts.
+                    if (s.separatePorts && s.tcpEnable && !okPort(s.tcpPort)) at("identity", "Identity", "the TCP port must be 1 to 65535");
                     // Which boxes must be filled depends on the cert source, and this
                     // has to agree with validateInboundConfig in web/service/inbound.go
                     // or the button is enabled for a body the server then refuses (or,
@@ -1093,21 +1096,33 @@
                 // Reset testseed to default values using Vue.set for reactivity
                 this.$set(this.inbound.settings, "testseed", [900, 500, 900, 256]);
             },
+            // Shared-port mode has no per-transport switches, so it must not be able
+            // to INHERIT a transport that was switched off in split mode: the operator
+            // would land on one port box, both switches out of sight, and an inbound
+            // quietly serving only half of what the row claims. Collapsing to shared
+            // therefore turns both back on, which is the only state that row can mean.
+            ovpnToggleSeparatePorts(checked) {
+                const settings = inModal.inbound.settings;
+                settings.separatePorts = checked;
+                if (!checked) {
+                    settings.tcpEnable = true;
+                    settings.udpEnable = true;
+                }
+            },
+            // An OpenVPN inbound with neither transport up is a server nobody can
+            // reach, so one of the two always stays on. The switch the operator
+            // touched WINS: turning off the last one enabled hands the tunnel to the
+            // other rather than refusing the click and snapping back. That used to
+            // be a warning toast, which read as a bug - the operator asked to move
+            // from UDP to TCP and the UI told them no instead of doing it.
             ovpnToggleTransport(proto, checked) {
                 const settings = inModal.inbound.settings;
-                const otherEnabled =
-                    proto === "tcp" ? settings.udpEnable : settings.tcpEnable;
-                if (!checked && !otherEnabled) {
-                    this.$message.warning(
-                        "At least one of TCP/UDP must be enabled",
-                    );
-                    return;
+                const self = proto === "tcp" ? "tcpEnable" : "udpEnable";
+                const other = proto === "tcp" ? "udpEnable" : "tcpEnable";
+                if (!checked && !settings[other]) {
+                    settings[other] = true;
                 }
-                if (proto === "tcp") {
-                    settings.tcpEnable = checked;
-                } else {
-                    settings.udpEnable = checked;
-                }
+                settings[self] = checked;
             },
             ovpnSetCipherMode(mode) {
                 const settings = inModal.inbound.settings;

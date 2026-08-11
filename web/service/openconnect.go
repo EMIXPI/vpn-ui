@@ -466,11 +466,7 @@ func (s *OcservService) SetupRouting() error {
 	s.runCmd("modprobe", "tun")
 	s.runCmd("modprobe", "nf_tproxy_ipv4")
 
-	output, _ := exec.Command("ip", "rule", "show").Output()
-	if !strings.Contains(string(output), "fwmark 0x1 lookup 100") {
-		s.runCmd("ip", "rule", "add", "fwmark", "1", "lookup", "100")
-	}
-	s.runCmd("ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+	ensureVpnPolicyRoute(s.runCmd)
 
 	return s.nftService.ApplyNftRules()
 }

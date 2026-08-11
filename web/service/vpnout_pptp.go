@@ -121,6 +121,17 @@ func (d *pptpOutDriver) parse(cfg VpnOutboundConfig) (*pptpOutSettings, error) {
 	return s, nil
 }
 
+// ServerHost names the PPTP server, so this tunnel can be carried inside another. Both
+// halves of the protocol go there: the TCP 1723 control channel and the GRE that
+// carries the PPP frames.
+func (d *pptpOutDriver) ServerHost(cfg VpnOutboundConfig) (string, error) {
+	s, err := d.parse(cfg)
+	if err != nil {
+		return "", err
+	}
+	return s.Server, nil
+}
+
 // Available reports whether a PPTP outbound can run here at all.
 //
 // The answer comes from the bundle manifest rather than from a probe, because

@@ -313,12 +313,9 @@ func (s *PptpService) SetupAllTproxy() error {
 	s.runCmd("modprobe", "ppp_mppe")
 	s.runCmd("modprobe", "nf_tproxy_ipv4")
 
-	// Set up ip rule and route table (check if already exists to avoid duplicates)
-	output, _ := exec.Command("ip", "rule", "show").Output()
-	if !strings.Contains(string(output), "fwmark 0x1 lookup 100") {
-		s.runCmd("ip", "rule", "add", "fwmark", "1", "lookup", "100")
-	}
-	s.runCmd("ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+	// Set up the shared ip rule and route table (idempotent, and it collapses the
+	// duplicates the old per-protocol guard piled up).
+	ensureVpnPolicyRoute(s.runCmd)
 
 	return s.nftService.ApplyNftRules()
 }

@@ -196,9 +196,18 @@
                        below it down. -->
                   <template slot="servingCol" slot-scope="text, row">
                     <div class="bo-lg-serving">
-                      <span v-if="!row.memberships || !row.memberships.length" class="bo-dim">
-                        {{ i18n "pages.clients.noInbounds" }}
-                      </span>
+                      <!-- A tag rather than the dim text this used to be. The cell is
+                           otherwise a row of protocol tags, so grey words in the gap
+                           where they should be read as a rendering failure; an account
+                           on no inbound is a state someone chose, and it is the one
+                           row on the page that is serving nobody. The tooltip carries
+                           the consequence, since the tag only has room for the fact. -->
+                      <a-tooltip v-if="!row.memberships || !row.memberships.length">
+                        <template slot="title">{{ i18n "pages.clients.noInboundsHint" }}</template>
+                        <a-tag class="bo-proto bo-proto--none">
+                          {{ i18n "pages.clients.noInbounds" }}
+                        </a-tag>
+                      </a-tooltip>
                       <a-tooltip v-for="m in shownMemberships(row)" :key="m.inboundId">
                         <template slot="title">
                           [[ m.remark || ('#' + m.inboundId) ]]
@@ -266,20 +275,27 @@
                           <!-- The whole account, one card per inbound serving it.
                                The icons inside the expander export ONE membership;
                                these two are the row's, so they carry every protocol
-                               the customer was sold. -->
-                          <a-menu-item key="exportTxt">
+                               the customer was sold.
+                               Absent on an account no inbound serves, along with the
+                               two below it: all four are addressed to a membership
+                               (the exports render one card per inbound, reset and
+                               freeze post to /:id/... routes), so with none they are
+                               menu items that quietly do nothing. Edit and Delete
+                               stay, and they are the two that still mean something -
+                               ticking an inbound is how this state is left. -->
+                          <a-menu-item key="exportTxt" v-if="isServed(row)">
                             <a-icon type="file-text"></a-icon>{{ i18n "pages.inbounds.exportTxt" }}
                           </a-menu-item>
-                          <a-menu-item key="exportPdf">
+                          <a-menu-item key="exportPdf" v-if="isServed(row)">
                             <a-icon type="file-pdf"></a-icon>{{ i18n "pages.inbounds.exportPdf" }}
                           </a-menu-item>
-                          <a-menu-item key="reset">
+                          <a-menu-item key="reset" v-if="isServed(row)">
                             <a-icon type="retweet"></a-icon>{{ i18n "pages.inbounds.resetTraffic" }}
                           </a-menu-item>
                           <!-- Freeze locks the remaining days instead of letting them
                                tick away while the account is off, so a customer who
                                pauses for a month keeps the month. -->
-                          <a-menu-item key="freeze">
+                          <a-menu-item key="freeze" v-if="isServed(row)">
                             <a-icon type="pause-circle"></a-icon>
                             [[ isAccountFrozen(row) ? '{{ i18n "pages.client.unfreeze" }}'
                                                     : '{{ i18n "pages.client.freeze" }}' ]]
@@ -596,6 +612,11 @@
       // it worth a slot at all: nothing has happened on this account yet.
       lampClass(row) {
         if (!row.enable || this.expired(row) || this.depleted(row)) return 'bo-lamp--error';
+        // Nothing serves it, so it cannot be online, healthy or about to run out:
+        // no clock is running. Same hue as a delayed start, which is the other
+        // "real account, not yet carrying traffic" state, and ahead of the online
+        // test because a stale session must not light a row nothing serves.
+        if (!this.isServed(row)) return 'bo-lamp--idle';
         if (this.notStarted(row)) return 'bo-lamp--idle';
         if (this.isClientOnline(row.email)) return 'bo-lamp--live';
         // Amber survives as a variant of "working, not connected": an account
@@ -613,8 +634,16 @@
         if (this.expired(row)) return '{{ i18n "pages.clients.summaryExpired" }}';
         if (this.depleted(row)) return '{{ i18n "depleted" }}';
         if (!row.enable) return '{{ i18n "disabled" }}';
+        if (!this.isServed(row)) return '{{ i18n "pages.clients.noInbounds" }}';
         if (this.notStarted(row)) return '{{ i18n "pages.client.delayedStart" }}';
         return this.isClientOnline(row.email) ? '{{ i18n "online" }}' : '{{ i18n "offline" }}';
+      },
+      // Is any inbound serving this account. An account may deliberately be on none:
+      // it keeps its credentials, quota and usage history and simply carries no
+      // traffic, so it is not disabled, not expired and not broken - and every row
+      // action that is addressed to an inbound has nothing to address.
+      isServed(row) {
+        return !!(row && row.memberships && row.memberships.length);
       },
       // A positive deadline inside a week. Deliberately NOT true for a delayed
       // start or a frozen account: neither clock is running, so neither is
@@ -1201,7 +1230,11 @@
       // page does not need a write path of its own.
       async applyToAccount(row, patch) {
         const ids = (row.memberships || []).map(m => m.inboundId);
-        if (!ids.length) return null;
+        // No inbound serves it, so no stored entry can address it and updateClient
+        // has nothing to match. The account route writes the same fields with no
+        // inbound in the request; without this the enable switch on such a row
+        // sprang back on the next refresh with nothing reporting a failure.
+        if (!ids.length) return await this.applyToUnservedAccount(row, patch);
         const stored = this.storedClient(row, ids[0]);
         if (!stored) return null;
         const client = Object.assign(stored, {
@@ -1216,6 +1249,21 @@
         // protocol except shadowsocks. The list API reports it per membership.
         const clientId = (row.memberships[0] && row.memberships[0].clientId) || row.email;
         return await HttpUtil.post('/panel/api/inbounds/updateClient/' + encodeURIComponent(clientId), body);
+      },
+      // The same patch for an account nothing serves. Built from the ROW rather than
+      // from a stored entry, because there is no stored entry: the account row is
+      // the whole truth for one of these. noInbounds is what keeps it that way - the
+      // route sets the membership set to exactly what is posted, and posting nothing
+      // without the flag would read as "the caller did not mention memberships".
+      async applyToUnservedAccount(row, patch) {
+        const client = Object.assign({
+          email: row.email, enable: row.enable, totalGB: row.totalGB,
+          expiryTime: row.expiryTime, limitIp: row.limitIp, subId: row.subId,
+          comment: row.comment, reset: row.reset, tgId: row.tgId || 0,
+        }, patch);
+        return await HttpUtil.post('/panel/api/inbounds/saveAccount', {
+          noInbounds: true, settings: JSON.stringify({ clients: [client] }),
+        });
       },
 
       confirmDelete(row) {
@@ -1243,6 +1291,15 @@
       // reasons of its own and a half-deleted account must not look like success.
       async deleteAccount(row) {
         const stuck = [];
+        // Nothing serves it, so there is no inbound to address the delete to and
+        // nothing in any settings blob to remove. What is left is the account row and
+        // its counter row, which is what this route takes.
+        if (!this.isServed(row)) {
+          const msg = await HttpUtil.post(
+            `/panel/api/inbounds/delAccount/${encodeURIComponent(row.email)}`);
+          if (!msg || !msg.success) stuck.push(row.email);
+          return stuck;
+        }
         for (const m of (row.memberships || [])) {
           const msg = await HttpUtil.post(
             `/panel/api/inbounds/${m.inboundId}/delClientByEmail/${encodeURIComponent(row.email)}`);

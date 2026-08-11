@@ -275,14 +275,21 @@ func probeHost(listen string) string {
 	return listen
 }
 
+// listenIsWildcard reports whether a Listen value names every address on the host
+// rather than one of them. Blank is the form the inbound form produces ("Leave blank
+// to listen on all IPs"), the rest are the explicit spellings of the same thing.
+func listenIsWildcard(listen string) bool {
+	switch strings.TrimSpace(listen) {
+	case "", "0.0.0.0", "::", "::0":
+		return true
+	}
+	return false
+}
+
 // listenOverlaps reports whether two inbounds would compete for the same port. A
 // wildcard on either side covers every address, so it collides with anything.
 func listenOverlaps(a, b string) bool {
-	wildcard := func(s string) bool {
-		s = strings.TrimSpace(s)
-		return s == "" || s == "0.0.0.0" || s == "::" || s == "::0"
-	}
-	if wildcard(a) || wildcard(b) {
+	if listenIsWildcard(a) || listenIsWildcard(b) {
 		return true
 	}
 	return strings.TrimSpace(a) == strings.TrimSpace(b)

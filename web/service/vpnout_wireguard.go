@@ -175,6 +175,17 @@ func (d *wgOutDriver) iface(cfg VpnOutboundConfig) string {
 	return vpnOutIfaceName(vpnOutWgIfacePrefix, cfg.Tag)
 }
 
+// ServerHost names what the outer UDP goes to, so this tunnel can be carried inside
+// another. The endpoint's port is dropped by the framework: a rule selects on the
+// address alone.
+func (d *wgOutDriver) ServerHost(cfg VpnOutboundConfig) (string, error) {
+	st, err := d.settings(cfg)
+	if err != nil {
+		return "", err
+	}
+	return st.Endpoint, nil
+}
+
 // Validate rejects a config before anything is brought up. Key material and the
 // endpoint shape are checked here rather than at Up so the operator is told what is
 // wrong while the modal is still open, instead of getting a netlink errno later.

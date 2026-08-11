@@ -1143,11 +1143,7 @@ func (s *GreService) SetupRouting() error {
 	s.runCmd("modprobe", greModule)
 	s.runCmd("modprobe", greFouModule)
 
-	output, _ := exec.Command("ip", "rule", "show").Output()
-	if !strings.Contains(string(output), "fwmark 0x1 lookup 100") {
-		s.runCmd("ip", "rule", "add", "fwmark", "1", "lookup", "100")
-	}
-	s.runCmd("ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100")
+	ensureVpnPolicyRoute(s.runCmd)
 
 	// A GRE netdev is NOARP and the catch-all is fed by learned neighbour entries, so
 	// strict reverse-path filtering on it would drop perfectly good customer traffic.

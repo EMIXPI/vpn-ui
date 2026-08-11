@@ -217,6 +217,20 @@ func greOutParse(cfg VpnOutboundConfig) (*greOutSettings, error) {
 	return st, nil
 }
 
+// ServerHost names the far end of the GRE tunnel, so this one can be carried inside
+// another.
+//
+// The same address whichever mode is in use: FOU wraps the GRE in UDP to the same
+// remote, and IPsec's ESP is negotiated with the same peer. What changes is the
+// protocol number on the wire, and a rule does not select on that.
+func (greOutDriver) ServerHost(cfg VpnOutboundConfig) (string, error) {
+	st, err := greOutParse(cfg)
+	if err != nil {
+		return "", err
+	}
+	return st.Server, nil
+}
+
 // greOutMtu is the inner MTU for this tunnel: the operator's value, else the largest that
 // fits the encapsulation actually in use. Same order of precedence as the server's
 // effectiveMtu, and for the same reason: when both IPsec and FOU are on the packet pays both

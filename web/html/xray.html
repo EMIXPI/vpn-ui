@@ -882,13 +882,19 @@
           tags: this.outboundAndTunnelTags()
         });
       },
+      // Every tag a TUNNEL holds, SSH and VPN alike. The one place that answers
+      // "is this tag a tunnel", so outboundAndTunnelTags below can decide which
+      // tags are taken. Two answers to that question would drift the first time a
+      // tunnel kind is added.
+      tunnelTags() {
+        return [...this.sshOutboundTags, ...Object.keys(this.vpnOutbounds)];
+      },
       // Every tag an outbound may not reuse: the ones in the template plus the
       // ones the SSH and VPN tunnels hold. `except` drops the row being edited so
       // it does not collide with itself.
       outboundAndTunnelTags(except) {
         const tags = this.templateSettings.outbounds.map(obj => obj.tag);
-        this.sshOutboundTags.forEach(t => { if (!tags.includes(t)) tags.push(t); });
-        Object.keys(this.vpnOutbounds).forEach(t => { if (!tags.includes(t)) tags.push(t); });
+        this.tunnelTags().forEach(t => { if (!tags.includes(t)) tags.push(t); });
         return except === undefined ? tags : tags.filter(t => t !== except);
       },
       // Creates (or replaces) the SSH tunnel behind an ssh-shaped outbound and
@@ -937,6 +943,21 @@
           // has no interface, and this page has no way to show an outbound that
           // exists but cannot carry traffic.
           enable: true,
+          // The tunnel that carries this one's outer transport, '' for none, and it
+          // comes from the row's own Dialer Proxy box: that is the panel's single
+          // chaining control, and on a tunnel row it means "carry this tunnel's own
+          // transport through that tag". The server turns it into routing rules and
+          // strips the key from the Xray config, where it would mean the opposite
+          // and cancel the interface pin (vpnOutStreamSettings).
+          //
+          // Read off the model rather than the serialised row so the sockopt switch
+          // is respected: turning sockopts off drops the whole block, and a carrier
+          // the config no longer carries must not keep steering traffic.
+          //
+          // Sent on every save including the blank one: the server treats it as the
+          // whole answer, so leaving it out of a save that cleared the box would
+          // keep the old carrier and the routing rules with it.
+          via: model.stream?.sockopt?.dialerProxy || '',
           settings: JSON.stringify(s.settingsPayload()),
         });
         if (!msg || !msg.success || !msg.obj) return '';
@@ -1012,12 +1033,26 @@
       // the panel API does not echo them back, and a blank field is what tells
       // the server to keep the stored one.
       vpnOutboundModel(row, vpn) {
-        const settings = new Outbound.VpnSettings(vpn.kind, vpn.settings || {}, vpn.iface || '', vpn.remark || '');
+        const settings = new Outbound.VpnSettings(vpn.kind, vpn.settings || {}, vpn.iface || '',
+          vpn.remark || '');
         // The row's own stream settings come from the config and not from the
         // tunnel list, which knows nothing about them: rebuilding from the tunnel
         // alone would drop the operator's sockopts on the next save.
+        const stream = StreamSettings.fromJson(row.streamSettings);
+        // The carrier is written in two places at two different moments: into the
+        // tunnel (`via`) the instant the modal is confirmed, and into this row's
+        // Dialer Proxy only when the Xray page itself is saved. In between, the row
+        // is silent about a carrier the panel is already steering, and a form opened
+        // then would show none and clear it on the next save. Seeded from the tunnel
+        // for that window, and for a tunnel stored by a panel that kept the carrier
+        // in a field of its own. The row wins when it has one: that is what the
+        // operator last typed.
+        if (vpn.via && !(stream.sockopt && stream.sockopt.dialerProxy)) {
+          if (!stream.sockopt) stream.sockoptSwitch = true;
+          stream.sockopt.dialerProxy = vpn.via;
+        }
         return new Outbound(row.tag, vpnProtocolFor(vpn.kind), settings,
-          StreamSettings.fromJson(row.streamSettings), row.sendThrough);
+          stream, row.sendThrough);
       },
       // The Outbound the SSH form edits, built the same way and for the same
       // reason: the row is a socks outbound aimed at a loopback port. Secrets are

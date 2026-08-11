@@ -216,10 +216,16 @@ func (a *XraySettingController) sshoutbound(c *gin.Context) {
 // blob travels as text and is unmarshalled by hand, the same way importInbound and
 // testOutbound take theirs.
 type vpnOutboundForm struct {
-	Tag      string `form:"tag"`
-	Kind     string `form:"kind"`
-	Remark   string `form:"remark"`
-	Enable   bool   `form:"enable"`
+	Tag    string `form:"tag"`
+	Kind   string `form:"kind"`
+	Remark string `form:"remark"`
+	Enable bool   `form:"enable"`
+	// Via is the tag of another tunnel that carries this one's outer transport, which the
+	// browser sends straight from the row's Dialer Proxy select: that one control is how
+	// a chain is asked for on every outbound, tunnel or not. Blank is the ordinary case
+	// and blank is also what an older panel posts, which is why it binds as a plain
+	// string rather than through anything that would fail on absence.
+	Via      string `form:"via"`
 	Settings string `form:"settings"`
 }
 
@@ -282,6 +288,7 @@ func (a *XraySettingController) vpnoutbound(c *gin.Context) {
 			Kind:   f.Kind,
 			Remark: f.Remark,
 			Enable: f.Enable,
+			Via:    f.Via,
 		}
 		// Rejected here rather than left to the driver, because a malformed blob does
 		// not stop at the driver: it survives Validate if the driver only looks at the

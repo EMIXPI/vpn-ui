@@ -86,6 +86,7 @@ var defaultValueMap = map[string]string{
 	"externalTrafficInformEnable": "false",
 	"externalTrafficInformURI":    "",
 	"xrayOutboundTestUrl":         "https://www.google.com/generate_204",
+	"geofileAutoUpdate":           "true",
 
 	// LDAP defaults
 	"ldapEnable":            "false",
@@ -833,6 +834,25 @@ func (s *SettingService) GetIpLimitEnable() (bool, error) {
 	return true, nil
 }
 
+// GetGeofileAutoUpdate reports whether the panel refreshes the built-in geo data
+// files on its own. On by default: routing rules that name a geosite/geoip
+// category go stale silently - the file still parses, so nothing errors, the
+// categories are just months out of date.
+//
+// Deliberately NOT part of entity.AllSetting, for the same reason GetServerName
+// is not: AllSetting is bound wholesale from the Settings form, so a key that
+// lives outside that form would be written back as false by the next unrelated
+// Settings save. It is read through GetDefaultSettings and written by its own
+// route on the server controller.
+func (s *SettingService) GetGeofileAutoUpdate() (bool, error) {
+	return s.getBool("geofileAutoUpdate")
+}
+
+// SetGeofileAutoUpdate turns the periodic geo data refresh on or off.
+func (s *SettingService) SetGeofileAutoUpdate(value bool) error {
+	return s.setBool("geofileAutoUpdate", value)
+}
+
 // GetLdapEnable returns whether LDAP is enabled.
 func (s *SettingService) GetLdapEnable() (bool, error) {
 	return s.getBool("ldapEnable")
@@ -1012,6 +1032,9 @@ func (s *SettingService) GetDefaultSettings(host string, full bool) (map[string]
 		"remarkModel":     func() (any, error) { return s.GetRemarkModel() },
 		"datepicker":      func() (any, error) { return s.GetDatepicker() },
 		"ipLimitEnable":   func() (any, error) { return s.GetIpLimitEnable() },
+		// Read here rather than through AllSetting: the switch lives in the overview's
+		// Geofiles dialog, and AllSetting is written wholesale by the Settings form.
+		"geofileAutoUpdate": func() (any, error) { return s.GetGeofileAutoUpdate() },
 		// The overview's access-log viewer reads Xray's access FILE, so this is what
 		// decides whether it has anything to show. It used to ride on ipLimitEnable,
 		// which meant the same thing until IP-limit enforcement moved into the core and

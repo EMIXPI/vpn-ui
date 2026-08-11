@@ -34,9 +34,13 @@
         <span>Protocol</span>
         <b class="bo-if-wrap">[[ ProtocolLabels[inbound.protocol] || inbound.protocol ]]</b>
       </div>
+      <!-- Wraps rather than truncating, same reasoning as Protocol above: an OpenVPN
+           inbound with separate ports reports "1194 udp + 1195 tcp", which overruns
+           the 168px a rail row leaves, and .bo-cf-ell would ellipsis away the second
+           half - hiding one of the two ports this row exists to report. -->
       <div class="bo-cf-kv">
         <span>Listens on</span>
-        <b class="bo-cf-ell">[[ listensOn ]]</b>
+        <b class="bo-if-wrap">[[ listensOn ]]</b>
       </div>
       <div class="bo-cf-kv" v-if="isEdit">
         <span>Accounts</span>
@@ -215,7 +219,15 @@
           <!-- OpenVPN-only multi-port UI (TCP/UDP, optional separate ports). IKEv2 is
                excluded from BOTH this and the single-port field above: its Port + NAT-T
                Port live in the ikev2 protocol form (form/ikev2). Do NOT change this back to
-               a bare v-else - that renders this OpenVPN block for IKEv2 (duplicate ports). -->
+               a bare v-else - that renders this OpenVPN block for IKEv2 (duplicate ports).
+
+               WHICH ROWS CARRY AN ENABLE SWITCH, and why it is not all of them. With
+               Separate Ports OFF there is ONE listener serving both transports, so a
+               switch on that row could only ever turn the whole inbound off - which is
+               what the inbound's own Enable does. It is dropped: a control whose only
+               setting is "on" is noise. With Separate Ports ON the two transports are
+               independent listeners, so each gets a switch and you can run TCP-only or
+               UDP-only. Those two can never both be off - see ovpnToggleTransport. -->
           <template v-else-if="inbound.protocol === 'openvpn'">
               <a-form-item>
                   <template slot="label">
@@ -231,17 +243,18 @@
                   </template>
                   <a-switch
                       :checked="inbound.settings.separatePorts"
-                      @change="checked => { inbound.settings.separatePorts = checked; }"
+                      @change="checked => ovpnToggleSeparatePorts(checked)"
                   ></a-switch>
               </a-form-item>
-              <a-form-item v-if="inbound.settings.separatePorts" label="TCP Port" :validate-status="tcpPortValidateStatus" :help="tcpPortHelp">
+              <a-form-item v-if="inbound.settings.separatePorts" label="TCP Port"
+                  :validate-status="tcpPortValidateStatus" :help="tcpPortHelp">
                   <a-space>
                       <a-switch
                           :checked="inbound.settings.tcpEnable"
                           @change="checked => ovpnToggleTransport('tcp', checked)"
                       ></a-switch>
                       <a-input
-                          v-if="inbound.settings.tcpEnable && inbound.settings.separatePorts"
+                          v-if="inbound.settings.tcpEnable"
                           :value="inbound.settings.tcpPort"
                           @change="e => { inbound.settings.tcpPort = sanitizePort(e.target.value); }"
                           @keypress.native="blockNonDigit"
@@ -250,9 +263,6 @@
                           placeholder="1194"
                           :style="{ width: '90px' }"
                       ></a-input>
-                      <span v-else-if="inbound.settings.tcpEnable" :style="{ color: '#888' }">
-                          shares the UDP port ([[ inbound.port ]])
-                      </span>
                       <span v-else :style="{ color: '#888' }">Disabled</span>
                   </a-space>
               </a-form-item>
@@ -262,18 +272,21 @@
               >
                   <a-space>
                       <a-switch
+                          v-if="inbound.settings.separatePorts"
                           :checked="inbound.settings.udpEnable"
                           @change="checked => ovpnToggleTransport('udp', checked)"
                       ></a-switch>
                       <a-input
+                          v-if="!inbound.settings.separatePorts || inbound.settings.udpEnable"
                           :value="inbound.port"
                           @change="e => { inbound.port = sanitizePort(e.target.value); }"
                           @keypress.native="blockNonDigit"
                           inputmode="numeric"
                           :max-length="5"
-                          placeholder="1195"
+                          placeholder="1194"
                           :style="{ width: '90px' }"
                       ></a-input>
+                      <span v-else :style="{ color: '#888' }">Disabled</span>
                   </a-space>
               </a-form-item>
           </template>

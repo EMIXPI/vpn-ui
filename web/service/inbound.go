@@ -622,7 +622,16 @@ func normalizeClientEmails(settings string) string {
 //
 // Variadic and not required, because a caller without a usable DB handle should
 // still get the plain sentence rather than no rejection at all.
+// holderIsParkedAccount stands in for "the holder is an account on no inbound", which
+// has no inbound name to print and so cannot go through the "on inbound %s" wording.
+const holderIsParkedAccount = "\x00parked"
+
 func duplicateEmailError(email string, holders ...string) error {
+	if len(holders) == 1 && holders[0] == holderIsParkedAccount {
+		return common.NewErrorf("Duplicate email: %q already belongs to a client that is not "+
+			"attached to any inbound. Open that client and attach this inbound to it, or pick "+
+			"another email.", email)
+	}
 	switch len(holders) {
 	case 0:
 		return common.NewErrorf("Duplicate email: %q is already used by another client. Emails must be unique across all inbounds.", email)
@@ -646,6 +655,12 @@ func (s *InboundService) emailHolders(email string) []string {
 	rows, err := s.inboundsServingEmails(db, []string{email})
 	if err != nil {
 		return nil
+	}
+	// A parked account holds the email with no inbound to point at, so the rejection
+	// would otherwise read "already used by another client" and send the operator
+	// hunting through inbound lists for an entry that is not in any of them.
+	if len(rows) == 0 && s.emailIsParked(email) {
+		return []string{holderIsParkedAccount}
 	}
 	seen := map[int]bool{}
 	var out []string
@@ -688,7 +703,50 @@ func (s *InboundService) getAllEmailsExcludingInbound(ignoreInboundId int) ([]st
 	if err != nil {
 		return nil, err
 	}
-	return emails, nil
+
+	// Accounts that no inbound serves. They have no settings entry for the scan above
+	// to find, and since an account is allowed to sit on zero inbounds that is now a
+	// state an operator PARKS one in, not a leftover.
+	//
+	// Without this the email reads as free, so creating a "new" client with it walks
+	// straight into AddClientStat's orphan branch: it finds the parked account's
+	// client_traffics row, sees nothing serving the email, and zeroes up/down/all_time
+	// along with the quota and expiry - then upsertAccountFromEntry adopts the parked
+	// account itself. The customer's history is gone and nothing reports it as more
+	// than an Info line. Reserving the email is the whole point of parking one.
+	//
+	// NOT filtered by ignoreInboundId: a parked account has no membership, so it can
+	// never be the row the caller is mid-write on. Best-effort in the same spirit as
+	// the rest of this check - a failure here must not turn an ordinary add into an
+	// opaque database error, so the scan above still stands on its own.
+	var parked []string
+	if err := db.Raw(`
+		SELECT COALESCE(accounts.email, '')
+		FROM accounts
+		WHERE NOT EXISTS (
+			SELECT 1 FROM account_inbounds WHERE account_inbounds.account_id = accounts.id
+		)
+		`).Scan(&parked).Error; err != nil {
+		logger.Warning("listing accounts on no inbound for the duplicate-email check: ", err)
+		return emails, nil
+	}
+	return append(emails, parked...), nil
+}
+
+// emailIsParked reports whether an email belongs to an account no inbound serves.
+// Used only to word the duplicate rejection, so a failure just drops the detail.
+func (s *InboundService) emailIsParked(email string) bool {
+	db := database.GetDB()
+	key := accountKey(email)
+	if db == nil || key == "" {
+		return false
+	}
+	var n int64
+	err := db.Model(&model.Account{}).
+		Where("LOWER(TRIM(email)) = ?", key).
+		Where("NOT EXISTS (SELECT 1 FROM account_inbounds WHERE account_inbounds.account_id = accounts.id)").
+		Count(&n).Error
+	return err == nil && n > 0
 }
 
 func (s *InboundService) getAllEmails() ([]string, error) {
@@ -2805,6 +2863,60 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	return needRestart, tx.Save(oldInbound).Error
 }
 
+// AdmitAccount reports whether one more account can be placed on an inbound.
+//
+// It is the two capacity guards AddInboundClient applies (see the block above the
+// "Secure client ID" loop there), lifted out so the membership path can run them
+// too. AccountService.ApplyMemberships is the membership writer and knows about
+// neither: nextFreeSlot hands out the next index whether or not the pool has an
+// address behind it, and nothing in the accounts layer has ever heard of an ikev2
+// auth mode. A membership added without this check therefore produces an account
+// that is listed on the inbound, reads as provisioned, and is silently unroutable
+// (no peer, no route), or a second PSK/EAP-TLS account the daemon cannot tell
+// apart from the first.
+//
+// nil when the account is ALREADY a member: it holds its slot already, so
+// re-applying a set that includes a full inbound must not be refused.
+func (s *InboundService) AdmitAccount(inboundId int, email string) error {
+	inbound, err := s.GetInbound(inboundId)
+	if err != nil {
+		return err
+	}
+	if inbound == nil {
+		return fmt.Errorf("inbound %d not found", inboundId)
+	}
+	existing, err := s.GetClients(inbound)
+	if err != nil {
+		return err
+	}
+	for i := range existing {
+		if sameEmail(existing[i].Email, email) {
+			return nil
+		}
+	}
+	// maxVpnAccounts counts the largest pool the inbound could ever expand to, so
+	// this never refuses an account the pool could actually hold. Slots can be
+	// sparse (a delete frees one without renumbering the rest), so the question is
+	// which slot this account would take, not how many accounts there are.
+	if maxAcc, ok := maxVpnAccounts(inbound); ok {
+		if slots := slotsForNewAccounts(existing, 1); len(slots) > 0 && slots[0] >= maxAcc {
+			return common.NewError(fmt.Sprintf(
+				"IP pool full for %q: this %s inbound can hold at most %d account(s) at the current User Limit (%d already present). Lower the User Limit, or add another inbound.",
+				inbound.Remark, inbound.Protocol, maxAcc, len(existing)))
+		}
+	}
+	// psk / eap-tls share one key or one client certificate across the inbound, so
+	// a second account there is a second name for the same credential.
+	switch ikev2AuthMode(inbound) {
+	case "psk", "eap-tls":
+		if len(existing) >= 1 {
+			return common.NewError(fmt.Sprintf(
+				"%q is a PSK or EAP-TLS IKEv2 inbound, which allows only one account", inbound.Remark))
+		}
+	}
+	return nil
+}
+
 // --- Bulk client operations ---------------------------------------------------
 
 // BulkClientTarget identifies one client (by email, unique within an inbound) that a
@@ -2818,13 +2930,21 @@ type BulkClientTarget struct {
 // many inbounds. Op is one of addDays/subDays/addTraffic/subTraffic/enable/disable.
 // Days is used by the day ops; AmountBytes by the traffic ops.
 type BulkClientUpdateRequest struct {
-	Op            string             `json:"op"`
-	Days          int64              `json:"days"`
-	AmountBytes   int64              `json:"amountBytes"`
-	SkipFirstUse  bool               `json:"skipFirstUse"`
-	SkipUnlimited bool               `json:"skipUnlimited"`
-	SkipDisabled  bool               `json:"skipDisabled"`
-	Targets       []BulkClientTarget `json:"targets"`
+	Op            string `json:"op"`
+	Days          int64  `json:"days"`
+	AmountBytes   int64  `json:"amountBytes"`
+	SkipFirstUse  bool   `json:"skipFirstUse"`
+	SkipUnlimited bool   `json:"skipUnlimited"`
+	SkipDisabled  bool   `json:"skipDisabled"`
+	// InboundIds is the membership operations' own argument: the inbounds the
+	// selected accounts are being added TO or removed FROM. Every other op names
+	// its targets and nothing else, and leaves this empty.
+	//
+	// It is deliberately NOT a second way to name targets. BulkUpdateClients does
+	// not read it at all; only the membership handler does, and that one applies
+	// its change through the accounts layer rather than through this applier.
+	InboundIds []int              `json:"inboundIds"`
+	Targets    []BulkClientTarget `json:"targets"`
 }
 
 // BulkClientUpdateResult reports how many targeted clients were changed vs skipped

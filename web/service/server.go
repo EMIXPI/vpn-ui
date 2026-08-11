@@ -56,6 +56,11 @@ type Status struct {
 	CpuCores    int       `json:"cpuCores"`
 	LogicalPro  int       `json:"logicalPro"`
 	CpuSpeedMhz float64   `json:"cpuSpeedMhz"`
+	// CpuSpeedCurMhz is the clock RIGHT NOW, averaged over the online cores, and
+	// moves on every poll. CpuSpeedMhz above is the rated speed and does not: the
+	// two are both wanted, by different readouts (the spec tile states what the
+	// chip is, the vitals row states what it is doing). 0 means unknown.
+	CpuSpeedCurMhz float64 `json:"cpuSpeedCurMhz"`
 	CpuModel    string    `json:"cpuModel"`
 	OsName      string    `json:"osName"`
 	OsVersion   string    `json:"osVersion"`
@@ -407,6 +412,9 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 		status.CpuSpeedMhz = s.cachedCpuSpeedMhz
 	}
 	status.CpuModel = s.cachedCpuModel
+	// Read fresh every poll, and deliberately NOT cached: the whole point of it is
+	// that it moves.
+	status.CpuSpeedCurMhz = liveCpuMhz()
 
 	// Uptime
 	// This process's own uptime, alongside the host's below.
@@ -1423,6 +1431,11 @@ func (s *ServerService) IsValidGeofileName(filename string) bool {
 // download itself lives in downloadGeofile (geofile.go), which EnsureGeofiles
 // also uses. That one must not restart Xray, since it runs from inside the
 // restart path.
+//
+// It still BLOCKS, so the HTTP contract is unchanged for API callers. What is new
+// is that it publishes its progress into geofileRun on the way through, which is
+// what lets the overview pick a transfer back up after the operator navigated
+// away and came back - the request is abandoned, the download is not.
 func (s *ServerService) UpdateGeofile(fileName string) error {
 	// Strict allowlist check to avoid writing uncontrolled files
 	if fileName != "" {
@@ -1431,19 +1444,31 @@ func (s *ServerService) UpdateGeofile(fileName string) error {
 		}
 	}
 
-	var errorMessages []string
-
+	// builtinGeofileOrder rather than ranging the map, so the names the overview is
+	// told to expect arrive in the order they will actually be fetched.
+	var queue []string
 	if fileName == "" {
-		// Download all geofiles
-		for _, entry := range builtinGeofiles {
-			if err := downloadGeofile(entry, geofileManualMaxTime); err != nil {
-				errorMessages = append(errorMessages, fmt.Sprintf("Error downloading Geofile '%s': %v", entry.FileName, err))
-			}
-		}
+		queue = append(queue, builtinGeofileOrder...)
 	} else {
-		if err := downloadGeofile(builtinGeofiles[fileName], geofileManualMaxTime); err != nil {
-			errorMessages = append(errorMessages, fmt.Sprintf("Error downloading Geofile '%s': %v", fileName, err))
+		queue = []string{fileName}
+	}
+	tracked := geofileRunBegin(queue)
+
+	var errorMessages []string
+	for _, name := range queue {
+		if tracked {
+			geofileRunCurrent(name)
 		}
+		if err := downloadGeofile(builtinGeofiles[name], geofileManualMaxTime); err != nil {
+			errorMessages = append(errorMessages, fmt.Sprintf("Error downloading Geofile '%s': %v", name, err))
+			continue
+		}
+		if tracked {
+			geofileRunFetched(name)
+		}
+	}
+	if tracked {
+		geofileRunCurrent("")
 	}
 
 	err := s.RestartXrayService()
@@ -1452,9 +1477,16 @@ func (s *ServerService) UpdateGeofile(fileName string) error {
 	}
 
 	if len(errorMessages) > 0 {
-		return common.NewErrorf("%s", strings.Join(errorMessages, "\r\n"))
+		joined := strings.Join(errorMessages, "\r\n")
+		if tracked {
+			geofileRunEnd(true, joined)
+		}
+		return common.NewErrorf("%s", joined)
 	}
 
+	if tracked {
+		geofileRunEnd(false, "")
+	}
 	return nil
 }
 

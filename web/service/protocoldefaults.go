@@ -79,7 +79,20 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("ipsecEnable", true),
 			// RandomUtil.randomSeq(16) in the constructor. fromJson() passes an absent
 			// psk straight through as undefined instead, so only a NEW inbound gets one.
-			gen("ipsecPsk", func() any { return random.Seq(16) }),
+			//
+			// INHERITED, not minted, when an enabled l2tp inbound already has a key. A
+			// fresh random key for a second inbound is not a risk of being rejected, it
+			// is a certainty: CheckSharedDaemonConflicts refuses two different keys on
+			// one IKE listen address, and a new inbound listens on all of them. The
+			// operator was left hand-copying the first inbound's key out of the other
+			// form. Minting only happens for the first l2tp inbound, or when the
+			// existing ones have IPsec off. See sharedL2tpIpsecPsk.
+			gen("ipsecPsk", func() any {
+				if psk := sharedL2tpIpsecPsk(); psk != "" {
+					return psk
+				}
+				return random.Seq(16)
+			}),
 			def("allowRaw", false),
 			def("clientToClient", false),
 			def("crossInbound", false),
@@ -187,13 +200,22 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 		}
 
 	case model.SSTP:
-		// Inbound.SstpSettings. Field for field identical to OcservSettings; kept
-		// spelled out rather than shared so a future divergence in either one cannot
-		// silently rewrite the other's stored JSON.
+		// Inbound.SstpSettings. Field for field identical to OcservSettings apart from the
+		// MTU below; kept spelled out rather than shared so a future divergence in either
+		// one cannot silently rewrite the other's stored JSON.
 		return []settingDefault{
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
-			def("mtu", 1420),
+			// 1400, and NOT OpenConnect's 1420. SSTP is PPP inside a 4-byte SSTP header
+			// inside TLS inside TCP, so a 1500 byte path pays 20 (IP) + 20 (TCP) + 5 (TLS
+			// record) + 16 (IV) + 32 (MAC) + 4 (SSTP) + 4 (PPP) and lands just under 1400.
+			// OpenConnect's 1420 is a DTLS/UDP number and does not transfer.
+			//
+			// This also un-deadens two pieces of the codebase that already assumed 1400:
+			// sstp.go's own writer falls back to 1400 when no MTU is set, and
+			// vpnout_sstp.go picks 1400 with the comment "the value the panel's own SSTP
+			// server uses" -- which was false while the form posted 1420 on every save.
+			def("mtu", 1400),
 			def("tlsUseFile", false),
 			def("certificateFile", ""),
 			def("keyFile", ""),
@@ -214,7 +236,12 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 		return []settingDefault{
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
-			def("mtu", 1420),
+			// ikev2DefaultMtu. 1400 because a real-world IKEv2 client is behind a NAT and
+			// therefore carrying ESP inside UDP, which costs 73-100 bytes on a 1500 byte
+			// path; the 1420 this used to say is the WireGuard figure and does not
+			// transfer. The value is enforced as a TCP MSS clamp, not written into a
+			// daemon config -- see ikev2Settings.Mtu for why that is the only option.
+			def("mtu", ikev2DefaultMtu),
 			def("authMode", "eap-mschapv2"),
 			def("psk", ""),
 			// Empty means "use the panel-access host / detected server IP", which is

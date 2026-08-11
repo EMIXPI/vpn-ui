@@ -151,6 +151,17 @@ func (d *l2tpOutDriver) parse(cfg VpnOutboundConfig) (*l2tpOutSettings, error) {
 	return s, nil
 }
 
+// ServerHost names the LNS, so this tunnel can be carried inside another. One address
+// covers both halves of the protocol: the L2TP UDP and, when IPsec is on, the IKE and
+// ESP that wrap it all go to the same peer.
+func (d *l2tpOutDriver) ServerHost(cfg VpnOutboundConfig) (string, error) {
+	s, err := d.parse(cfg)
+	if err != nil {
+		return "", err
+	}
+	return s.Server, nil
+}
+
 // Validate refuses a tunnel that cannot possibly come up, while the modal is still open.
 func (d *l2tpOutDriver) Validate(cfg VpnOutboundConfig) error {
 	s, err := d.parse(cfg)
@@ -391,7 +402,9 @@ func l2tpOutLinkName(name string) string { return "l2tp-out-" + name }
 
 // l2tpOutConnName is this tunnel's connection name in the SHARED charon. The prefix
 // keeps it clear of the server side's namespaces: ikev2.go removes conf.d/ikev2-*.conf
-// wholesale on every regenerate, l2tp.go owns exactly l2tp.conf and gre.go owns gre-*.
+// wholesale on every regenerate, l2tp.go owns l2tp.conf AND l2tp-*.conf (one per inbound
+// when each has its own listen address) and gre.go owns gre-*. "vpnout-l2tp-" is outside
+// all of those globs, which is the point of it.
 func l2tpOutConnName(name string) string { return "vpnout-l2tp-" + name }
 
 func l2tpOutConnFile(name string) string {

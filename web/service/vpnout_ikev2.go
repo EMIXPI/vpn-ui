@@ -156,6 +156,20 @@ func (d *ikev2OutDriver) parse(cfg VpnOutboundConfig) (*ikev2OutSettings, error)
 	return s, nil
 }
 
+// ServerHost names the IKEv2 gateway, so this tunnel can be carried inside another.
+//
+// This is the driver the destination selector was chosen for. charon's kernel ESP has
+// no mark knob in this build, so there is nothing to ask the daemon for and no way to
+// tag its packets; steering by the address the SA is negotiated with is the only thing
+// that reaches proto 50 at all.
+func (d *ikev2OutDriver) ServerHost(cfg VpnOutboundConfig) (string, error) {
+	s, err := d.parse(cfg)
+	if err != nil {
+		return "", err
+	}
+	return s.Server, nil
+}
+
 // Validate refuses a config that cannot authenticate, before anything is brought up.
 func (d *ikev2OutDriver) Validate(cfg VpnOutboundConfig) error {
 	s, err := d.parse(cfg)

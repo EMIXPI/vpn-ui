@@ -42,19 +42,33 @@
 
   // Every bulk operation the modal can offer, in the order it lists them.
   const BULK_OPS = ['addDays', 'subDays', 'addTraffic', 'subTraffic',
-    'enable', 'disable', 'freeze', 'unfreeze', 'delete'];
+    'enable', 'disable', 'freeze', 'unfreeze', 'addInbounds', 'removeInbounds', 'delete'];
 
-  // Two of them are withheld from a reseller. subDays is refused outright by the
+  // The two that change WHICH INBOUNDS serve an account rather than what the
+  // account is allowed. They do not go through the bulk client applier at all:
+  // see runBulkMembership.
+  const BULK_MEMBERSHIP_OPS = ['addInbounds', 'removeInbounds'];
+
+  // Four of them are withheld from a reseller. subDays is refused outright by the
   // server for a reseller, so offering it only buys them a failed run. addDays is
   // dropped when their profile derives an account's duration from its traffic
   // (daysPerGb): the day count is recomputed from the GB on the next edit, so a
-  // manual change there looks applied and then quietly is not.
-  // Presentation only, as always: the server re-checks both.
+  // manual change there looks applied and then quietly is not. The two membership
+  // ops are an admin's call: a reseller's grant says which inbounds they may sell
+  // FROM, not that they may move a customer between them, and the server refuses
+  // them the same way.
+  // Presentation only, as always: the server re-checks all four.
   function isBulkOpAllowed(op) {
     if (op === 'subDays' && RESELLER.isReseller) return false;
     if (op === 'addDays' && (Number(RESELLER.daysPerGb) || 0) > 0) return false;
+    if (BULK_MEMBERSHIP_OPS.includes(op) && RESELLER.isReseller) return false;
     return true;
   }
+
+  // The three protocols whose accounts cannot be told apart across two inbounds of
+  // the same kind, mirrored from ValidateMembershipSet (web/service/account.go).
+  // Presentation only: the server refuses the set per account regardless.
+  const BULK_AMBIGUOUS_PROTOCOLS = ['l2tp', 'pptp', 'ikev2'];
 
   // The first option that survives the filter, so the select never opens pointing
   // at an operation it does not render. An a-select bound to a value with no
@@ -84,6 +98,11 @@
           skipFirstUse: false,
           skipUnlimited: false,
           skipDisabled: false,
+          // The inbounds the two membership ops add to / remove from. Declared
+          // here rather than added when the op is picked: Vue 2 walks this object
+          // once, so a key bolted on later is bound to nothing and the checkbox
+          // group would tick boxes that never re-render.
+          inboundIds: [],
           progress: { running: false, done: 0, total: 0, applied: 0, skipped: 0, etaText: '' },
         },
       };
@@ -142,6 +161,11 @@
       openBulkOps() {
         if (!this.selectedCount()) { this.$message.warning('{{ i18n "pages.inbounds.exportNoneSelected" }}'); return; }
         this.bulkOps.progress = { running: false, done: 0, total: 0, applied: 0, skipped: 0, etaText: '' };
+        // The inbound picks do NOT survive the modal closing: they name a
+        // destination for one specific batch, and re-opening on a different
+        // selection with the last run's inbounds still ticked is how an operator
+        // re-homes the wrong customers.
+        this.bulkOps.inboundIds = [];
         // A previous run may have left a selection that is no longer offered, and
         // the value survives the modal closing. Snap it back to a rendered option.
         if (!isBulkOpAllowed(this.bulkOps.op)) this.bulkOps.op = DEFAULT_BULK_OP;
@@ -151,6 +175,43 @@
       bulkOpAllowed(op) { return isBulkOpAllowed(op); },
       bulkIsTrafficOp() { return ['addTraffic', 'subTraffic'].includes(this.bulkOps.op); },
       bulkIsNumericOp() { return ['addDays', 'subDays', 'addTraffic', 'subTraffic'].includes(this.bulkOps.op); },
+      // --- the inbound checklist the two membership ops render ------------
+      bulkIsMembershipOp() { return BULK_MEMBERSHIP_OPS.includes(this.bulkOps.op); },
+      // The page's own inbound picker list (GET /panel/api/clients/assignable),
+      // already loaded and already filtered to what this caller may assign. The
+      // guard is for the Inbounds page, which mixes this in and does not hold one:
+      // it never opens the modal, so the list is simply empty there.
+      bulkAssignable() { return this.assignable || []; },
+      bulkAllInboundsChecked() {
+        const all = this.bulkAssignable();
+        return all.length > 0 && this.bulkOps.inboundIds.length === all.length;
+      },
+      bulkSomeInboundsChecked() {
+        const n = this.bulkOps.inboundIds.length;
+        return n > 0 && n < this.bulkAssignable().length;
+      },
+      bulkToggleAllInbounds(e) {
+        this.bulkOps.inboundIds = e.target.checked
+          ? this.bulkAssignable().map(i => i.inboundId) : [];
+      },
+      // Two inbounds of the same ambiguous protocol in ONE batch, which the server
+      // refuses for every account it would apply to. Said here so the whole run is
+      // not spent discovering it one account at a time.
+      //
+      // It cannot see the other half of the rule: an account ALREADY on an l2tp
+      // inbound being added to a second one clashes too, and only the server knows
+      // each account's current set. Those come back as skips with a reason.
+      bulkProtocolClash() {
+        if (this.bulkOps.op !== 'addInbounds') return false;
+        const seen = {};
+        for (const id of this.bulkOps.inboundIds) {
+          const ib = this.bulkAssignable().find(x => x.inboundId === id);
+          if (!ib || !BULK_AMBIGUOUS_PROTOCOLS.includes(ib.protocol)) continue;
+          if (seen[ib.protocol]) return true;
+          seen[ib.protocol] = true;
+        }
+        return false;
+      },
       bulkProgressPercent() {
         const p = this.bulkOps.progress;
         return p.total > 0 ? Math.floor((p.done / p.total) * 100) : 0;
@@ -215,6 +276,9 @@
         // (its accounts go with it, no per-client filtering), a selected ACCOUNT is
         // removed on its own. Separate flow from the in-place client update ops.
         if (b.op === 'delete') return this.runBulkDelete();
+        // Membership is not a client field, so it does not go through the client
+        // applier: it is written through the accounts layer, on its own route.
+        if (this.bulkIsMembershipOp()) return this.runBulkMembership();
         let targets = this.resolveSelectedTargets();
         if (!targets.length) return;
         const amount = Math.max(0, Number(b.amount) || 0);
@@ -267,6 +331,71 @@
         if (ok) {
           b.visible = false;
           this.$message.success('{{ i18n "pages.inbounds.bulkDone" }} {{ i18n "pages.inbounds.bulkAffected" }}: ' + b.progress.applied + ' {{ i18n "pages.inbounds.bulkSkipped" }}: ' + b.progress.skipped);
+          this.clearSelection();
+          await this.getDBInbounds();
+        }
+      },
+      // Add the selected accounts to, or remove them from, the ticked inbounds.
+      //
+      // Batched by ACCOUNT rather than by target, which is the one thing this
+      // cannot borrow from runBulkOps. A target is an (inbound, email) pair and an
+      // account contributes one per membership it already has, so a fixed slice of
+      // twenty TARGETS can cut one account's pairs across two requests. The server
+      // reduces each request to the accounts it names, so the same account in two
+      // requests is the operation applied twice: harmless for the add (the second
+      // is a no-op skip) and a lie in the counters for both. Grouping first also
+      // makes the progress bar count customers, which is what the operator picked.
+      async runBulkMembership() {
+        const b = this.bulkOps;
+        const inboundIds = (b.inboundIds || []).slice();
+        if (!inboundIds.length) {
+          this.$message.warning('{{ i18n "pages.inbounds.bulkMembershipNoInbound" }}');
+          return;
+        }
+        if (this.bulkProtocolClash()) {
+          this.$message.error('{{ i18n "pages.inbounds.membershipSameProtocol" }}');
+          return;
+        }
+        const groups = {};
+        this.resolveSelectedTargets().forEach(t => {
+          const key = accountKeyOf(t.email);
+          if (!key) return;
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(t);
+        });
+        const accounts = Object.values(groups);
+        if (!accounts.length) return;
+
+        b.confirmLoading = true;
+        b.progress = { running: true, done: 0, total: accounts.length, applied: 0, skipped: 0, etaText: '' };
+        const start = Date.now();
+        const BATCH = 20;
+        const reasons = [];
+        let ok = true;
+        for (let i = 0; i < accounts.length; i += BATCH) {
+          const group = accounts.slice(i, i + BATCH);
+          const targets = [].concat.apply([], group);
+          const msg = await HttpUtil.post('/panel/api/inbounds/bulkMembership',
+            { data: JSON.stringify({ op: b.op, inboundIds, targets }) });
+          if (!msg.success) { ok = false; break; }
+          const r = msg.obj || {};
+          b.progress.applied += (r.applied || 0);
+          b.progress.skipped += (r.skipped || 0);
+          b.progress.done += group.length;
+          (r.reasons || []).forEach(x => { if (!reasons.includes(x)) reasons.push(x); });
+          this.bulkTickEta(start);
+        }
+        b.progress.running = false;
+        b.confirmLoading = false;
+        if (ok) {
+          b.visible = false;
+          this.$message.success('{{ i18n "pages.inbounds.bulkDone" }} {{ i18n "pages.inbounds.bulkAffected" }}: ' + b.progress.applied + ' {{ i18n "pages.inbounds.bulkSkipped" }}: ' + b.progress.skipped);
+          // A skip here is a refusal with a cause, not a filtered-out row, so the
+          // causes are shown rather than left as a number. Capped and held longer
+          // than a success toast, because they are the part worth reading.
+          if (reasons.length) {
+            this.$message.warning(reasons.slice(0, 4).join(' · '), 10);
+          }
           this.clearSelection();
           await this.getDBInbounds();
         }

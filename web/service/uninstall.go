@@ -178,13 +178,15 @@ func Uninstall(opts UninstallOptions) *UninstallReport {
 		//    than unrecorded, and a stray fwmark rule pointing at a flushed table
 		//    100 blackholes traffic on a decommissioned host. Revisit only once one
 		//    shared ensureVpnPolicyRoute() helper owns the add (see ownIpRule).
+		//
+		//    Removal now goes through that shared helper. The old loop here shelled
+		//    out to `ip rule del fwmark 1 lookup 100` at most ten times, which was
+		//    wrong twice over: it left every rule past the tenth behind on a host
+		//    that had accumulated hundreds, and an `ip rule del` template treats the
+		//    selectors it does not mention as wildcards, so it could take an
+		//    operator's `from <addr> fwmark 1 lookup 100` with it.
+		collapseVpnPolicyRules(true)
 		if commandExists("ip") {
-			// There may be more than one identical rule; delete until none remain.
-			for i := 0; i < 10; i++ {
-				if err := exec.Command("ip", "rule", "del", "fwmark", "1", "lookup", "100").Run(); err != nil {
-					break
-				}
-			}
 			_ = exec.Command("ip", "route", "flush", "table", "100").Run()
 		}
 		// rp_filter IS recorded, so it can be handed back. ensureVpnHostNetworking

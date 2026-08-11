@@ -17,6 +17,12 @@ import (
 // deliberate: those paths already carry the reseller pricing, the ownership
 // assertions over every id, the same-protocol refusal and the projection, and a
 // second write path would be a second place for all of that to drift out of step.
+//
+// The one account state those routes cannot express - an account NO inbound serves,
+// which has no settings blob to be spliced into and no protocol to be addressed by -
+// has two routes of its own, saveAccount and delAccount. They live on the same
+// /panel/api/inbounds group and behind the same permission bits for exactly the
+// reason above: the guards belong together, not on either side of a page boundary.
 type ClientsController struct {
 	BaseController
 }

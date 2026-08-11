@@ -143,9 +143,9 @@ const (
 	// the fetch request itself: nothing further happens until they answer.
 	updatePhaseStaged     = "staged"
 	updatePhaseInstalling = "installing"
-	updatePhaseRestarting  = "restarting"
-	updatePhaseCancelled   = "cancelled"
-	updatePhaseError       = "error"
+	updatePhaseRestarting = "restarting"
+	updatePhaseCancelled  = "cancelled"
+	updatePhaseError      = "error"
 )
 
 // Self-update progress, polled by the overview to render a % bar and a speed
@@ -180,6 +180,15 @@ type PanelUpdateProgressInfo struct {
 	Bytes   int64  `json:"bytes"`
 	Total   int64  `json:"total"`
 	Speed   int64  `json:"speed"` // bytes/sec
+	// Running distinguishes "a download is happening right now" from "phase still
+	// holds whatever the last attempt left behind". The phase alone cannot answer
+	// that: error and cancelled are written once by the deferred block in
+	// UpdatePanel and then never cleared for the life of the process, so an
+	// overview that reopened hours later would read a stale terminal phase as live
+	// work. This is what lets the page re-attach to an update it did not start -
+	// the download outlives the request that began it, because its context is
+	// context.Background() and Gin does not kill a handler when the browser leaves.
+	Running bool `json:"running"`
 }
 
 // PanelUpdateProgress returns the current self-update phase and download counters.
@@ -191,6 +200,7 @@ func (s *ServerService) PanelUpdateProgress() PanelUpdateProgressInfo {
 		Bytes:   panelUpdateBytes.Load(),
 		Total:   panelUpdateTotal.Load(),
 		Speed:   panelUpdateSpeed.Load(),
+		Running: panelUpdateInFlight.Load(),
 	}
 }
 

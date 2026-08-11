@@ -123,7 +123,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
 	model.SSTP: `{
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
-  "mtu": 1420,
+  "mtu": 1400,
   "tlsUseFile": false,
   "certificateFile": "",
   "keyFile": "",
@@ -142,7 +142,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
 	model.IKEV2: `{
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
-  "mtu": 1420,
+  "mtu": 1400,
   "authMode": "eap-mschapv2",
   "psk": "",
   "serverAddr": "",
@@ -290,6 +290,10 @@ var vpnDefaultProtocols = []model.Protocol{
 }
 
 func TestDefaultSettingsForMatchesTheBrowserModel(t *testing.T) {
+	// An empty database, because l2tp's ipsecPsk default is inherited from an existing
+	// enabled l2tp inbound when there is one (see sharedL2tpIpsecPsk) and the length
+	// check below is only meaningful for a MINTED key.
+	newInboundDB(t)
 	if len(uiSettingsBlobs) != len(vpnDefaultProtocols) {
 		t.Fatalf("fixture covers %d protocols, expected %d", len(uiSettingsBlobs), len(vpnDefaultProtocols))
 	}
@@ -326,7 +330,15 @@ func TestDefaultSettingsForMatchesTheBrowserModel(t *testing.T) {
 // The minted secrets must differ per inbound. A package-level constant would satisfy
 // every other test in this file and hand the same IPsec PSK to every L2TP inbound the
 // panel ever creates.
+//
+// L2TP is only tested here for the FIRST inbound. This test used to assert that two L2TP
+// inbounds always get different keys, which read as a safety property but was really the
+// bug written down: the save-time check refuses two different keys on one IKE listen
+// address, and a new inbound listens on all of them, so "always different" meant "the
+// second inbound can never be saved without hand-copying the first one's key out of the
+// other form". Inheritance is asserted below instead.
 func TestDefaultSettingsForMintsAFreshSecretPerCall(t *testing.T) {
+	newInboundDB(t) // no l2tp inbound to inherit from, so l2tp mints like gre does
 	for _, protocol := range []model.Protocol{model.L2TP, model.GRE} {
 		first := decodeSettingsMap(t, mustDefaultSettings(t, protocol))
 		second := decodeSettingsMap(t, mustDefaultSettings(t, protocol))
@@ -336,11 +348,58 @@ func TestDefaultSettingsForMintsAFreshSecretPerCall(t *testing.T) {
 	}
 }
 
+// The second L2TP inbound inherits the first one's IPsec key, because on one listen
+// address that is the only key it could ever have used. GRE keeps minting: its
+// connections are per-inbound identities on the shared charon, so nothing is shared.
+func TestDefaultSettingsForInheritsTheL2tpIpsecPsk(t *testing.T) {
+	s := newInboundDB(t)
+
+	if _, _, err := s.AddInbound(&model.Inbound{
+		UserId: 1, Tag: "inbound-11301", Port: 11301, Protocol: model.L2TP, Enable: true,
+		Settings: `{"ipsecEnable":true,"ipsecPsk":"the-first-key","clients":[]}`,
+	}); err != nil {
+		t.Fatalf("AddInbound: %v", err)
+	}
+
+	got := decodeSettingsMap(t, mustDefaultSettings(t, model.L2TP))
+	if got["ipsecPsk"] != "the-first-key" {
+		t.Errorf("a new l2tp inbound got ipsecPsk %q, want the existing inbound's %q",
+			got["ipsecPsk"], "the-first-key")
+	}
+
+	// And the same through the fill path, which is what the API actually calls.
+	filled, err := FillSettingsDefaults(model.L2TP, `{"dns1":"9.9.9.9"}`)
+	if err != nil {
+		t.Fatalf("FillSettingsDefaults: %v", err)
+	}
+	if psk := decodeSettingsMap(t, filled)["ipsecPsk"]; psk != "the-first-key" {
+		t.Errorf("filled ipsecPsk is %q, want %q", psk, "the-first-key")
+	}
+
+	// A key the caller sent is still theirs; the default only fills an absent one.
+	filled, err = FillSettingsDefaults(model.L2TP, `{"ipsecPsk":"mine","listen":"ignored"}`)
+	if err != nil {
+		t.Fatalf("FillSettingsDefaults: %v", err)
+	}
+	if psk := decodeSettingsMap(t, filled)["ipsecPsk"]; psk != "mine" {
+		t.Errorf("filled ipsecPsk is %q, want the posted %q", psk, "mine")
+	}
+
+	gre := decodeSettingsMap(t, mustDefaultSettings(t, model.GRE))
+	greAgain := decodeSettingsMap(t, mustDefaultSettings(t, model.GRE))
+	if gre["ipsecPsk"] == greAgain["ipsecPsk"] {
+		t.Errorf("gre stopped minting a fresh key: %q twice", gre["ipsecPsk"])
+	}
+}
+
 // The defaults have to unmarshal into the struct the protocol's own service parses the
 // same blob with, carrying the values through. This is the check that catches a key
 // name that is plausible but wrong: json.Unmarshal ignores what it does not recognise,
 // so a misspelled key leaves the field on its zero value and nothing complains.
 func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
+	// Same reason as TestDefaultSettingsForMatchesTheBrowserModel: only a minted l2tp
+	// key is 16 chars, an inherited one is whatever the other inbound holds.
+	newInboundDB(t)
 	t.Run("l2tp", func(t *testing.T) {
 		var s l2tpSettings
 		unmarshalDefaults(t, model.L2TP, &s)
@@ -403,7 +462,11 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 	t.Run("sstp", func(t *testing.T) {
 		var s sstpSettings
 		unmarshalDefaults(t, model.SSTP, &s)
-		if s.Dns1 != "8.8.8.8" || s.Mtu != 1420 || s.TlsUseFile {
+		// 1400 and NOT OpenConnect's 1420, which is the value this shape was copied from:
+		// SSTP's PPP-in-SSTP-in-TLS-in-TCP stack costs ~101 bytes on a 1500 byte path.
+		// sstpSettings' own writer falls back to 1400 when nothing is set, and the form
+		// posting 1420 on every save is what made that fallback dead code.
+		if s.Dns1 != "8.8.8.8" || s.Mtu != 1400 || s.TlsUseFile {
 			t.Errorf("dns/mtu/tls: %q %d %v", s.Dns1, s.Mtu, s.TlsUseFile)
 		}
 	})
@@ -416,6 +479,12 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		}
 		if s.Dns1 != "8.8.8.8" || s.Dns2 != "8.8.4.4" {
 			t.Errorf("dns: %q %q", s.Dns1, s.Dns2)
+		}
+		// The mtu key has to reach the STRUCT, not just the stored JSON. It used to be
+		// defaulted, range-checked and saved while ikev2Settings had no Mtu field at all,
+		// so the form's control did nothing whatsoever.
+		if s.Mtu != 1400 || s.effectiveMtu() != 1400 || s.clampMss() != 1360 {
+			t.Errorf("mtu: stored=%d effective=%d mss=%d", s.Mtu, s.effectiveMtu(), s.clampMss())
 		}
 	})
 

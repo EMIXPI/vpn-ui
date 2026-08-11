@@ -83,6 +83,9 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.GET("/getNewVlessEnc", a.getNewVlessEnc)
 	g.GET("/distroStatus", a.distroStatus)
 	g.GET("/geofileStatus", a.geofileStatus)
+	// The in-flight geofile download, so an overview that was reopened mid-transfer
+	// can re-attach instead of looking idle. Read-only, like geofileStatus beside it.
+	g.GET("/geofileProgress", a.geofileProgress)
 	g.GET("/checkUpdate", a.checkUpdate)
 	g.GET("/updateProgress", a.updateProgress)
 	// Reports (once) that the panel came back from a self-update. Gated to match
@@ -122,6 +125,8 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	// consulted, and where the Xray permission is the right question.
 	g.POST("/updateGeofile", requireOverviewManage(), a.updateGeofile)
 	g.POST("/updateGeofile/:fileName", requireOverviewManage(), a.updateGeofile)
+	// Whether the panel refreshes the geo data on its own. Same dialog, same bit.
+	g.POST("/geofileAutoUpdate", requireOverviewManage(), a.setGeofileAutoUpdate)
 	// Panel and Xray logs name other admins' inbounds, clients and IPs.
 	g.POST("/logs/:count", requireOverviewManage(), a.getLogs)
 	g.POST("/xraylogs/:count", requireOverviewManage(), a.getXrayLogs)
@@ -514,6 +519,22 @@ func (a *ServerController) updateGeofile(c *gin.Context) {
 
 	err := a.serverService.UpdateGeofile(fileName)
 	jsonMsg(c, I18nWeb(c, "pages.index.geofileUpdatePopover"), err)
+}
+
+// geofileProgress reports the in-flight (or last finished) geofile update.
+//
+// updateGeofile blocks, but Gin does not kill a handler when the browser leaves,
+// so navigating away abandons the response while the transfer carries on. This is
+// how the overview finds that transfer again when it comes back.
+func (a *ServerController) geofileProgress(c *gin.Context) {
+	jsonObj(c, a.serverService.GeofileRunState(), nil)
+}
+
+// setGeofileAutoUpdate turns the periodic geo data refresh on or off.
+func (a *ServerController) setGeofileAutoUpdate(c *gin.Context) {
+	enabled := c.PostForm("enabled") == "true"
+	err := a.settingService.SetGeofileAutoUpdate(enabled)
+	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
 }
 
 // stopXrayService stops the Xray service.
