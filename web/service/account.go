@@ -221,6 +221,42 @@ func ValidateShadowsocksKeys(inbound *model.Inbound, clients []model.Client, sto
 	return nil
 }
 
+// validateClientLimits refuses a per-client limit override that no reader can act on.
+//
+// The read paths already absorb a negative: kbpsToBps reads one as unlimited,
+// resolveIPLimit reads one as absent, resolveUserLimitOverride reads one as "inherit".
+// That is the right last line of defence for a hand-edited or imported DB, but as the
+// ONLY defence it is silent in the worst way: an operator posting -1 gets a 200 and an
+// account with no limit at all, and nothing anywhere says why. This is the same
+// reasoning, and the same pairing of a loud validator with a quiet resolver, that the
+// inbound-level rates and IP cap already have in validateInboundConfig.
+//
+// A value ABOVE the inbound's User Limit is deliberately not an error: the override is
+// defined as a clamp, so the honest reading of "more than the ceiling" is the ceiling,
+// and refusing it would make an inbound whose K was later LOWERED unsaveable until every
+// account that had asked for more was edited by hand.
+//
+// Called from all four write paths beside validateClientIdentities, for the reason stated
+// there: each is separately reachable from the HTTP API, and one left out is a hole.
+func validateClientLimits(clients []model.Client) error {
+	for i := range clients {
+		c := &clients[i]
+		if c.SpeedLimitDown != nil && *c.SpeedLimitDown < 0 {
+			return common.NewErrorf("the download speed limit for %q cannot be negative.", c.Email)
+		}
+		if c.SpeedLimitUp != nil && *c.SpeedLimitUp < 0 {
+			return common.NewErrorf("the upload speed limit for %q cannot be negative.", c.Email)
+		}
+		if c.LimitIP < 0 {
+			return common.NewErrorf("the IP limit for %q cannot be negative.", c.Email)
+		}
+		if c.UserLimitOverride != nil && *c.UserLimitOverride < 0 {
+			return common.NewErrorf("the device limit for %q cannot be negative.", c.Email)
+		}
+	}
+	return nil
+}
+
 // clientIdentityTuple is the exact triple these rules judge. Two clients with the
 // same tuple are indistinguishable to every check below.
 // The carried VPN login name is part of it: without that, editing ONLY that field

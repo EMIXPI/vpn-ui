@@ -619,6 +619,9 @@ type AwgClientConfig struct {
 	Remark      string `json:"remark"`
 	PublicKey   string `json:"publicKey"`
 	Config      string `json:"config"`
+	// PreSharedKey is this device's own preshared key, empty when PSK is off. See
+	// WgcClientConfig, same field for the same reason.
+	PreSharedKey string `json:"psk"`
 	// Host/Port mirror this config's own Endpoint= — see WgcClientConfig, same reason.
 	Host string `json:"host"`
 	Port int    `json:"port"`
@@ -692,6 +695,11 @@ func (s *AwgService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 				continue
 			}
 			cidr := ips[d] + "/32"
+			// Per device, not per endpoint: see WgcService.RenderClientConfigs.
+			psk := ""
+			if settings.PskEnable && strings.TrimSpace(dev.Psk) != "" {
+				psk = dev.Psk
+			}
 			for ti, t := range targets {
 				var b strings.Builder
 				b.WriteString("[Interface]\n")
@@ -711,8 +719,8 @@ func (s *AwgService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 				b.WriteString("H4 = " + obfs.H4 + "\n")
 				b.WriteString("\n[Peer]\n")
 				b.WriteString("PublicKey = " + settings.ServerPubKey + "\n")
-				if settings.PskEnable && strings.TrimSpace(dev.Psk) != "" {
-					b.WriteString("PresharedKey = " + dev.Psk + "\n")
+				if psk != "" {
+					b.WriteString("PresharedKey = " + psk + "\n")
 				}
 				b.WriteString(fmt.Sprintf("Endpoint = %s:%d\n", t.host, t.port))
 				b.WriteString("AllowedIPs = 0.0.0.0/0\n")
@@ -730,13 +738,14 @@ func (s *AwgService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 					remark += t.remark
 				}
 				out = append(out, AwgClientConfig{
-					DeviceIndex: d*len(targets) + ti,
-					IP:          cidr,
-					Remark:      remark,
-					PublicKey:   dev.PubKey,
-					Config:      b.String(),
-					Host:        t.host,
-					Port:        t.port,
+					DeviceIndex:  d*len(targets) + ti,
+					IP:           cidr,
+					Remark:       remark,
+					PublicKey:    dev.PubKey,
+					Config:       b.String(),
+					PreSharedKey: psk,
+					Host:         t.host,
+					Port:         t.port,
 				})
 			}
 		}

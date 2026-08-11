@@ -416,6 +416,27 @@ type Client struct {
 	Comment    string `json:"comment" form:"comment"`       // Client comment
 	Reset      int    `json:"reset" form:"reset"`           // Reset period in days
 
+	// Per-client OVERRIDES of the inbound's speed limit and User Limit. nil means
+	// "inherit the inbound", which is what every client written before these existed
+	// reads back as; see the matching block on Account, which is where they live.
+	//
+	// Modelled here for the reason the five blocks below state, and it is not
+	// optional: AddInbound re-marshals every posted client through THIS struct, so a
+	// field it does not know is silently dropped on the whole-inbound-create path.
+	// An operator creating an inbound through the API with a throttled account would
+	// get the account, listed and working, at the inbound's rate instead of its own.
+	//
+	// The IP-limit override needs nothing here: LimitIP above is that field and
+	// predates all of this.
+	//
+	// omitempty so no client that carries no override grows a byte, and so the
+	// projection's delete-when-nil (renderClientEntry) round-trips: an absent key and
+	// a nil pointer have to render identically or every existing entry would gain
+	// three nulls on its next projection.
+	SpeedLimitDown    *int `json:"speedLimitDown,omitempty"`
+	SpeedLimitUp      *int `json:"speedLimitUp,omitempty"`
+	UserLimitOverride *int `json:"userLimitOverride,omitempty"`
+
 	// VpnUsername is the account's VPN login name CARRIED on an entry addressed to
 	// some other protocol. It is not what any inbound authenticates on: the login
 	// name lives in "id" on the seven protocols that use one, and this key exists so
@@ -641,6 +662,46 @@ type Account struct {
 	LimitIP int    `json:"limitIp" gorm:"column:limit_ip"`
 	TgID    int64  `json:"tgId" gorm:"column:tg_id"`
 	Comment string `json:"comment"`
+
+	// Per-account OVERRIDES of the three limits an inbound sets for everyone on it.
+	// nil means "inherit whatever the inbound says", which is what every row written
+	// before these columns existed reads back as, and what clearing the box in the
+	// client form writes.
+	//
+	// Pointers rather than ints, and the distinction is the whole feature. LimitIP
+	// above is a plain int and so cannot tell "never set" from "explicitly 0", which
+	// is why resolveIPLimit has to read a client-level 0 as "inherit" and can never
+	// offer a per-account "force unlimited". These three are not stuck with that: 0
+	// is a real value here (unlimited for the rates), and absent is a different one.
+	//
+	// NO gorm default on any of them, deliberately, for the same reason Enable above
+	// carries none: GORM treats Go's zero value as "unset" and writes the default
+	// over it, so `default:0` on a nullable column would turn an explicit "unlimited"
+	// back into "inherit" on every save. A nullable column needs no default anyway -
+	// AutoMigrate adds it and every pre-existing row reads NULL, which is exactly the
+	// value that means inherit.
+	//
+	// The rates are KB/s, the same unit the inbound columns and the UI use;
+	// speedlimit.go converts once (kbpsToBps). 0 in a direction is unlimited THERE,
+	// which for an account on an otherwise limited inbound is a genuine per-account
+	// exemption and not a way of saying "inherit".
+	SpeedLimitDown *int `json:"speedLimitDown" gorm:"column:speed_limit_down"`
+	SpeedLimitUp   *int `json:"speedLimitUp" gorm:"column:speed_limit_up"`
+
+	// UserLimitOverride is the account's own device cap, and it may only LOWER the
+	// inbound's User Limit K. Never raise it: an account's tunnel addresses are laid
+	// out on a UNIFORM STRIDE of K (vpnAccountBlock), so a bigger block for one
+	// account runs straight into the next account's addresses and two customers
+	// silently share a tunnel IP, with no error anywhere. resolveUserLimitOverride
+	// enforces the clamp on READ, so a value that arrives by API cannot raise it
+	// either.
+	//
+	// Named apart from the "userLimit" the client JSON already carries: that key is
+	// MTProto's downgrade mirror of the INBOUND's cap, rewritten by
+	// MirrorInboundSettingsToClients on every sweep and read back as the inbound's
+	// own policy, so reusing it would both be reverted within seconds and corrupt
+	// the inbound's cap on the way.
+	UserLimitOverride *int `json:"userLimitOverride" gorm:"column:user_limit_override"`
 
 	CreatedAt int64 `json:"createdAt" gorm:"autoCreateTime:milli"`
 	UpdatedAt int64 `json:"updatedAt" gorm:"autoUpdateTime:milli"`

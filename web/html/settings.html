@@ -746,16 +746,26 @@
       // What happens once a run lands. The whole picture is re-read rather than
       // patched, because the run changed what is on disk and who is serving it.
       //
-      // THE FIRST CERTIFICATE IS ALSO ASSIGNED, and only the first. A fresh host
-      // has no certificate on either listener, so an operator who has just waited
-      // forty seconds for one would otherwise be looking at a table with two
-      // switches off and no indication that the job is unfinished.
+      // THE FIRST CERTIFICATE IS ASSIGNED TO THE PANEL, and only the panel. A
+      // fresh host has no certificate on either listener, so an operator who has
+      // just waited forty seconds for one would otherwise be looking at a table of
+      // switches that are all off, with no indication that the job is unfinished.
       //
-      // Two guards, both narrow on purpose. Only an ISSUE does this, never a
-      // renewal: a certificate deliberately assigned to neither listener is a
-      // legitimate state (an inbound may be its only consumer), and renewing it
-      // must not be what quietly puts it on the panel. And it only ever fills a
-      // listener holding nothing at all, so it can never move one someone chose.
+      // THE SUBSCRIPTION SERVER IS NEVER TOUCHED HERE, and used to be. The rule was
+      // "fill any listener that is currently empty", so issuing one certificate on a
+      // fresh host put it on the subscription server as well, and every LATER
+      // issuance kept doing it: a host whose subscription server was deliberately on
+      // plain HTTP gained TLS, on a name chosen for something else entirely, the
+      // moment a second certificate was issued for an inbound. Serving the
+      // subscription links over TLS is a decision about a public URL that operators
+      // hand out, and it belongs to the operator, not to whatever certificate was
+      // issued last. The switch in the table is how they make it.
+      //
+      // Two guards on the panel assignment, both narrow on purpose. Only an ISSUE
+      // does this, never a renewal: a certificate deliberately assigned to neither
+      // listener is a legitimate state (an inbound may be its only consumer), and
+      // renewing it must not be what quietly puts it on the panel. And it only ever
+      // fills a panel holding nothing at all, so it can never move one someone chose.
       async sslAfterRun() {
         await this.loadSslStatus();
         this.$nextTick(() => this.sslScroll());
@@ -766,16 +776,11 @@
         this.ssl.newNames = [];
         const rows = this.sslRows().filter(r => r.kind === 'managed');
         if (!rows.length) return;
-        const anyPanel = rows.some(r => r.usedByPanel);
-        const anySub = rows.some(r => r.usedBySub);
-        if (anyPanel && anySub) return;
+        if (rows.some(r => r.usedByPanel)) return;
         const fresh = rows.find(r => r.profile === (this.ssl.modal.profile || ''));
         if (!fresh) return;
-        const targets = [];
-        if (!anyPanel) targets.push('panel');
-        if (!anySub) targets.push('subscription');
         const msg = await HttpUtil.post('/panel/setting/ssl/use-managed', {
-          profile: fresh.profile, targets: targets,
+          profile: fresh.profile, targets: ['panel'],
         });
         if (!msg || !msg.success) return;
         this.$message.success('{{ i18n "pages.settings.ssl.toasts.autoAssigned" }}');

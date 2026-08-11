@@ -114,6 +114,7 @@ const AccountExport = {
           password: client.password || '',
           uuid: uuid,
           psk: AccountExport._psk(dbInbound, inbound, client),
+          pskLabel: AccountExport._pskLabel(dbInbound, inbound),
           // NOT part of the connExtProxy fan-out below: Remote ID is inbound-wide and
           // tied to the cert, not per-endpoint, so the per-endpoint Object.assign must
           // never overwrite it (inbound.js's own comment on Ikev2Settings.externalProxy
@@ -166,6 +167,12 @@ const AccountExport = {
               server: dev.host || base.server,
               port: dev.port ? String(dev.port) : base.port,
               remark: base.remark + (dev.remark ? ' (' + dev.remark + ')' : ''),
+              // Each device has its OWN preshared key (WgcClientConfig.PreSharedKey, minted
+              // per device alongside its keypair), so the account-level value on base is only
+              // device 1's: printing it on every card handed devices 2..K a key their peer
+              // does not have. Falls back to it for a single-device account and for a payload
+              // from a panel that predates the field, neither of which regresses.
+              psk: dev.psk || base.psk,
               qr: dev.config || '',
               configText: dev.config || '',
             }));
@@ -182,10 +189,11 @@ const AccountExport = {
           for (const dev of devices) {
             cards.push(Object.assign({}, base, {
               // See isWgc above: keep the printed "Server" row in sync with this device's
-              // own Endpoint=.
+              // own Endpoint=, and the PSK row with this device's own key.
               server: dev.host || base.server,
               port: dev.port ? String(dev.port) : base.port,
               remark: base.remark + (dev.remark ? ' (' + dev.remark + ')' : ''),
+              psk: dev.psk || base.psk,
               qr: dev.config || '',
               configText: dev.config || '',
             }));
@@ -384,12 +392,47 @@ const AccountExport = {
       return s.ipsecEnable ? (s.ipsecPsk || '') : '';
     }
     // WireGuard (C) / AmneziaWG: when preshared-key mode is on, each account has its own PSK.
-    const wgLike = (dbInbound.protocol || '').toLowerCase();
-    if ((wgLike === Protocols.WGC || wgLike === Protocols.AWG)
+    // This is the ACCOUNT-level (legacy, device-0) key; buildCards' per-device fan-out
+    // overwrites it with the device's own, because with a User Limit above 1 every device
+    // has a different one and the account value is only device 1's.
+    const proto = (dbInbound.protocol || '').toLowerCase();
+    if ((proto === Protocols.WGC || proto === Protocols.AWG)
         && inbound.settings && inbound.settings.pskEnable) {
       return (client && client.psk) || '';
     }
+    // Xray-native WireGuard (protocol `wireguard`), which is a different thing from the
+    // wg-c/awg cores above: the preshared key lives on the peer, not on the inbound, so
+    // there is no pskEnable flag to consult. A peer either carries one or it does not,
+    // exactly as getWireguardTxt decides whether to write a `PresharedKey =` line
+    // (model/inbound.js). Without it the exported card omits half of a psk peer's
+    // credential and the tunnel never handshakes.
+    if (proto === Protocols.WIREGUARD) {
+      return (client && client.psk) || '';
+    }
+    // Shadowsocks-2022: the wire credential is TWO secrets joined with ':', the inbound's
+    // server key and the account's own password (genSSLink in model/inbound.js pushes
+    // exactly those two, in that order). The card's Password row carries only the account
+    // half; the server half appears nowhere else on the card, because in the ss:// link it
+    // is base64'd out of sight, so an exported card could not be reconstructed by hand.
+    // Pre-2022 methods have a per-account password and no server key at all, hence the
+    // isSS2022 gate. Reading that getter is safe on any inbound (`get method()` answers ''
+    // for every non-shadowsocks protocol), but the protocol check comes first anyway so
+    // this branch never depends on a getter belonging to another protocol's settings.
+    if (proto === Protocols.SHADOWSOCKS) {
+      return inbound.isSS2022 ? ((inbound.settings && inbound.settings.password) || '') : '';
+    }
     return '';
+  },
+
+  // The label the PSK row is printed under. It is "PSK" everywhere except shadowsocks-
+  // 2022, where the row holds the INBOUND's server key while the Password row right above
+  // it holds the account's own half (see _psk): two unlabelled secrets stacked like that
+  // is precisely what makes a card unusable by hand, so name this one for what it is.
+  _pskLabel(dbInbound, inbound) {
+    if ((dbInbound.protocol || '').toLowerCase() === Protocols.SHADOWSOCKS && inbound.isSS2022) {
+      return 'Server PSK';
+    }
+    return 'PSK';
   },
 
   // _hideUserPass reports whether an ikev2 account's Username/Password rows are
@@ -481,7 +524,9 @@ const AccountExport = {
         line('Username', c.hideUserPass ? '' : c.username),
         line('Password', c.hideUserPass ? '' : c.password),
         line('UUID', c.uuid),
-        line('PSK', c.psk),
+        // pskLabel names what the row actually holds (see AccountExport._pskLabel); an
+        // absent one is the ordinary "PSK", which also covers a card built by hand.
+        line(c.pskLabel || 'PSK', c.psk),
         line('Remote ID', c.remoteId),
         line('Expiry', c.expiry),
         line('Traffic', c.used + ' / ' + c.total),
@@ -535,7 +580,7 @@ const AccountExport = {
         (c.username && !c.hideUserPass) ? ['Username', c.username] : null,
         (c.password && !c.hideUserPass) ? ['Password', c.password] : null,
         c.uuid ? ['UUID', c.uuid] : null,
-        c.psk ? ['PSK', c.psk] : null,
+        c.psk ? [c.pskLabel || 'PSK', c.psk] : null, // see txt()'s PSK row
         c.remoteId ? ['Remote ID', c.remoteId] : null,
         ['Expiry', c.expiry],
         ['Traffic', c.used + '  /  ' + c.total],

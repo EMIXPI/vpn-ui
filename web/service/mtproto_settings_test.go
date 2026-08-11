@@ -253,8 +253,8 @@ func TestMtprotoLiftEmptyInboundGetsTheFreshDefaults(t *testing.T) {
 	if got.TlsDomain != "www.google.com" {
 		t.Errorf("tlsDomain = %q, want the default", got.TlsDomain)
 	}
-	if got.UserLimit == nil || *got.UserLimit != 0 {
-		t.Errorf("userLimit = %v, want an explicit 0 (no limit) for an empty inbound", got.UserLimit)
+	if got.UserLimit == nil || *got.UserLimit != 10 {
+		t.Errorf("userLimit = %v, want an explicit 10 (the fresh-inbound default) for an empty inbound", got.UserLimit)
 	}
 }
 

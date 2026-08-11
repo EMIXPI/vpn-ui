@@ -67,6 +67,26 @@
                     </a-popover>
                   </a-button-group>
 
+                  <!-- The order. The only sort control on the page: none of these
+                       five is a column, so there are no header arrows to compete
+                       with. The button keeps a fixed label and the menu carries the
+                       tick, because the chosen ordering is a state of the LIST and
+                       reads better beside the other items than as a button that
+                       renames itself.
+                       :trigger="['click']" for the same reason as the row menu: an
+                       a-dropdown opens on HOVER by default. -->
+                  <a-dropdown :trigger="['click']">
+                    <a-button icon="sort-ascending">
+                      {{ i18n "pages.clients.sortBy" }}
+                    </a-button>
+                    <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
+                      :selected-keys="[sortKey]" @click="e => pickSort(e.key)">
+                      <a-menu-item v-for="o in sortOptions" :key="o.key">
+                        [[ o.label ]]
+                      </a-menu-item>
+                    </a-menu>
+                  </a-dropdown>
+
                   <a-dropdown>
                     <a-button icon="ellipsis"></a-button>
                     <a-menu slot="overlay" :class="themeSwitcher.currentTheme"
@@ -484,24 +504,56 @@
         availableBytes: Number(RESELLER.availableBytes) || 0,
       },
       pagination: { current: 1, pageSize: 50, total: 0, showSizeChanger: true, pageSizeOptions: ['20', '50', '100', '200'] },
+      // The order, resolved SERVER-SIDE. It has to be: this table is paged by the
+      // server, so a browser-side sort would order the fifty rows it happens to be
+      // holding and present that as the order of two hundred.
+      //
+      // Remembered PER ADMIN, not per browser. The key carries the logged-in user's
+      // id, which every page already receives from the server, because a bare
+      // "clientsSort" key is shared by everyone who signs in from the same machine:
+      // one admin sorting by disabled accounts would silently reorder the list for
+      // the next person to log in on that browser.
+      sortKey: localStorage.getItem('clientsSort:{{ .me }}') || 'newest',
+      // Five complete orderings, not a field plus a direction. "Newest" already says
+      // which way it runs, so there is nothing for an ascending/descending toggle to
+      // do and the menu is one click rather than two.
+      sortOptions: [
+        { key: 'newest',  label: '{{ i18n "pages.clients.sortNewest" }}' },
+        { key: 'oldest',  label: '{{ i18n "pages.clients.sortOldest" }}' },
+        { key: 'online',  label: '{{ i18n "online" }}' },
+        { key: 'enable',  label: '{{ i18n "enabled" }}' },
+        { key: 'disable', label: '{{ i18n "disabled" }}' },
+      ],
+    },
+    computed: {
       // Fixed widths on everything except Serving, which is the one column whose
       // content genuinely varies and so is the one that should absorb the slack.
       // The four fixed ones are deliberately tight: three protocol chips need
       // about 330px, and at the widths this started with Serving fell just under
       // that, so a three-inbound account wrapped onto two lines and stood a head
       // taller than every row around it.
-      columns: [
-        { title: '{{ i18n "pages.clients.email" }}', scopedSlots: { customRender: 'accountCol' }, width: 230 },
-        { title: '{{ i18n "pages.clients.quota" }}', scopedSlots: { customRender: 'dataCol' }, width: 170 },
-        { title: '{{ i18n "pages.clients.expiry" }}', scopedSlots: { customRender: 'expiresCol' }, width: 150 },
-        { title: '{{ i18n "pages.clients.inbounds" }}', scopedSlots: { customRender: 'servingCol' } },
-        { title: '{{ i18n "lastOnline" }}', scopedSlots: { customRender: 'seenCol' }, width: 100 },
-        // 104 fitted a switch and a menu button. The Account Info button made three
-        // controls, which overflowed the cell and gave the whole table a horizontal
-        // scrollbar. Measured, not guessed: switch 28 + gap 6 + button 24 + gap 6 +
-        // button 24 = 88, plus the cell's own padding.
-        { title: '', scopedSlots: { customRender: 'rowCol' }, width: 132, align: 'right' },
-      ],
+      //
+      // No column carries a sorter. The orderings this page offers are not columns:
+      // three of the five are about state, and "newest" has no column at all. Header
+      // arrows alongside them would be a second sort control that could put the list
+      // in an order the menu has no item for, leaving the menu ticking nothing.
+      columns() {
+        const col = (key, title, slot, extra) => Object.assign({
+          title, key, scopedSlots: { customRender: slot },
+        }, extra || {});
+        return [
+          col('email', '{{ i18n "pages.clients.email" }}', 'accountCol', { width: 230 }),
+          col('used', '{{ i18n "pages.clients.quota" }}', 'dataCol', { width: 170 }),
+          col('expiry', '{{ i18n "pages.clients.expiry" }}', 'expiresCol', { width: 150 }),
+          col('inbounds', '{{ i18n "pages.clients.inbounds" }}', 'servingCol'),
+          col('lastOnline', '{{ i18n "lastOnline" }}', 'seenCol', { width: 100 }),
+          // 104 fitted a switch and a menu button. The Account Info button made three
+          // controls, which overflowed the cell and gave the whole table a horizontal
+          // scrollbar. Measured, not guessed: switch 28 + gap 6 + button 24 + gap 6 +
+          // button 24 = 88, plus the cell's own padding.
+          { title: '', key: 'actions', scopedSlots: { customRender: 'rowCol' }, width: 132, align: 'right' },
+        ];
+      },
     },
     methods: {
       sizeFormat(b) { return SizeFormatter.sizeFormat(b || 0); },
@@ -518,27 +570,50 @@
 
       // --- the ledger row --------------------------------------------------
       depleted(row) { return row.totalGB > 0 && row.up + row.down >= row.totalGB; },
+      // Sold but never connected. A delayed-start account stores its deadline as a
+      // NEGATIVE number of milliseconds, meaning "this many days from first use",
+      // and the server rewrites it to an absolute deadline on the first traffic
+      // tick that names the account (adjustTraffics in web/service/inbound.go). So
+      // a negative expiry on an ENABLED account is not a stale value to work
+      // around, it is a positive statement that the clock has never started.
+      //
+      // Only reachable below after the disabled test, which matters: frozen is
+      // ALSO stored as a negative expiry and is told apart from a delayed start by
+      // `enable` alone. Testing this first would paint every frozen account as one
+      // that had never been used.
+      notStarted(row) { return Number(row.expiryTime) < 0; },
       // The account's health as ONE value, in the reserved status scale.
       //
-      // Order matters, and "disabled" is deliberately NOT first. The panel
-      // auto-disables an account the moment it expires or runs out, so testing
-      // enable first painted every depleted account the same neutral grey as one
-      // an operator had switched off by hand - hiding the only two states that
-      // need chasing. Frozen still outranks both, because a frozen account is off
-      // on purpose and its clock is stopped.
+      // Order matters, and "disabled" is deliberately not last. The panel
+      // auto-disables an account the moment it expires or runs out, so an operator
+      // scanning this column is looking for the same thing in all three cases:
+      // an account that has stopped working and needs chasing. They are one red.
+      // That is a change from the old scale, which spent grey on "switched off by
+      // hand" and red on "ran out" - a distinction the tooltip still makes, and
+      // one nobody could act on differently anyway.
+      //
+      // The colourless lamp then has exactly one meaning left, which is what makes
+      // it worth a slot at all: nothing has happened on this account yet.
       lampClass(row) {
-        if (this.isAccountFrozen(row)) return 'bo-lamp--off';
-        if (this.expired(row) || this.depleted(row)) return 'bo-lamp--error';
-        if (!row.enable) return 'bo-lamp--off';
+        if (!row.enable || this.expired(row) || this.depleted(row)) return 'bo-lamp--error';
+        if (this.notStarted(row)) return 'bo-lamp--idle';
+        if (this.isClientOnline(row.email)) return 'bo-lamp--live';
+        // Amber survives as a variant of "working, not connected": an account
+        // inside a week of its deadline or past 85% of its quota is still healthy,
+        // but it is the one an operator wants to renew before the customer calls.
         if (this.expiringSoon(row) || this.usedPercent(row) >= 85) return 'bo-lamp--warn';
-        return 'bo-lamp--ok' + (this.isClientOnline(row.email) ? ' bo-lamp--live' : '');
+        return 'bo-lamp--ok';
       },
       // Same order, so the tooltip never disagrees with the colour it explains.
+      // It is finer-grained than the colour on purpose: four hues is what a glance
+      // can carry, and the tooltip is where the operator has already stopped to
+      // ask which of the three red cases this one is.
       stateLabel(row) {
         if (this.isAccountFrozen(row)) return '{{ i18n "pages.client.frozen" }}';
         if (this.expired(row)) return '{{ i18n "pages.clients.summaryExpired" }}';
         if (this.depleted(row)) return '{{ i18n "depleted" }}';
         if (!row.enable) return '{{ i18n "disabled" }}';
+        if (this.notStarted(row)) return '{{ i18n "pages.client.delayedStart" }}';
         return this.isClientOnline(row.email) ? '{{ i18n "online" }}' : '{{ i18n "offline" }}';
       },
       // A positive deadline inside a week. Deliberately NOT true for a delayed
@@ -712,11 +787,21 @@
       },
 
       async loadClients() {
-        const q = `?page=${this.pagination.current}&size=${this.pagination.pageSize}&search=${encodeURIComponent(this.search || '')}`;
+        const q = `?page=${this.pagination.current}&size=${this.pagination.pageSize}`
+          + `&search=${encodeURIComponent(this.search || '')}`
+          + `&sort=${encodeURIComponent(this.sortKey)}`;
         const msg = await HttpUtil.get('/panel/api/clients/list' + q);
         if (!msg || !msg.success) return;
         this.clients = (msg.obj && msg.obj.rows) || [];
         this.pagination.total = (msg.obj && msg.obj.total) || 0;
+        // Taken from the ANSWER, not from what was asked. The server falls back to
+        // newest for an ordering it does not know, and a stale key left in this
+        // user's localStorage by an older build would otherwise leave the menu
+        // ticking an item the list is not actually ordered by.
+        if (msg.obj && msg.obj.sort && msg.obj.sort !== this.sortKey) {
+          this.sortKey = msg.obj.sort;
+          localStorage.setItem('clientsSort:{{ .me }}', this.sortKey);
+        }
         // Drop selections that are no longer on the page, or a bulk action would
         // silently act on rows the operator can no longer see.
         const visible = new Set(this.clients.map(c => c.email));
@@ -930,6 +1015,20 @@
       onTableChange(pag) {
         this.pagination.current = pag.current;
         this.pagination.pageSize = pag.pageSize;
+        this.loadClients();
+      },
+      // Picking an ordering. Re-picking the one already applied does nothing rather
+      // than toggling a direction: each item IS a direction, so there is no second
+      // state for a second click to reach.
+      //
+      // Back to page 1, always. Page 3 of a list ordered by newest has nothing to do
+      // with page 3 of the same list ordered by disabled, so keeping the page number
+      // across a change lands the operator somewhere arbitrary.
+      pickSort(key) {
+        if (key === this.sortKey) return;
+        this.sortKey = key;
+        localStorage.setItem('clientsSort:{{ .me }}', key);
+        this.pagination.current = 1;
         this.loadClients();
       },
       onSearch() { this.pagination.current = 1; this.loadClients(); },

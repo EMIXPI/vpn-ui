@@ -145,7 +145,7 @@ func TestMtprotoApiAddKeepsLegacyShapeValues(t *testing.T) {
 			got.ModeClassic, got.ModeSecure, got.ModeTls)
 	}
 	if got.UserLimit == nil || *got.UserLimit != 5 {
-		t.Errorf("userLimit = %v, want the caller's 5 rather than the default 0 (no limit)", got.UserLimit)
+		t.Errorf("userLimit = %v, want the caller's 5 rather than the default 10", got.UserLimit)
 	}
 	// The domain came off an account with no FakeTLS mode, which is exactly the one the
 	// process was never emulating, so the default stands here too.

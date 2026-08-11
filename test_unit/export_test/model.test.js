@@ -150,7 +150,7 @@ const MTPROTO_LEGACY_CASES = [
     // modeless inbound, which telemt reads as "no restriction".
     label: "no accounts at all",
     stored: { clients: [] },
-    want: { modeClassic: true, modeSecure: true, modeTls: true, tlsDomain: "www.google.com", userLimit: 0 },
+    want: { modeClassic: true, modeSecure: true, modeTls: true, tlsDomain: "www.google.com", userLimit: 10 },
   },
   {
     // Already migrated: read straight off the root, an explicit false included.
@@ -174,6 +174,119 @@ for (const { label, stored, want } of MTPROTO_LEGACY_CASES) {
      posted.modeTls === want.modeTls && posted.tlsDomain === want.tlsDomain &&
      posted.userLimit === want.userLimit,
      `mtproto (${label}): a save posts the resolved values, not the legacy ones`);
+}
+
+// A vless inbound stored before `flow` moved off its clients carries it only on them.
+// This form POSTS BACK what it read, so failing to lift it would show the picker as None
+// and then mirror that None over every client the first time anyone opened the inbound
+// and pressed Save. That is vision switched off on a working REALITY inbound, and it
+// presents as customers who connect and then stall, with nothing in any log naming it.
+//
+// The mirror in the other direction is not made redundant by the core's own fallback
+// (xray-core applies settings.flow to any client that carries none). All four share-link
+// generators read the PER-CLIENT field: genLink in inbound.js, sub/subService.go,
+// sub/subJsonService.go and sub/subClashService.go. An inbound-only value would therefore
+// drop flow= from every link while the tunnel itself kept working.
+console.log("");
+console.log("model: vless flow resolves onto the inbound and mirrors back onto the clients");
+
+const VLESS_FLOW_CASES = [
+  {
+    // Saved by an earlier build: nothing at the root, the value on the clients. The
+    // second client carries no flow of its own and must still come back mirrored.
+    label: "legacy per-client flow is lifted",
+    stored: { clients: [
+      { id: "u1", email: "alice", flow: "xtls-rprx-vision" },
+      { id: "u2", email: "bob" },
+    ] },
+    want: "xtls-rprx-vision",
+  },
+  {
+    // xray-core accepts exactly "" and "xtls-rprx-vision". At settings level a value it
+    // refuses takes the WHOLE config down rather than one client, so the legacy spelling
+    // must not survive the lift. Pinned against the bundled fork, whose rule is at
+    // third_party/Xray-core/infra/conf/vless.go.
+    label: "udp443 folds down to plain vision",
+    stored: { clients: [{ id: "u1", email: "alice", flow: "xtls-rprx-vision-udp443" }] },
+    want: "xtls-rprx-vision",
+  },
+  {
+    // Already migrated: read straight off the root.
+    label: "current shape is read verbatim",
+    stored: { flow: "xtls-rprx-vision", clients: [{ id: "u1", email: "alice" }] },
+    want: "xtls-rprx-vision",
+  },
+  {
+    label: "no flow anywhere",
+    stored: { clients: [{ id: "u1", email: "alice" }] },
+    want: "",
+  },
+];
+
+for (const { label, stored, want } of VLESS_FLOW_CASES) {
+  const live = Inbound.VLESSSettings.fromJson(stored);
+  ok(live.flow === want,
+     `vless flow (${label}): flow is ${JSON.stringify(want)} (got ${JSON.stringify(live.flow)})`);
+  const posted = live.toJson();
+  ok(posted.clients.every((c) => c.flow === want),
+     `vless flow (${label}): every client entry is mirrored`);
+  ok((posted.flow || "") === want,
+     `vless flow (${label}): a save posts the resolved value, not the legacy one`);
+}
+
+// Clearing the picker has to reach the clients too. Mirroring only non-empty values would
+// leave every client holding the vision it was last saved with, which presents as a
+// picker that does nothing.
+{
+  const live = Inbound.VLESSSettings.fromJson({
+    flow: "xtls-rprx-vision",
+    clients: [{ id: "u1", email: "alice", flow: "xtls-rprx-vision" }],
+  });
+  live.flow = "";
+  const posted = live.toJson();
+  ok(!("flow" in posted), "vless flow (cleared): settings.flow is omitted");
+  ok(posted.clients.every((c) => c.flow === ""),
+     "vless flow (cleared): the clear reaches every client");
+  // testseed is gated on the inbound flow now, not on "some client has one".
+  ok(!("testseed" in posted), "vless flow (cleared): testseed stops being emitted");
+}
+
+// The lift must not WIDEN a broken inbound.
+//
+// VLESSSettings.fromJson sees only the settings blob, so it cannot ask whether the
+// transport supports flow. On a legacy vless inbound over ws or grpc, a stray flow on
+// one client would otherwise be promoted to the inbound and then mirrored onto EVERY
+// client on the next save: one broken account becomes all of them, and the operator
+// cannot undo it, because the picker is hidden while canEnableTlsFlow() is false and
+// the wipe handlers only fire on a security or network CHANGE. Inbound.fromJson is
+// where the stream finally exists, so that is where it is cleared.
+{
+  const overTcpReality = Inbound.fromJson({
+    protocol: "vless",
+    settings: { clients: [{ id: "u1", email: "alice", flow: "xtls-rprx-vision" }] },
+    streamSettings: { network: "tcp", security: "reality" },
+  });
+  ok(overTcpReality.canEnableTlsFlow(), "vless flow (transport): reality+tcp can carry flow");
+  ok(overTcpReality.settings.flow === "xtls-rprx-vision",
+     "vless flow (transport): a legacy flow still lifts on a transport that supports it");
+
+  for (const stream of [
+    { network: "ws", security: "tls" },
+    { network: "grpc", security: "tls" },
+    { network: "tcp", security: "none" },
+  ]) {
+    const bad = Inbound.fromJson({
+      protocol: "vless",
+      settings: { clients: [{ id: "u1", email: "alice", flow: "xtls-rprx-vision" }] },
+      streamSettings: stream,
+    });
+    const where = `${stream.network}/${stream.security}`;
+    ok(!bad.canEnableTlsFlow(), `vless flow (transport): ${where} cannot carry flow`);
+    ok(bad.settings.flow === "",
+       `vless flow (transport): a stray flow is cleared on ${where}, not promoted`);
+    ok(bad.toJson().settings.clients.every((c) => !c.flow),
+       `vless flow (transport): ${where} does not mirror a flow onto its clients`);
+  }
 }
 
 // ---- verdict ------------------------------------------------------------

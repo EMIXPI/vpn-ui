@@ -86,6 +86,21 @@ global.HttpUtil = {
     if (url.indexOf('/ikev2-remote-id') >= 0) {
       return { success: true, obj: { remoteId: 'fetched.example' } };
     }
+    // A two-device account, each device with its OWN preshared key, as the real payload
+    // has since WgcClientConfig grew a psk field. Keyed on the inbound id in the path so
+    // the single-device response below stays exactly as it was.
+    if (url.indexOf('/130/wgc-configs') >= 0) {
+      return { success: true, obj: [
+        { deviceIndex: 0, ip: '10.7.8.8/32', remark: 'Device 1', publicKey: 'PUB1',
+          config: '[Interface]\nPrivateKey = D1\n', psk: 'DevPsk-1',
+          host: 'relay.example', port: 51821 },
+        { deviceIndex: 1, ip: '10.7.8.9/32', remark: 'Device 2', publicKey: 'PUB2',
+          config: '[Interface]\nPrivateKey = D2\n', psk: 'DevPsk-2',
+          host: 'relay.example', port: 51821 },
+      ] };
+    }
+    // No psk field at all: both a single-device account and a payload from a panel that
+    // predates the field, which must still fall back to the account-level key.
     if (url.indexOf('/wgc-configs') >= 0) {
       return { success: true, obj: [{ deviceIndex: 0, ip: '10.7.8.8/32', remark: '',
         publicKey: 'PUBKEY', config: '[Interface]\nPrivateKey = X\n',
@@ -98,10 +113,17 @@ global.HttpUtil = {
 // defined in model/inbound.js). buildCards runs in this Node context, so stub it here
 // alongside the other browser globals, or every account is skipped with
 // "Protocols is not defined". Values mirror model.Protocol (lowercase wire strings).
+//
+// EVERY key export.js reads has to be here, including the ones no fixture below uses
+// yet. A missing key is undefined, and `'awg' === undefined` is simply false, so the
+// branch it guards is quietly dead in this harness: the test would pass while the real
+// panel took a path never exercised here. Keep this in step with model/inbound.js.
 global.Protocols = {
   VMESS: 'vmess', VLESS: 'vless', TROJAN: 'trojan', SHADOWSOCKS: 'shadowsocks',
+  WIREGUARD: 'wireguard', ANYTLS: 'anytls', TUIC: 'tuic', NAIVE: 'naive',
   L2TP: 'l2tp', PPTP: 'pptp', OPENVPN: 'openvpn', OPENCONNECT: 'openconnect',
-  SSTP: 'sstp', IKEV2: 'ikev2', WGC: 'wg-c', MTPROTO: 'mtproto', SSH: 'ssh',
+  SSTP: 'sstp', IKEV2: 'ikev2', WGC: 'wg-c', AWG: 'awg', GRE: 'gre',
+  MTPROTO: 'mtproto', SSH: 'ssh',
 };
 
 // ---- load the real export.js and expose AccountExport ------------------
@@ -320,12 +342,153 @@ ok(wgcCard && wgcCard.server === "relay.example",
 ok(wgcCard && wgcCard.port === "51821",
   "wg-c 'Server' row matches its own config's Endpoint port, got " + (wgcCard && wgcCard.port));
 
+// ============ the OTHER protocols with a PSK: shadowsocks-2022, xray wireguard, per-device wg-c ============
+// Three separate ways a PSK went missing from a card. Shadowsocks-2022 authenticates with
+// TWO secrets joined by ':' (the inbound's server key + the account's password) and only
+// the account half was ever printed, so a card could not be reconstructed by hand at all.
+// Xray-native `wireguard` keeps its preshared key on the peer and had no branch. wg-c/awg
+// mint a DIFFERENT key per device, but every device card printed the account-level (device
+// 1) value, which matters now that multi-device accounts are the norm.
+console.log("[psk domain]");
+function fakeApp3() {
+  // isSS2022 is a getter on the real Inbound (derived from settings.method); the fixtures
+  // state it directly, which is what the getter would answer for these two methods.
+  const ss2022Inbound = {
+    listen: "", port: 8388, isSS2022: true,
+    settings: { method: "2022-blake3-aes-128-gcm", password: "ServerPSK-AAAA" },
+    stream: { network: "tcp" },
+    genAllLinks: () => [{ link: "ss://b64@1.2.3.4:8388#ss" }],
+  };
+  // Pre-2022 method: settings.password is not a server key the client ever sends, so the
+  // card must NOT grow a PSK row out of it.
+  const ssLegacyInbound = {
+    listen: "", port: 8389, isSS2022: false,
+    settings: { method: "chacha20-ietf-poly1305", password: "NotAServerKey" },
+    stream: { network: "tcp" },
+    genAllLinks: () => [{ link: "ss://b64@1.2.3.4:8389#ss" }],
+  };
+  // Xray-native wireguard: no inbound-wide pskEnable flag, the peer either has a key or not.
+  const wgInbound = {
+    listen: "", port: 51820, settings: {},
+    genAllLinks: () => [{ link: "" }],
+  };
+  // wg-c, preshared keys on, two devices (see the /130/wgc-configs stub above).
+  const wgcMultiInbound = {
+    listen: "", port: 51820, settings: { pskEnable: true },
+    genAllLinks: () => [{ link: "" }],
+  };
+  // wg-c, preshared keys on, a device payload with no psk field: the fallback case.
+  const wgcLegacyInbound = {
+    listen: "", port: 51820, settings: { pskEnable: true },
+    genAllLinks: () => [{ link: "" }],
+  };
+  const rows = {
+    100: { id: 100, remark: "ss2022", protocol: "shadowsocks", isOpenvpn: false, isL2tp: false, isPptp: false,
+           address: "vpn.example", toInbound: () => ss2022Inbound },
+    110: { id: 110, remark: "ss-legacy", protocol: "shadowsocks", isOpenvpn: false, isL2tp: false, isPptp: false,
+           address: "vpn.example", toInbound: () => ssLegacyInbound },
+    120: { id: 120, remark: "wg-native", protocol: "wireguard", isOpenvpn: false, isL2tp: false, isPptp: false,
+           address: "vpn.example", toInbound: () => wgInbound },
+    130: { id: 130, remark: "wgc-multi", protocol: "wg-c", isOpenvpn: false, isL2tp: false, isPptp: false,
+           address: "vpn.example", toInbound: () => wgcMultiInbound },
+    140: { id: 140, remark: "wgc-legacy", protocol: "wg-c", isOpenvpn: false, isL2tp: false, isPptp: false,
+           address: "vpn.example", toInbound: () => wgcLegacyInbound },
+  };
+  const clients = {
+    100: [{ email: "ss2022@t", password: "AcctPass-BBBB", totalGB: 0, expiryTime: 0 }],
+    110: [{ email: "sslegacy@t", password: "AcctPass-CCCC", totalGB: 0, expiryTime: 0 }],
+    120: [{ email: "wgpeer@t", psk: "PeerPSK-DDDD", totalGB: 0, expiryTime: 0 }],
+    // The account-level psk is device 1's legacy value; each device's own key wins over it.
+    130: [{ email: "wgcmulti@t", psk: "AccountPsk-OLD", totalGB: 0, expiryTime: 0 }],
+    140: [{ email: "wgclegacy@t", psk: "AccountPsk-KEEP", totalGB: 0, expiryTime: 0 }],
+  };
+  return {
+    remarkModel: "-ieo",
+    dbInbounds: [rows[100], rows[110], rows[120], rows[130], rows[140]],
+    getInboundClients: (db) => clients[db.id],
+    getSumStats: () => 0,
+  };
+}
+const built3 = await AE.buildCards(fakeApp3(), [
+  { inboundId: 100, email: "ss2022@t" },
+  { inboundId: 110, email: "sslegacy@t" },
+  { inboundId: 120, email: "wgpeer@t" },
+  { inboundId: 130, email: "wgcmulti@t" },
+  { inboundId: 140, email: "wgclegacy@t" },
+]);
+ok(built3.length === 6, "one card each except the two-device wg-c account, got " + built3.length);
+
+const ssCard = built3.find((c) => c.email === "ss2022@t");
+ok(ssCard && ssCard.psk === "ServerPSK-AAAA",
+  "shadowsocks-2022 card carries the inbound's server PSK, got " + JSON.stringify(ssCard && ssCard.psk));
+ok(ssCard && ssCard.password === "AcctPass-BBBB", "shadowsocks-2022 card still carries the account password");
+ok(ssCard && ssCard.pskLabel === "Server PSK",
+  "shadowsocks-2022 PSK row is labelled 'Server PSK', got " + JSON.stringify(ssCard && ssCard.pskLabel));
+
+const ssLegacyCard = built3.find((c) => c.email === "sslegacy@t");
+ok(ssLegacyCard && ssLegacyCard.psk === "",
+  "a pre-2022 shadowsocks inbound exports NO PSK row, got " + JSON.stringify(ssLegacyCard && ssLegacyCard.psk));
+ok(ssLegacyCard && ssLegacyCard.pskLabel === "PSK", "a non-2022 card keeps the plain 'PSK' label");
+
+const wgNativeCard = built3.find((c) => c.email === "wgpeer@t");
+ok(wgNativeCard && wgNativeCard.psk === "PeerPSK-DDDD",
+  "xray-native wireguard card carries the peer's own psk, got " + JSON.stringify(wgNativeCard && wgNativeCard.psk));
+
+const wgcDevCards = built3.filter((c) => c.email === "wgcmulti@t");
+ok(wgcDevCards.length === 2, "the two-device wg-c account fans out one card per device, got " + wgcDevCards.length);
+ok(wgcDevCards.some((c) => c.psk === "DevPsk-1") && wgcDevCards.some((c) => c.psk === "DevPsk-2"),
+  "each wg-c device card carries its OWN psk, got " + JSON.stringify(wgcDevCards.map((c) => c.psk)));
+ok(new Set(wgcDevCards.map((c) => c.psk)).size === 2,
+  "two devices with different psks do NOT collapse onto the account-level value");
+
+const wgcLegacyCard = built3.find((c) => c.email === "wgclegacy@t");
+ok(wgcLegacyCard && wgcLegacyCard.psk === "AccountPsk-KEEP",
+  "a device payload with no psk field falls back to the account-level key, got " + JSON.stringify(wgcLegacyCard && wgcLegacyCard.psk));
+
+// Round trip through the renderer: the row has to REACH the file, under its own label,
+// carrying a DIFFERENT secret from the Password row right above it. That last clause is
+// the assertion that catches the whole gap: before this, the server half was nowhere in
+// the export except base64'd inside the ss:// link.
+const rowOf = (txt, label) => {
+  const l = txt.split("\n").find((s) => s.trim().indexOf(label + " :") === 0);
+  return l ? l.split(":").slice(1).join(":").trim() : "";
+};
+AE.txt([ssCard], "ss2022");
+const ssTxt = txtCapture.content;
+ok(rowOf(ssTxt, "Server PSK") === "ServerPSK-AAAA",
+  "TXT renders the shadowsocks-2022 server PSK row, got " + JSON.stringify(rowOf(ssTxt, "Server PSK")));
+ok(rowOf(ssTxt, "Password") === "AcctPass-BBBB",
+  "TXT still renders the account Password row, got " + JSON.stringify(rowOf(ssTxt, "Password")));
+ok(rowOf(ssTxt, "Server PSK") !== "" && rowOf(ssTxt, "Server PSK") !== rowOf(ssTxt, "Password"),
+  "the two shadowsocks-2022 secrets are BOTH present and are different values");
+AE.txt([ssLegacyCard], "sslegacy");
+ok(txtCapture.content.indexOf("PSK") < 0, "a pre-2022 shadowsocks card renders no PSK row at all");
+
+AE.txt(wgcDevCards, "wgcmulti");
+const devTxt = txtCapture.content;
+ok(devTxt.includes("DevPsk-1") && devTxt.includes("DevPsk-2") && !devTxt.includes("AccountPsk-OLD"),
+  "TXT prints each wg-c device's own PSK, never the account-level one");
+
 // ================== _psk() unit coverage (ikev2 auth-mode branch) ==================
 console.log("[psk]");
 ok(AE._psk({ protocol: "ikev2" }, { settings: { authMode: "psk", psk: "SharedSecret1" } }, {}) === "SharedSecret1",
   "ikev2 psk-mode _psk() returns the shared secret");
 ok(AE._psk({ protocol: "ikev2" }, { settings: { authMode: "eap-mschapv2", psk: "SharedSecret1" } }, {}) === "",
   "ikev2 non-psk mode _psk() returns '' even if a stale psk value is present");
+ok(AE._psk({ protocol: "shadowsocks" },
+  { isSS2022: true, settings: { password: "ServerPSK-AAAA" } }, { password: "AcctPass-BBBB" }) === "ServerPSK-AAAA",
+  "shadowsocks-2022 _psk() returns the INBOUND's server key, not the account password");
+ok(AE._psk({ protocol: "shadowsocks" },
+  { isSS2022: false, settings: { password: "NotAServerKey" } }, { password: "AcctPass-CCCC" }) === "",
+  "pre-2022 shadowsocks _psk() returns '' (settings.password is not a server key there)");
+ok(AE._psk({ protocol: "wireguard" }, { settings: {} }, { psk: "PeerPSK-DDDD" }) === "PeerPSK-DDDD",
+  "xray-native wireguard _psk() returns the peer's psk");
+ok(AE._psk({ protocol: "wireguard" }, { settings: {} }, {}) === "",
+  "a wireguard peer with no psk gets no PSK row");
+ok(AE._pskLabel({ protocol: "shadowsocks" }, { isSS2022: true }) === "Server PSK"
+  && AE._pskLabel({ protocol: "shadowsocks" }, { isSS2022: false }) === "PSK"
+  && AE._pskLabel({ protocol: "l2tp" }, {}) === "PSK",
+  "_pskLabel names only the shadowsocks-2022 row, everything else stays 'PSK'");
 
 // ============ _hideUserPass() + rendering (ikev2 psk/eap-tls Username/Password) ============
 // psk and eap-tls never check the per-account id/password (psk = one shared secret;

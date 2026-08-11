@@ -93,6 +93,10 @@ type sshClient struct {
 	Password string `json:"password"` // SSH password
 	Email    string `json:"email"`    // routing + accounting identity
 	Enable   bool   `json:"enable"`
+	// This account's own device cap. nil = inherit the inbound's User Limit, and it can
+	// only LOWER it (resolveUserLimitOverride). SSH has no address pool, so nothing here
+	// can collide; the rule is shared so one number means one thing across the panel.
+	UserLimitOverride *int `json:"userLimitOverride"`
 }
 
 // GetSshInbounds returns every SSH inbound.
@@ -379,8 +383,22 @@ func (s *SshService) lookupAccount(inboundId int, username, password string) (ss
 	return sshClient{}, false
 }
 
-// inboundLimit returns the inbound's User Limit K and normalized strategy.
-func (s *SshService) inboundLimit(inboundId int) (int, string) {
+// accountLimit returns the device cap that applies to ONE account on this inbound, plus
+// the inbound's normalized strategy.
+//
+// The cap is the inbound's User Limit K with that account's own override folded in, which
+// can only lower it (resolveUserLimitOverride). An account with no override, and every
+// account on an inbound where nobody has one, resolves to exactly the inbound's K, so this
+// is the previous behaviour with one extra lookup.
+//
+// The STRATEGY stays the inbound's and has no per-account form, the same asymmetry the IP
+// Limit draws: how many devices an account may hold is that account's entitlement, but what
+// happens AT the cap is the operator's policy for everyone on the inbound.
+//
+// An unknown account resolves to the inbound's K rather than to a refusal: this is called
+// after the SSH handshake has already authenticated the account, so a miss here means the
+// settings blob changed under a live session, not that the caller is unauthorized.
+func (s *SshService) accountLimit(inboundId int, email string) (int, string) {
 	inbound, err := s.inboundService.GetInbound(inboundId)
 	if err != nil || inbound == nil {
 		return 1, "reject"
@@ -389,7 +407,15 @@ func (s *SshService) inboundLimit(inboundId int) (int, string) {
 	if err != nil {
 		return 1, "reject"
 	}
-	return effectiveSshK(settings.UserLimit), normUserLimitStrategy(settings.UserLimitStrategy)
+	k := effectiveSshK(settings.UserLimit)
+	key := accountKey(email)
+	for _, c := range settings.Clients {
+		if accountKey(c.Email) == key {
+			k = resolveUserLimitOverride(k, c.UserLimitOverride)
+			break
+		}
+	}
+	return k, normUserLimitStrategy(settings.UserLimitStrategy)
 }
 
 // SshClientConfig is one rendered client artifact for an account/endpoint.

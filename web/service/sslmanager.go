@@ -195,13 +195,6 @@ func sslResolveProfile(name string) (string, string, error) {
 	return name, root, nil
 }
 
-// UseManagedCertificate points BOTH listeners at a profile's stable paths. Kept as
-// the one-click path for the common case where one certificate covers the whole
-// host; Assign is what splits them.
-func (s *SSLService) UseManagedCertificate(profile string) error {
-	return s.Assign(profile, []string{SSLAssignTargetPanel, SSLAssignTargetSub})
-}
-
 // Assign points the named listeners at a profile's stable paths, and leaves every
 // listener not named alone. This is what lets the panel and the subscription server
 // hold different certificates: assign one profile to "panel" and another to

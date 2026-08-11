@@ -42,10 +42,16 @@ func (a *ClientsController) initRouter(g *gin.RouterGroup) {
 // every admin every other admin's customers and every reseller every other
 // seller's. Passing the login user rather than a flag keeps that decision in one
 // place.
+// The sort is a query parameter and not a body field because this is a GET, and it
+// is validated in the service rather than here: an unknown key falls back to
+// "newest" there, so there is nothing for this handler to reject. There is no
+// direction parameter on purpose - each ordering the page offers already says which
+// way it runs. The result echoes back the ordering that was actually applied.
 func (a *ClientsController) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
 	size, _ := strconv.Atoi(c.Query("size"))
-	result, err := accountService.ListAccounts(session.GetLoginUser(c), page, size, c.Query("search"))
+	result, err := accountService.ListAccounts(session.GetLoginUser(c), page, size,
+		c.Query("search"), c.Query("sort"))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return

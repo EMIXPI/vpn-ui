@@ -62,10 +62,26 @@ type AccountRow struct {
 	LimitIP    int    `json:"limitIp"`
 	// TgID is the Telegram chat the bot notifies. Reported so the Clients form can
 	// edit it without a second read; 0 means the account is not linked.
-	TgID        int64                   `json:"tgId"`
-	Up          int64                   `json:"up"`
-	Down        int64                   `json:"down"`
-	Memberships []AccountMembershipView `json:"memberships"`
+	TgID int64 `json:"tgId"`
+	// The three per-account limit OVERRIDES, reported so the client form can show
+	// what is actually set without a second read.
+	//
+	// Pointers all the way out to the browser, and NOT omitempty. The form has to
+	// tell "this account overrides the inbound with 0, meaning unlimited" from "this
+	// account inherits whatever the inbound says", and those are the same value once
+	// a nil becomes a 0. omitempty would collapse an explicit 0 into an absent key
+	// and lose exactly that distinction; null on the wire is what the empty box in
+	// the Limits tab reads back as.
+	//
+	// LimitIP above is the IP-limit override and is deliberately NOT one of these: it
+	// is a plain int that predates the feature, where 0 already means "inherit" (see
+	// resolveIPLimit).
+	SpeedLimitDown    *int                    `json:"speedLimitDown"`
+	SpeedLimitUp      *int                    `json:"speedLimitUp"`
+	UserLimitOverride *int                    `json:"userLimitOverride"`
+	Up                int64                   `json:"up"`
+	Down              int64                   `json:"down"`
+	Memberships       []AccountMembershipView `json:"memberships"`
 	// OwnedByReseller is the reseller's user id, or 0 for a house account. Shown
 	// only to whoever may already see resellers.
 	OwnedByReseller int `json:"ownedByReseller"`
@@ -77,7 +93,27 @@ type AccountListResult struct {
 	Total int          `json:"total"` // rows matching the search, before paging
 	Page  int          `json:"page"`
 	Size  int          `json:"size"`
+	// Sort echoes back the ordering that was actually applied, normalised. The menu
+	// ticks its selected item from THIS rather than from what it asked for, so a key
+	// the server does not know falls back visibly instead of leaving the menu
+	// pointing at an ordering the list is not in.
+	Sort string `json:"sort"`
 }
+
+// The orderings the Clients table offers. Each one is a COMPLETE ordering, not a
+// field to be combined with a direction: "newest" already says which way it runs.
+// That is why there is no dir parameter and no ascending/descending toggle - an
+// operator picks an answer, not a column plus an arrow.
+//
+// Named constants because they cross the wire; clients.html uses these exact
+// strings as its menu keys.
+const (
+	AccountSortNewest   = "newest"
+	AccountSortOldest   = "oldest"
+	AccountSortOnline   = "online"
+	AccountSortEnabled  = "enable"
+	AccountSortDisabled = "disable"
+)
 
 // ListAccounts returns the accounts the caller may see, filtered and paged.
 //
@@ -91,10 +127,10 @@ type AccountListResult struct {
 //     other sellers' customers too;
 //   - an ordinary admin sees accounts with at least one membership on an inbound
 //     they hold, which is exactly what the Inbounds page already shows them.
-func (s *AccountService) ListAccounts(user *model.User, page, size int, search string) (*AccountListResult, error) {
+func (s *AccountService) ListAccounts(user *model.User, page, size int, search, sortKey string) (*AccountListResult, error) {
 	if user == nil {
 		// No identity, no rows. Never an unscoped list.
-		return &AccountListResult{Rows: []AccountRow{}}, nil
+		return &AccountListResult{Rows: []AccountRow{}, Sort: AccountSortNewest}, nil
 	}
 	if page < 1 {
 		page = 1
@@ -141,6 +177,11 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search s
 
 	needle := strings.ToLower(strings.TrimSpace(search))
 	rows := make([]AccountRow, 0, len(accounts))
+	// When each account was created, for the newest/oldest orderings. Kept beside
+	// the rows rather than added to AccountRow because nothing on the page renders
+	// it: the table has no created column, and a field the browser never reads is a
+	// field that goes stale without anyone noticing.
+	createdAt := make(map[int]int64, len(accounts))
 	for i := range accounts {
 		account := &accounts[i]
 		key := accountKey(account.Email)
@@ -156,7 +197,9 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search s
 			SubID: account.SubID, Comment: account.Comment,
 			TotalGB: account.TotalGB, ExpiryTime: account.ExpiryTime,
 			Reset: account.Reset, LimitIP: account.LimitIP, TgID: account.TgID,
-			Memberships: mine, OwnedByReseller: owner[key],
+			SpeedLimitDown: account.SpeedLimitDown, SpeedLimitUp: account.SpeedLimitUp,
+			UserLimitOverride: account.UserLimitOverride,
+			Memberships:       mine, OwnedByReseller: owner[key],
 		}
 		// client_traffics is one row per account panel-wide, and it is what the
 		// enforcement paths actually read, so it wins over the account row for the
@@ -173,8 +216,25 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search s
 			row.TotalGB = t.Total
 			row.ExpiryTime = t.ExpiryTime
 		}
+		createdAt[account.Id] = account.CreatedAt
 		rows = append(rows, row)
 	}
+
+	// Ordered BEFORE paging, which is the whole reason this is server-side. The
+	// page only ever holds one slice of the list, so sorting in the browser would
+	// order fifty rows out of two hundred and call it a sort.
+	// The online set is fetched only when it is the ordering being asked for. It
+	// reads the running core's in-memory session list, which is cheap but not free
+	// of meaning: on a box where Xray never started it is empty, and every account
+	// then sorts as offline rather than the call failing.
+	online := map[string]bool{}
+	if sortKey == AccountSortOnline {
+		var inboundService InboundService
+		for _, email := range inboundService.GetOnlineClients() {
+			online[accountKey(email)] = true
+		}
+	}
+	sortKey = sortAccountRows(rows, createdAt, online, sortKey)
 
 	total := len(rows)
 	start := (page - 1) * size
@@ -185,7 +245,77 @@ func (s *AccountService) ListAccounts(user *model.User, page, size int, search s
 	if end > total {
 		end = total
 	}
-	return &AccountListResult{Rows: rows[start:end], Total: total, Page: page, Size: size}, nil
+	return &AccountListResult{
+		Rows: rows[start:end], Total: total, Page: page, Size: size,
+		Sort: sortKey,
+	}, nil
+}
+
+// sortAccountRows orders the whole filtered list in place and returns the ordering
+// it actually applied, which is what the caller echoes back.
+//
+// An unknown or empty key falls back to "newest" rather than erroring. A sort is a
+// view preference, and refusing the request would leave an operator with an error
+// toast instead of a list; the echoed key is how the menu learns which item to tick.
+//
+// EVERY comparison falls through to a unique tie-break, and that is load-bearing
+// rather than tidy. Paging is applied to this slice immediately afterwards, so with
+// an unstable order two accounts comparing equal could swap between the request for
+// page 1 and the request for page 2, and the operator would see one of them twice
+// and the other not at all. The three status orderings tie-break on email because
+// that is the useful reading inside a group; the two age orderings tie-break on id,
+// which is monotonic, so accounts created in the same millisecond still come back in
+// the order they were made.
+func sortAccountRows(rows []AccountRow, createdAt map[int]int64, online map[string]bool, sortKey string) string {
+	switch sortKey {
+	case AccountSortNewest, AccountSortOldest, AccountSortOnline,
+		AccountSortEnabled, AccountSortDisabled:
+	default:
+		sortKey = AccountSortNewest
+	}
+
+	// Each case returns "is a before b" outright. Written as a full comparison per
+	// ordering rather than a shared key function plus a direction flag, because these
+	// are five different questions and only two of them are about the same value.
+	less := func(a, b *AccountRow) bool {
+		switch sortKey {
+		case AccountSortOldest:
+			if createdAt[a.Id] != createdAt[b.Id] {
+				return createdAt[a.Id] < createdAt[b.Id]
+			}
+			return a.Id < b.Id
+		case AccountSortOnline:
+			// Connected right now first. Not a health question: an account can be
+			// online AND nearly out of data, and this ordering answers only the
+			// first half.
+			ao, bo := online[accountKey(a.Email)], online[accountKey(b.Email)]
+			if ao != bo {
+				return ao
+			}
+			return accountKey(a.Email) < accountKey(b.Email)
+		case AccountSortEnabled:
+			if a.Enable != b.Enable {
+				return a.Enable
+			}
+			return accountKey(a.Email) < accountKey(b.Email)
+		case AccountSortDisabled:
+			// The mirror of the one above, and the more useful of the pair: a
+			// disabled account is the one an operator is looking for, because the
+			// panel switches accounts off by itself when they expire or run out.
+			if a.Enable != b.Enable {
+				return b.Enable
+			}
+			return accountKey(a.Email) < accountKey(b.Email)
+		default: // AccountSortNewest
+			if createdAt[a.Id] != createdAt[b.Id] {
+				return createdAt[a.Id] > createdAt[b.Id]
+			}
+			return a.Id > b.Id
+		}
+	}
+
+	sort.SliceStable(rows, func(i, j int) bool { return less(&rows[i], &rows[j]) })
+	return sortKey
 }
 
 // membershipViews maps every account id to the inbounds serving it, named.

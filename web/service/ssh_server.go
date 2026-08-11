@@ -238,7 +238,9 @@ func (m *sshManager) handleConn(srv *sshServer, nConn net.Conn) {
 	}
 
 	// User Limit: reject the (K+1)th distinct device, or admit and evict the oldest.
-	k, strategy := srv.svc.inboundLimit(srv.inboundId)
+	// K is this ACCOUNT's, which is the inbound's unless the account carries a lower
+	// cap of its own.
+	k, strategy := srv.svc.accountLimit(srv.inboundId, email)
 	evicted, ok := m.admit(sess, k, strategy)
 	if !ok {
 		sshConn.Close()
@@ -498,7 +500,7 @@ func (m *sshManager) enforce(svc *SshService, disabled map[string]bool) {
 				ipFirst[s.srcIP] = s.since
 			}
 		}
-		k, _ := svc.inboundLimit(inboundId)
+		k, _ := svc.accountLimit(inboundId, email)
 		if k <= 0 || len(ipFirst) <= k {
 			continue
 		}

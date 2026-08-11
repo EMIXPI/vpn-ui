@@ -87,7 +87,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
 			def("mtu", 1400),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 			def("clients", noClients()),
 			def("externalProxy", emptyList()),
@@ -102,7 +102,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("dns1", "8.8.8.8"),
 			def("dns2", "8.8.4.4"),
 			def("mtu", 1400),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 			def("clients", noClients()),
 			def("externalProxy", emptyList()),
@@ -161,7 +161,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -182,7 +182,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -205,7 +205,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -233,7 +233,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -254,7 +254,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 			def("externalProxy", emptyList()),
 		}
@@ -283,7 +283,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 			def("externalProxy", emptyList()),
 		}
@@ -308,7 +308,7 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 			def("clientToClient", false),
 			def("crossInbound", false),
 			def("ipRanges", emptyList()),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 		}
 
@@ -318,15 +318,17 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 		// account or a missing entry reads as "no restriction". The secret, the link
 		// endpoints and the ad tag stay per-account, so none of them is seeded here.
 		//
-		// All three modes on and userLimit 0 (no device cap) are the values
+		// All three modes on and userLimit 10 (ten devices per account) are the values
 		// Inbound.MtprotoSettings' constructor uses, so an inbound created through the
-		// API matches one created in the form.
+		// API matches one created in the form. 0 stays settable and does NOT mean
+		// unlimited: effectiveUserLimit reads it as the bounded 16-device block, which is
+		// why it is not the default any more.
 		return []settingDefault{
 			def("modeClassic", true),
 			def("modeSecure", true),
 			def("modeTls", true),
 			def("tlsDomain", "www.google.com"),
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("clients", noClients()),
 			// The inbound-wide link endpoints, overridden per account by the client's
 			// own externalProxy.
@@ -334,13 +336,14 @@ func protocolSettingDefaults(protocol model.Protocol) []settingDefault {
 		}
 
 	case model.SSH:
-		// Inbound.SshSettings. userLimit 0 = no limit, which is what the constructor
-		// (and therefore the Add form) uses. fromJson resolves an ABSENT value to 1
-		// instead, matching effectiveSshK(nil) for inbounds stored before the field
-		// existed; a caller who omits the key here is creating a NEW inbound, so the
-		// constructor's 0 is the right reading.
+		// Inbound.SshSettings. userLimit 10 = ten concurrent devices, which is what the
+		// constructor (and therefore the Add form) uses. fromJson resolves an ABSENT
+		// value to 1 instead, matching effectiveSshK(nil) for inbounds stored before the
+		// field existed; a caller who omits the key here is creating a NEW inbound, so
+		// the constructor's 10 is the right reading. 0 is still settable and SSH is the
+		// one protocol where it really does mean no cap at all.
 		return []settingDefault{
-			def("userLimit", 0),
+			def("userLimit", 10),
 			def("userLimitStrategy", "accept"),
 			def("externalProxy", emptyList()),
 			def("clients", noClients()),

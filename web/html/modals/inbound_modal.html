@@ -424,40 +424,29 @@
         },
         watch: {
             "inModal.inbound.stream.security"(newVal, oldVal) {
-                // Clear flow when security changes from reality/tls to none
+                // Clear flow when security changes from reality/tls to none.
+                // One assignment now that flow lives on the inbound: the old loop
+                // over the clients could not reach the accounts the Clients page
+                // owns, so a leftover vision flow survived on them.
                 if (
                     inModal.inbound.protocol == Protocols.VLESS &&
                     !inModal.inbound.canEnableTlsFlow()
                 ) {
-                    inModal.inbound.settings.vlesses.forEach((client) => {
-                        client.flow = "";
-                    });
+                    inModal.inbound.settings.flow = "";
                 }
             },
             // Ensure testseed is always initialized when vision flow is enabled
-            "inModal.inbound.settings.vlesses": {
-                handler() {
-                    if (
-                        inModal.inbound.protocol === Protocols.VLESS &&
-                        inModal.inbound.settings &&
-                        inModal.inbound.settings.vlesses
-                    ) {
-                        const hasVisionFlow = inModal.inbound.settings.vlesses.some(
-                            (c) =>
-                                c.flow === "xtls-rprx-vision" ||
-                                c.flow === "xtls-rprx-vision-udp443",
-                        );
-                        if (
-                            hasVisionFlow &&
-                            (!inModal.inbound.settings.testseed ||
-                                !Array.isArray(inModal.inbound.settings.testseed) ||
-                                inModal.inbound.settings.testseed.length < 4)
-                        ) {
-                            inModal.inbound.settings.testseed = [900, 500, 900, 256];
-                        }
-                    }
-                },
-                deep: true,
+            "inModal.inbound.settings.flow"() {
+                if (
+                    inModal.inbound.protocol === Protocols.VLESS &&
+                    inModal.inbound.settings &&
+                    inModal.inbound.settings.flow &&
+                    (!inModal.inbound.settings.testseed ||
+                        !Array.isArray(inModal.inbound.settings.testseed) ||
+                        inModal.inbound.settings.testseed.length < 4)
+                ) {
+                    inModal.inbound.settings.testseed = [900, 500, 900, 256];
+                }
             },
             // Re-check the ikev2 server cert's key type when it or the auth mode
             // changes (or the modal reopens); a non-RSA cert warns about iOS.
@@ -630,9 +619,7 @@
                     this.inModal.inbound.protocol == Protocols.VLESS &&
                     !inModal.inbound.canEnableTlsFlow()
                 ) {
-                    this.inModal.inbound.settings.vlesses.forEach((client) => {
-                        client.flow = "";
-                    });
+                    this.inModal.inbound.settings.flow = "";
                 }
                 if (inModal.inbound.stream.network != "kcp") {
                     inModal.inbound.stream.finalmask.udp = [];

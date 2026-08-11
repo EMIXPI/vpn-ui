@@ -268,6 +268,26 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 			inbound.Settings = string(modifiedSettings)
 		}
 
+		// The INBOUND-level flow, folded the same way the per-client one is folded
+		// a few lines down.
+		//
+		// The fold below sits inside the clients loop, so it never saw this key, and
+		// the two are not equally dangerous: the core rejects an unsupported flow
+		// wherever it appears, but a bad value on ONE CLIENT costs that client while
+		// a bad settings.flow makes the core refuse the entire config. That is every
+		// inbound on the box down at once, which is the same failure class as the
+		// blank certificateFile bug.
+		//
+		// "xtls-rprx-vision-udp443" is the only value that gets here: the bundled
+		// core accepts "" and "xtls-rprx-vision" and nothing else (see
+		// third_party/Xray-core/infra/conf/vless.go), and the panel's own picker no
+		// longer offers udp443. This is for a blob that arrived some other way - an
+		// imported database, a hand-edited settings field, a direct API POST - which
+		// is exactly the path the per-client fold already defends against.
+		if flow, ok := settings["flow"].(string); ok && flow == "xtls-rprx-vision-udp443" {
+			settings["flow"] = "xtls-rprx-vision"
+		}
+
 		clients, ok := settings["clients"].([]any)
 		if ok {
 			// filter and clean clients

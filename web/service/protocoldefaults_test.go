@@ -42,7 +42,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
   "mtu": 1400,
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept",
   "clients": [],
   "externalProxy": []
@@ -55,7 +55,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "dns1": "8.8.8.8",
   "dns2": "8.8.4.4",
   "mtu": 1400,
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept",
   "clients": [],
   "externalProxy": []
@@ -97,7 +97,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept"
 }`,
 
@@ -116,7 +116,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept"
 }`,
 
@@ -135,7 +135,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept"
 }`,
 
@@ -158,7 +158,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept"
 }`,
 
@@ -173,7 +173,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept",
   "externalProxy": []
 }`,
@@ -198,7 +198,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept",
   "externalProxy": []
 }`,
@@ -215,7 +215,7 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "clientToClient": false,
   "crossInbound": false,
   "ipRanges": [],
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept"
 }`,
 
@@ -224,13 +224,13 @@ var uiSettingsBlobs = map[model.Protocol]string{
   "modeSecure": true,
   "modeTls": true,
   "tlsDomain": "www.google.com",
-  "userLimit": 0,
+  "userLimit": 10,
   "clients": [],
   "externalProxy": []
 }`,
 
 	model.SSH: `{
-  "userLimit": 0,
+  "userLimit": 10,
   "userLimitStrategy": "accept",
   "externalProxy": [],
   "clients": [],
@@ -350,9 +350,9 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Dns1 != "8.8.8.8" || s.Dns2 != "8.8.4.4" || s.Mtu != 1400 {
 			t.Errorf("dns/mtu: %q %q %d", s.Dns1, s.Dns2, s.Mtu)
 		}
-		// An EXPLICIT 0 (no limit), not an absent field: absent would resolve to a
-		// single device, which is the opposite reading.
-		if s.UserLimit == nil || *s.UserLimit != 0 || s.UserLimitStrategy != "accept" {
+		// An EXPLICIT 10, not an absent field: absent would resolve to a single device,
+		// which is not what a freshly created inbound gets.
+		if s.UserLimit == nil || *s.UserLimit != 10 || s.UserLimitStrategy != "accept" {
 			t.Errorf("user limit: %v %q", s.UserLimit, s.UserLimitStrategy)
 		}
 	})
@@ -363,9 +363,9 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Dns1 != "8.8.8.8" || s.Dns2 != "8.8.4.4" || s.Mtu != 1400 {
 			t.Errorf("dns/mtu: %q %q %d", s.Dns1, s.Dns2, s.Mtu)
 		}
-		// An EXPLICIT 0 (no limit), not an absent field: absent would resolve to a
-		// single device, which is the opposite reading.
-		if s.UserLimit == nil || *s.UserLimit != 0 || s.UserLimitStrategy != "accept" {
+		// An EXPLICIT 10, not an absent field: absent would resolve to a single device,
+		// which is not what a freshly created inbound gets.
+		if s.UserLimit == nil || *s.UserLimit != 10 || s.UserLimitStrategy != "accept" {
 			t.Errorf("user limit: %v %q", s.UserLimit, s.UserLimitStrategy)
 		}
 	})
@@ -393,9 +393,9 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Dns1 != "8.8.8.8" || s.Mtu != 1420 || s.TlsUseFile {
 			t.Errorf("dns/mtu/tls: %q %d %v", s.Dns1, s.Mtu, s.TlsUseFile)
 		}
-		// An EXPLICIT 0 (no limit), not an absent field: absent would resolve to a
-		// single device, which is the opposite reading.
-		if s.UserLimit == nil || *s.UserLimit != 0 || s.UserLimitStrategy != "accept" {
+		// An EXPLICIT 10, not an absent field: absent would resolve to a single device,
+		// which is not what a freshly created inbound gets.
+		if s.UserLimit == nil || *s.UserLimit != 10 || s.UserLimitStrategy != "accept" {
 			t.Errorf("user limit: %v %q", s.UserLimit, s.UserLimitStrategy)
 		}
 	})
@@ -465,10 +465,10 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 	t.Run("ssh", func(t *testing.T) {
 		var s sshSettings
 		unmarshalDefaults(t, model.SSH, &s)
-		// 0 is the constructor's value and means NO limit. It has to arrive as an
-		// explicit 0 rather than an absent key, which effectiveSshK reads as 1.
-		if s.UserLimit == nil || *s.UserLimit != 0 {
-			t.Errorf("userLimit must be an explicit 0 (no limit), got %v", s.UserLimit)
+		// 10 is the constructor's value. It has to arrive as an explicit number rather
+		// than an absent key, which effectiveSshK reads as 1.
+		if s.UserLimit == nil || *s.UserLimit != 10 {
+			t.Errorf("userLimit must be an explicit 10, got %v", s.UserLimit)
 		}
 		if s.UserLimitStrategy != "accept" || s.HostKey != "" {
 			t.Errorf("strategy/hostKey: %q %q", s.UserLimitStrategy, s.HostKey)
@@ -497,10 +497,10 @@ func TestDefaultSettingsForRoundTripsIntoTheProtocolStruct(t *testing.T) {
 		if s.Clients != nil && len(s.Clients) > 0 {
 			t.Error("the defaults seeded a client")
 		}
-		// An explicit 0 (no device cap), not an absent key, which effectiveUserLimit
-		// reads as the legacy single device.
-		if s.UserLimit == nil || *s.UserLimit != 0 {
-			t.Errorf("userLimit must be an explicit 0 (no limit), got %v", s.UserLimit)
+		// An explicit 10, not an absent key, which effectiveUserLimit reads as the
+		// legacy single device.
+		if s.UserLimit == nil || *s.UserLimit != 10 {
+			t.Errorf("userLimit must be an explicit 10, got %v", s.UserLimit)
 		}
 	})
 }
@@ -801,7 +801,7 @@ func TestAddInboundFillsDefaultsForAMinimalBody(t *testing.T) {
 	if !stored.IpsecEnable || len(stored.IpsecPsk) != 16 {
 		t.Errorf("ipsec was not defaulted: enable=%v psk=%q", stored.IpsecEnable, stored.IpsecPsk)
 	}
-	if stored.UserLimit == nil || *stored.UserLimit != 0 || stored.UserLimitStrategy != "accept" {
+	if stored.UserLimit == nil || *stored.UserLimit != 10 || stored.UserLimitStrategy != "accept" {
 		t.Errorf("user limit was not defaulted: %v %q", stored.UserLimit, stored.UserLimitStrategy)
 	}
 	if len(stored.Clients) != 1 || stored.Clients[0].ID != "bob" {

@@ -306,6 +306,68 @@
           :style="{ marginTop: '8px' }"
           message='{{ i18n "pages.clients.credentialWarn" }}'></a-alert>
       </template>
+
+      <!-- Limits: the three caps an inbound sets for everyone on it, overridden for
+           THIS account.
+           Empty means inherit, and that is why every box here is an a-input with a
+           placeholder rather than an a-input-number with a min of 0. a-input-number
+           cannot hold "nothing": it coerces an emptied box to 0, and 0 is a real
+           value in two of these three fields (unlimited), so the control itself would
+           make "inherit" unreachable the moment an operator cleared a box. -->
+      <template v-if="clientMembershipModal.tab === 'limits'">
+        <a-alert type="info" show-icon :style="{ marginBottom: '14px' }"
+          message='{{ i18n "pages.clients.limitsHint" }}'></a-alert>
+
+        <a-row :gutter="12">
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.clients.limitDown" }}</label>
+              <a-input v-model.trim="clientMembershipModal.limitDown"
+                placeholder='{{ i18n "pages.clients.limitInherit" }}'
+                addon-after="KB/s"></a-input>
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.clients.limitUp" }}</label>
+              <a-input v-model.trim="clientMembershipModal.limitUp"
+                placeholder='{{ i18n "pages.clients.limitInherit" }}'
+                addon-after="KB/s"></a-input>
+            </div>
+          </a-col>
+        </a-row>
+        <div class="bo-cf-hint">{{ i18n "pages.clients.limitSpeedDesc" }}</div>
+
+        <a-row :gutter="12" :style="{ marginTop: '14px' }">
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.clients.limitIp" }}</label>
+              <!-- The one field of the three that is NOT nullable. limitIp is a plain
+                   int column that predates the others, so 0 there already means
+                   inherit and there is no third state to express. -->
+              <a-input-number v-model="clientMembershipModal.client.limitIp" :min="0"
+                :style="{ width: '100%' }"></a-input-number>
+              <div class="bo-cf-hint">{{ i18n "pages.clients.limitIpDesc" }}</div>
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="bo-cf-field">
+              <label>{{ i18n "pages.clients.limitDevices" }}</label>
+              <a-input v-model.trim="clientMembershipModal.limitDevices"
+                placeholder='{{ i18n "pages.clients.limitInherit" }}'></a-input>
+              <div class="bo-cf-hint">{{ i18n "pages.clients.limitDevicesDesc" }}</div>
+            </div>
+          </a-col>
+        </a-row>
+
+        <!-- Said here rather than left for the operator to discover, because the
+             field accepts a number bigger than the inbound's and then quietly does
+             not honour it. It cannot: an account's tunnel addresses are laid out on
+             a uniform stride of the inbound's K, so a bigger block for one account
+             would run into the next account's addresses. -->
+        <a-alert type="warning" show-icon :style="{ marginTop: '10px' }"
+          message='{{ i18n "pages.clients.limitDevicesClamp" }}'></a-alert>
+      </template>
     </div>
   </div>
 </a-modal>
@@ -324,6 +386,16 @@
     client: {},
     row: null,
     tab: 'identity',
+    // The three nullable overrides, held as STRINGS while the form is open.
+    //
+    // A string is what lets an empty box mean "inherit" and a typed 0 mean
+    // "unlimited". Held here rather than on `client` because `client` is serialised
+    // straight onto the posted entry, where these have to be a number or a null and
+    // never the empty string. postedLimit() below is the one place that conversion
+    // happens.
+    limitDown: '',
+    limitUp: '',
+    limitDevices: '',
     // A negative expiryTime means "N days from first use" and the clock has not
     // started, which is what this switch writes.
     delayedStart: false,
@@ -334,6 +406,11 @@
       { key: 'identity',    icon: 'user',    label: '{{ i18n "pages.clients.tabIdentity" }}' },
       { key: 'inbounds',    icon: 'cluster', label: '{{ i18n "pages.clients.inbounds" }}' },
       { key: 'credentials', icon: 'key',     label: '{{ i18n "pages.clients.credentials" }}' },
+      // Last because it is the one an operator opens deliberately. Every field in it
+      // is empty by default and empty means "whatever the inbound says", so an
+      // account created without ever visiting this tab behaves exactly as it did
+      // before the tab existed.
+      { key: 'limits',      icon: 'dashboard', label: '{{ i18n "pages.clients.tabLimits" }}' },
     ],
     // Entering the deadline as a date rather than a day count.
     pickDate: false,
@@ -450,6 +527,13 @@
           ? Math.max(0, Math.ceil((row.expiryTime - Date.now()) / 86400000))
           : (row.expiryTime < 0 ? Math.round(Math.abs(row.expiryTime) / 86400000) : 0);
         this.selected = (row.memberships || []).map(m => m.inboundId);
+        // null on the wire is what "inherits the inbound" looks like, and it has to
+        // come back as an EMPTY box rather than as a 0: 0 is a real value in two of
+        // these three fields and means unlimited. Number(null) is 0, so the null
+        // check cannot be skipped by leaning on the string conversion.
+        this.limitDown = this.storedLimit(row.speedLimitDown);
+        this.limitUp = this.storedLimit(row.speedLimitUp);
+        this.limitDevices = this.storedLimit(row.userLimitOverride);
       } else {
         this.client = Object.assign(this.blankClient(), {
           email: this.mint('email'), enable: true,
@@ -459,8 +543,30 @@
         this.delayedStart = false;
         this.selected = [];
         this.seedCredentials();
+        // A new account inherits everything, so the whole tab starts empty.
+        this.limitDown = '';
+        this.limitUp = '';
+        this.limitDevices = '';
       }
       this.visible = true;
+    },
+
+    // A stored override as the box shows it. Absent stays absent; anything else,
+    // including 0, is shown as a number the operator can see and clear.
+    storedLimit(v) {
+      return (v === null || v === undefined) ? '' : String(v);
+    },
+    // ...and the reverse, on the way to the server. An empty or blank box is null,
+    // which the Go side reads as "inherit"; anything that is not a number is also
+    // null rather than a NaN, because a NaN marshals to null anyway and doing it
+    // here keeps the posted entry legible. Negative values are refused server-side
+    // (validateClientLimits) rather than silently clamped, so they are passed
+    // through as typed and come back as a message the operator can act on.
+    postedLimit(v) {
+      const s = String(v === null || v === undefined ? '' : v).trim();
+      if (s === '') return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? Math.trunc(n) : null;
     },
 
     // --- the summary rail -------------------------------------------------
@@ -879,10 +985,22 @@
       const base = Object.assign({}, (this.storedBy && this.storedBy[inboundId]) || {}, {
         email,
         enable: c.enable !== false,
-        // Carried through, never edited here: the device cap belongs to the
-        // inbound (userLimit), and this form must not silently zero a value some
-        // other page set.
+        // The IP cap, edited on the Limits tab. Still a plain int rather than one of
+        // the three nullable overrides below: 0 already means "inherit the inbound"
+        // for this one (resolveIPLimit), so it has no third state to express and
+        // needs no null.
         limitIp: Number(c.limitIp) || 0,
+        // The three nullable overrides. ALWAYS posted, including as null.
+        //
+        // Posting them unconditionally is what makes clearing a box work. The
+        // accounts layer only overwrites a column when the key is MENTIONED on the
+        // posted entry (the presence guard in upsertAccountFromEntry, added after a
+        // partial POST silently wiped subId panel-wide), so omitting a cleared field
+        // would leave the old override in place and the box would spring back full
+        // on the next open.
+        speedLimitDown: this.postedLimit(this.limitDown),
+        speedLimitUp: this.postedLimit(this.limitUp),
+        userLimitOverride: this.postedLimit(this.limitDevices),
         comment: c.comment || '',
         subId: c.subId || '',
         reset: Number(c.reset) || 0,

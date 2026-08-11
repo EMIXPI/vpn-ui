@@ -1377,15 +1377,67 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 
 /* One glyph for the whole account state, with the label in its tooltip. Hue is
    doing real work here (it is the reserved status scale), which is why the
-   protocol chips beside it must not also be carrying identity hues. */
+   protocol chips beside it must not also be carrying identity hues.
+
+   Online is its own HUE now (--info, the blue) rather than the ring it used to
+   be. The ring was the right call while online was orthogonal to health, but it
+   was drawn in --ok-weak around an --ok dot, so at 8px the whole glyph read as
+   one slightly larger green circle: online and merely-enabled were the same
+   colour to anyone not comparing two rows side by side. Blue separates on hue,
+   which survives being 8px wide and survives the eight percent of men who
+   cannot tell the green from the amber. */
 .bo-lamp { width:8px; height:8px; border-radius:50%; flex:0 0 auto; background:var(--off); }
 .bo-lamp--ok { background:var(--ok); }
 .bo-lamp--warn { background:var(--warn); }
 .bo-lamp--error { background:var(--error); }
 .bo-lamp--off { background:var(--off); }
-/* Online is a ring rather than a sixth colour: it is orthogonal to health, so
-   an account can be online AND nearly out of data. */
-.bo-lamp--live { box-shadow:0 0 0 3px var(--ok-weak); }
+.bo-lamp--live { background:var(--info); box-shadow:0 0 0 3px var(--info-weak); }
+/* An account whose clock has not started yet: sold, never connected. It carries
+   NO hue on purpose. It is neither healthy nor unhealthy, and painting it green
+   with everything else is what made "this customer has never once connected"
+   invisible on a page of two hundred rows. A hollow ring reads as "nothing has
+   happened here" in a way no colour does. */
+.bo-lamp--idle { background:transparent; box-shadow:inset 0 0 0 1.5px var(--off); }
+
+/* The lamp breathes so a glance at a still screenshot and a glance at the live
+   page do not tell the same story. Opacity only, and never geometry: the lamp
+   sits in a flex row with the email beside it, so animating width or transform
+   would jitter the text of every row it is in.
+
+   Two speeds carry meaning. Online pulses at roughly a resting heart rate
+   because there is a session behind it right now; every other coloured state
+   drifts at less than half that, enough to read as live without a table of
+   fifty rows becoming a strobe. The idle lamp does not pulse at all, which is
+   the whole point of it.
+
+   Every selector below is qualified with .bo-lamp rather than keying off the
+   modifier alone. The account panel's own lamp (.ai-lamp, further down this
+   file) borrows the --on/--off modifier NAMES without being a .bo-lamp, so an
+   unqualified .bo-lamp--off rule reaches into that modal and animates something
+   that is deliberately a flat 45% grey. */
+@keyframes bo-lamp-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+@keyframes bo-lamp-beat  { 0%,100% { opacity:1; } 50% { opacity:.3;  } }
+.bo-lamp.bo-lamp--ok,
+.bo-lamp.bo-lamp--warn,
+.bo-lamp.bo-lamp--error,
+.bo-lamp.bo-lamp--off { animation:bo-lamp-pulse 2.6s ease-in-out infinite; }
+.bo-lamp.bo-lamp--live { animation:bo-lamp-beat 1.1s ease-in-out infinite; }
+/* Motion is decoration here: the hue already carries the state, and the tooltip
+   carries the word. So an operator who has asked their OS for less of it loses
+   nothing by having it removed entirely.
+
+   Every compound selector above is repeated rather than collapsed to a bare
+   .bo-lamp. A media query adds NO specificity, so `.bo-lamp { animation:none }`
+   in here would score 0,1,0 against the 0,2,0 of `.bo-lamp.bo-lamp--ok` outside
+   it and lose - the rule would read as though it worked and the lamps would go
+   on pulsing at exactly the people who asked them not to. */
+@media (prefers-reduced-motion: reduce) {
+  .bo-lamp.bo-lamp--ok,
+  .bo-lamp.bo-lamp--warn,
+  .bo-lamp.bo-lamp--error,
+  .bo-lamp.bo-lamp--off,
+  .bo-lamp.bo-lamp--live { animation:none; }
+}
 
 .bo-lg-who { display:flex; align-items:center; gap:9px; min-width:0; }
 .bo-lg-names { min-width:0; }
@@ -1425,7 +1477,10 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 
 .bo-lg-seen { font-size:12px; color:var(--text-3); white-space:nowrap; }
-.bo-lg-seen--live { color:var(--ok); }
+/* The word "Online" in the Last Online cell, on the same row as a lamp that is
+   now --info for exactly this state. Green here and blue two cells to the left
+   would be two colours for one fact. */
+.bo-lg-seen--live { color:var(--info); }
 
 .bo-lg-acts { display:inline-flex; align-items:center; gap:6px; justify-content:flex-end; flex-wrap:nowrap; }
 
@@ -1485,12 +1540,19 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
   width:7px; height:7px; border-radius:50%; flex:0 0 auto;
   border:1px solid var(--border); background:transparent;
 }
-.bo-mb-lamp--live { border-color:var(--ok); background:var(--ok); box-shadow:0 0 0 2px var(--ok-weak); }
+/* Blue, not green, and it has to be: this answers the same question the account
+   lamp above answers ("is there a session"), and that lamp is now --info for
+   online. Leaving this one green would put two colours on one page for one
+   meaning, which is how a status scale stops meaning anything.
+   It does NOT pulse. The account lamp is the one an operator scans a whole page
+   of; these are read a handful at a time inside an expander they deliberately
+   opened, and animating them would have every open row twitching. */
+.bo-mb-lamp--live { border-color:var(--info); background:var(--info); box-shadow:0 0 0 2px var(--info-weak); }
 /* Connected, but on one of this account's Xray-native inbounds and the core does
    not say which. Filled in the same hue with no ring: it is the same evidence,
    held less certainly, and giving it a second colour would read as a third state
    an operator has to learn. */
-.bo-mb-lamp--maybe { border-color:var(--ok); background:var(--ok-weak); }
+.bo-mb-lamp--maybe { border-color:var(--info); background:var(--info-weak); }
 .bo-mb-name {
   font-weight:500; color:var(--text);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
@@ -2264,8 +2326,19 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
   width: 8px; height: 8px; border-radius: 50%; flex: none;
   background: var(--text-3); opacity: .5;
 }
-.ai-lamp.bo-lamp--on { background: var(--ok); opacity: 1; box-shadow: 0 0 0 3px var(--ok-weak); }
-.ai-lamp.bo-lamp--off { background: var(--text-3); opacity: .45; }
+/* These two used to be keyed on .bo-lamp--on / .bo-lamp--off, which NOTHING sets:
+   the panel fills this lamp from app.membershipLampClass(), the same function the
+   expander on the Clients page uses, and that returns bo-mb-lamp--live,
+   bo-mb-lamp--maybe or ''. So neither rule ever matched. The generic
+   .bo-mb-lamp--live above did match, but it scores the same 0,1,0 as .ai-lamp and
+   loses on source order to the grey background six lines up - which is why this
+   lamp sat grey for every membership of every account, connected or not, and read
+   as "nobody is ever online". Keyed on the real classes now, and compounded so
+   they outrank .ai-lamp rather than depending on where they sit in the file. */
+.ai-lamp.bo-mb-lamp--live {
+  background: var(--info); opacity: 1; box-shadow: 0 0 0 3px var(--info-weak);
+}
+.ai-lamp.bo-mb-lamp--maybe { background: var(--info-weak); opacity: 1; }
 
 .ai-item-b { padding: 12px; border-top: 1px solid var(--border); background: var(--bg); }
 .ai-card + .ai-card { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
@@ -2303,3 +2376,51 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 .mi-head-sp { flex: 1 1 auto; }
 .mi-wrap .ai-card + .ai-card { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
+
+/* ==================================================================
+ * a-dropdown menus that carry a SELECTION
+ *
+ * Distinct from a-select's dropdown, which this panel has themed for a long
+ * time (.ant-select-dropdown-menu-item-selected, in custom.css). A plain
+ * a-dropdown had never needed a selected state until the Clients page grew a
+ * "Sort by" menu, so the item fell through to ant's own defaults: a muddy
+ * #b3c7c0 fill under white-at-65% text, which is neither of this panel's
+ * themes and is unreadable in both.
+ *
+ * Tokens rather than two theme-specific blocks. --accent and --accent-weak are
+ * redefined per theme on :root, and a dropdown overlay is PORTALLED onto <body>
+ * where no page or #app scoping reaches it, so reading the value off :root is
+ * the only thing that works in the portal AND follows the theme. That is also
+ * why the markup passes the theme class down to the overlay by hand.
+ *
+ * Same shape as the client form's selected tab (.bo-cf-tab[aria-selected]):
+ * accent text on a weak accent wash, weight for the non-colour cue. A filled
+ * accent bar was tried first and read as a hover state on a list that already
+ * highlights on hover.
+ * ==================================================================
+ *
+   The selectors are deliberately over-qualified. Two existing rules already
+   colour this element and both would otherwise win:
+     custom.css  .dark .ant-dropdown-menu .ant-dropdown-menu-item   (0,3,0)
+     ant-bridge  .ant-dropdown-menu-item                            (0,1,0)
+   The second is only one class, but ant-bridge.css is the LAST stylesheet the
+   page loads, so at equal specificity it beats anything written here. Matching
+   0,3,0 clears the bridge rule outright and ties the dark one, which
+   components.css then wins on source order. A bare
+   .ant-dropdown-menu-item-selected was tried and lost in both themes: the fill
+   changed and the text stayed ant's grey. */
+.ant-dropdown-menu .ant-dropdown-menu-item.ant-dropdown-menu-item-selected,
+.ant-dropdown-menu .ant-dropdown-menu-item.ant-dropdown-menu-item-selected > a {
+  color: var(--accent);
+  background-color: var(--accent-weak);
+  font-weight: 600;
+}
+/* Hover on the already-selected row must not fall back to ant's blue-grey.
+   Same fill as at rest, so the row does not appear to change meaning under the
+   pointer: the cursor is the affordance, the colour is the state. One class
+   further up again, to clear custom.css's own dark hover rule. */
+.ant-dropdown-menu .ant-dropdown-menu-item.ant-dropdown-menu-item-selected:hover,
+.ant-dropdown-menu .ant-dropdown-menu-item.ant-dropdown-menu-item-selected > a:hover {
+  color: var(--accent);
+  background-color: var(--accent-weak);
+}

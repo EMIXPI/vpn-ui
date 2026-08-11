@@ -1758,7 +1758,6 @@ func updateSetting(port int, username string, password string, webBasePath strin
 	return nil
 }
 
-// updateCert updates the SSL certificate files for the panel.
 // generateSelfSignedPanelCert generates a self-signed TLS certificate for the
 // panel, writes it next to the binary/DB (config dir + /cert), and points the
 // panel's webCertFile/webKeyFile at it so the web server serves HTTPS. Invoked by
@@ -1774,38 +1773,66 @@ func generateSelfSignedPanelCert() {
 		os.Exit(1)
 	}
 	fmt.Printf("Generated self-signed panel certificate:\n  cert: %s\n  key:  %s\n", certPath, keyPath)
-	// updateCert stores the paths in webCertFile/webKeyFile (+ subscription cert),
-	// which flips the web server to HTTPS on next start.
+	// updateCert stores the paths in webCertFile/webKeyFile, which flips the web
+	// server to HTTPS on next start. It does NOT touch the subscription server:
+	// generating an identity for the panel says nothing about whether the links
+	// operators hand out should be served over TLS, and this one is self-signed, so
+	// every client fetching a subscription over it would have to be told to ignore
+	// the warning.
 	updateCert(certPath, keyPath)
 }
 
-func updateCert(publicKey string, privateKey string) {
-	// Validated BEFORE the database is even opened, because a refused command
-	// should leave nothing behind, not even a freshly initialised DB file.
-	//
-	// The settings form already validates through AllSetting.CheckValid
-	// (web/entity/entity.go:140-152); the CLI did not, and that asymmetry is the
-	// bug. Without this, `vpn-ui cert -webCert ...` accepts a mismatched or
-	// unreadable pair and the damage only surfaces at the NEXT restart, where
-	// web.go:541-556 logs one line and silently comes up on plain HTTP. A silent
-	// downgrade to HTTP hours after the command that caused it is not a failure
-	// anyone connects back to this command.
-	//
-	// It matters more here than in the form: the block below points ALL FOUR
-	// settings at the same pair, so one bad CLI invocation degrades the panel
-	// listener and the subscription listener together.
-	//
-	// service.ValidateCertPair is deliberately the same check the certificate
-	// store uses to gate activation (tls.LoadX509KeyPair PLUS a key-matches-leaf
-	// test), rather than a second, weaker copy of tls.LoadX509KeyPair here.
-	//
-	// Clearing (both empty) skips the check: that is a valid request to stop
-	// serving TLS, and there is nothing to validate.
+// certPairStorable reports whether a pair typed on the command line may be stored,
+// printing the refusal itself when it may not.
+//
+// Validated BEFORE the database is even opened, because a refused command should
+// leave nothing behind, not even a freshly initialised DB file.
+//
+// The settings form already validates through AllSetting.CheckValid
+// (web/entity/entity.go:140-152); the CLI did not, and that asymmetry is the bug.
+// Without this, `vpn-ui cert -webCert ...` accepts a mismatched or unreadable pair
+// and the damage only surfaces at the NEXT restart, where web.go:541-556 logs one
+// line and silently comes up on plain HTTP. A silent downgrade to HTTP hours after
+// the command that caused it is not a failure anyone connects back to this command.
+//
+// service.ValidateCertPair is deliberately the same check the certificate store
+// uses to gate activation (tls.LoadX509KeyPair PLUS a key-matches-leaf test),
+// rather than a second, weaker copy of tls.LoadX509KeyPair here.
+//
+// Clearing (both empty) skips the check: that is a valid request to stop serving
+// TLS, and there is nothing to validate.
+func certPairStorable(publicKey string, privateKey string) bool {
 	if privateKey != "" && publicKey != "" {
 		if err := service.ValidateCertPair(publicKey, privateKey); err != nil {
 			fmt.Printf("refusing to store this certificate: %v\n  cert: %s\n  key:  %s\nNothing was changed.\n", err, publicKey, privateKey)
-			return
+			return false
 		}
+	}
+	return true
+}
+
+// certPairComplete enforces the both-or-neither rule: a certificate without its key
+// is not a thing any listener can serve, and storing half a pair is how a listener
+// comes up on plain HTTP with nothing in the log to explain it.
+func certPairComplete(publicKey string, privateKey string) bool {
+	if (privateKey != "" && publicKey != "") || (privateKey == "" && publicKey == "") {
+		return true
+	}
+	fmt.Println("both public and private key should be entered.")
+	return false
+}
+
+// certRestartNote is the last line of every `vpn-ui cert` invocation. Both listeners
+// read their paths out of the settings once, when they are built, so a change made
+// here is invisible until the panel starts again. Saying so is the difference
+// between an operator who restarts and one who reports that the command did nothing.
+const certRestartNote = "Both listeners read these paths when they start, so this takes effect the next time the panel starts."
+
+// updateCert points the PANEL's listener at a certificate pair. `vpn-ui cert
+// -webCert <cert> -webCertKey <key>`, and the empty pair clears it.
+func updateCert(publicKey string, privateKey string) {
+	if !certPairStorable(publicKey, privateKey) {
+		return
 	}
 
 	err := database.InitDB(config.GetDBPath())
@@ -1814,55 +1841,145 @@ func updateCert(publicKey string, privateKey string) {
 		return
 	}
 
-	if (privateKey != "" && publicKey != "") || (privateKey == "" && publicKey == "") {
-		settingService := service.SettingService{}
-
-		// The subscription server can now hold a DIFFERENT certificate from the panel
-		// (see SSLService.Assign). Read where it points BEFORE the panel pair moves, so
-		// a deliberate split survives this command.
-		oldPanelCert, _ := settingService.GetCertFile()
-		oldSubCert, _ := settingService.GetSubCertFile()
-		subFollowsPanel := strings.TrimSpace(oldSubCert) == "" ||
-			filepath.Clean(oldSubCert) == filepath.Clean(oldPanelCert)
-
-		err = settingService.SetCertFile(publicKey)
-		if err != nil {
-			fmt.Println("set certificate public key failed:", err)
-		} else {
-			fmt.Println("set certificate public key success")
-		}
-
-		err = settingService.SetKeyFile(privateKey)
-		if err != nil {
-			fmt.Println("set certificate private key failed:", err)
-		} else {
-			fmt.Println("set certificate private key success")
-		}
-
-		// Only carry the subscription server along when it was already serving the
-		// panel's certificate. Moving it regardless is what this used to do, and it
-		// would silently undo an operator who had just given the two different names.
-		if !subFollowsPanel {
-			fmt.Printf("subscription server left on its own certificate (%s)\n", oldSubCert)
-			return
-		}
-
-		err = settingService.SetSubCertFile(publicKey)
-		if err != nil {
-			fmt.Println("set certificate for subscription public key failed:", err)
-		} else {
-			fmt.Println("set certificate for subscription public key success")
-		}
-
-		err = settingService.SetSubKeyFile(privateKey)
-		if err != nil {
-			fmt.Println("set certificate for subscription private key failed:", err)
-		} else {
-			fmt.Println("set certificate for subscription private key success")
-		}
-	} else {
-		fmt.Println("both public and private key should be entered.")
+	if !certPairComplete(publicKey, privateKey) {
+		return
 	}
+
+	settingService := service.SettingService{}
+
+	// The subscription server can now hold a DIFFERENT certificate from the panel
+	// (see SSLService.Assign). Read where it points BEFORE the panel pair moves, so
+	// a deliberate split survives this command.
+	//
+	// AN EMPTY subCertFile IS NOT "the subscription server follows the panel". It
+	// used to count as one, and that is how a flag named -webCert came to switch a
+	// subscription server on: subCertFile is "" on every fresh install (its default
+	// in web/service/setting.go), and both installers run this command as part of
+	// one, vpn-ui.sh with `-webCert .../fullchain.pem` after acme.sh and deploy.sh
+	// with `-selfsign`. So every install mounted the panel's certificate on a
+	// subscription listener nobody had asked to serve TLS. Empty means the operator
+	// never gave that listener a certificate, and a flag named -webCert is not them
+	// asking for one; -subCert is.
+	oldPanelCert, _ := settingService.GetCertFile()
+	oldSubCert, _ := settingService.GetSubCertFile()
+	subCert := strings.TrimSpace(oldSubCert)
+	subFollowsPanel := subCert != "" &&
+		filepath.Clean(subCert) == filepath.Clean(strings.TrimSpace(oldPanelCert))
+
+	err = settingService.SetCertFile(publicKey)
+	if err != nil {
+		fmt.Println("set certificate public key failed:", err)
+	} else {
+		fmt.Println("set certificate public key success")
+	}
+
+	err = settingService.SetKeyFile(privateKey)
+	if err != nil {
+		fmt.Println("set certificate private key failed:", err)
+	} else {
+		fmt.Println("set certificate private key success")
+	}
+
+	// Only carry the subscription server along when it was already serving the
+	// panel's certificate, which is the one case where leaving it behind would be
+	// the surprise: those two settings named one file, and now one of them would
+	// name a file this command has just replaced. Every other case says out loud
+	// what it did not touch, because a command that quietly reaches a second
+	// listener is the bug this used to be.
+	if !subFollowsPanel {
+		if subCert == "" {
+			fmt.Println("subscription server: NOT changed, it has no certificate of its own and keeps serving plain HTTP")
+			fmt.Println("  give it one with: vpn-ui cert -subCert <cert> -subCertKey <key>")
+		} else {
+			fmt.Printf("subscription server: NOT changed, it stays on its own certificate (%s)\n", subCert)
+		}
+		fmt.Println(certRestartNote)
+		return
+	}
+	fmt.Println("subscription server: it was pointed at the same file as the panel, so it follows this change")
+
+	err = settingService.SetSubCertFile(publicKey)
+	if err != nil {
+		fmt.Println("set certificate for subscription public key failed:", err)
+	} else {
+		fmt.Println("set certificate for subscription public key success")
+	}
+
+	err = settingService.SetSubKeyFile(privateKey)
+	if err != nil {
+		fmt.Println("set certificate for subscription private key failed:", err)
+	} else {
+		fmt.Println("set certificate for subscription private key success")
+	}
+	fmt.Println(certRestartNote)
+}
+
+// certCommandTargets decides which listeners a `vpn-ui cert` invocation moves, from
+// the set of flags that were actually typed rather than from their values.
+//
+// A bare `vpn-ui cert` keeps meaning "clear the panel's pair", which is what it has
+// always meant and what -reset spells out. The one case that skips the panel is a
+// command that named a subscription flag and no panel flag: there, moving the panel
+// would mean clearing it, and nobody setting the subscription server's certificate
+// is asking for the panel's to be thrown away.
+func certCommandTargets(typed map[string]bool) (panel bool, sub bool) {
+	sub = typed["subCert"] || typed["subCertKey"]
+	panel = !sub || typed["webCert"] || typed["webCertKey"]
+	return panel, sub
+}
+
+// updateSubCert points the SUBSCRIPTION server's listener at a certificate pair,
+// and nothing else. `vpn-ui cert -subCert <cert> -subCertKey <key>`, and the empty
+// pair clears it.
+//
+// It exists because the two listeners are separate (sub/sub.go builds its own from
+// subCertFile/subKeyFile) and the CLI could only ever move the panel's. That left
+// the panel's own command as the only way a script could put TLS on the
+// subscription server, which it did by covering both listeners at once whether or
+// not anyone wanted the second one. Splitting the flags is what lets the panel's
+// stop doing that: an operator who genuinely wants the subscription server on a
+// certificate now has a flag that says so.
+//
+// Validation is the panel's, verbatim. A bad pair degrades this listener to plain
+// HTTP the same way, and it degrades it where far fewer people are looking.
+func updateSubCert(publicKey string, privateKey string) {
+	if !certPairStorable(publicKey, privateKey) {
+		return
+	}
+
+	err := database.InitDB(config.GetDBPath())
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	if !certPairComplete(publicKey, privateKey) {
+		return
+	}
+
+	settingService := service.SettingService{}
+
+	err = settingService.SetSubCertFile(publicKey)
+	if err != nil {
+		fmt.Println("set certificate for subscription public key failed:", err)
+	} else {
+		fmt.Println("set certificate for subscription public key success")
+	}
+
+	err = settingService.SetSubKeyFile(privateKey)
+	if err != nil {
+		fmt.Println("set certificate for subscription private key failed:", err)
+	} else {
+		fmt.Println("set certificate for subscription private key success")
+	}
+
+	panelCert, _ := settingService.GetCertFile()
+	if strings.TrimSpace(panelCert) == "" {
+		fmt.Println("panel: NOT changed, it has no certificate and keeps serving plain HTTP")
+	} else {
+		fmt.Printf("panel: NOT changed, it stays on %s\n", strings.TrimSpace(panelCert))
+	}
+	fmt.Println(certRestartNote)
 }
 
 // GetCertificate displays the current SSL certificate settings if getCert is true.
@@ -2838,6 +2955,8 @@ func main() {
 	var getListen bool
 	var webCertFile string
 	var webKeyFile string
+	var subCertFile string
+	var subKeyFile string
 	var tgbottoken string
 	var tgbotchatid string
 	var enabletgbot bool
@@ -2859,6 +2978,11 @@ func main() {
 	settingCmd.BoolVar(&getCert, "getCert", false, "Display current certificate settings")
 	settingCmd.StringVar(&webCertFile, "webCert", "", "Set path to public key file for panel")
 	settingCmd.StringVar(&webKeyFile, "webCertKey", "", "Set path to private key file for panel")
+	// The subscription server's own pair. Separate flags because it is a separate
+	// listener with separate settings, and because -webCert moving it as well is
+	// exactly the behaviour that had to go.
+	settingCmd.StringVar(&subCertFile, "subCert", "", "Set path to public key file for the subscription server (unset leaves it alone)")
+	settingCmd.StringVar(&subKeyFile, "subCertKey", "", "Set path to private key file for the subscription server")
 	settingCmd.BoolVar(&selfSignCert, "selfsign", false, "Generate a self-signed TLS cert for the panel and enable HTTPS")
 	settingCmd.StringVar(&tgbottoken, "tgbottoken", "", "Set token for Telegram bot")
 	settingCmd.StringVar(&tgbotRuntime, "tgbotRuntime", "", "Set cron time for Telegram bot notifications")
@@ -2875,6 +2999,12 @@ func main() {
 		fmt.Println("    import         import a 3x-ui/vpn-ui backup DB over the current one")
 		fmt.Println("                   (--from <path>; keeps this panel's port/path/cert/secret)")
 		fmt.Println("    setting        set settings")
+		fmt.Println("    cert           set the PANEL's TLS certificate:")
+		fmt.Println("                   -webCert <cert> -webCertKey <key>")
+		fmt.Println("                   (-selfsign generates one, -reset clears it)")
+		fmt.Println("                   the subscription server keeps its own and is left")
+		fmt.Println("                   alone; point it at a pair with:")
+		fmt.Println("                   -subCert <cert> -subCertKey <key>")
 		fmt.Println("    info           show the panel login, access URL and service state")
 		fmt.Println("                   (--json for scripts, --get <field> for one raw value)")
 		fmt.Println("    ctl <cmd>      control the RUNNING panel over its socket:")
@@ -2960,12 +3090,29 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		if reset {
+		// WHICH FLAGS WERE TYPED, not which ones ended up with a value. Visit walks
+		// only the flags actually present on the command line, and that distinction
+		// is load-bearing twice over: it separates `-subCert ""` (clear the
+		// subscription listener) from an absent -subCert (leave it alone), and
+		// without it `vpn-ui cert -subCert c -subCertKey k` would fall through to
+		// updateCert("", "") and CLEAR the panel's certificate as a side effect of
+		// setting the subscription server's, which is this bug wearing the other hat.
+		typed := map[string]bool{}
+		settingCmd.Visit(func(f *flag.Flag) { typed[f.Name] = true })
+		movePanel, moveSub := certCommandTargets(typed)
+
+		switch {
+		case reset:
 			updateCert("", "")
-		} else if selfSignCert {
+		case selfSignCert:
 			generateSelfSignedPanelCert()
-		} else {
-			updateCert(webCertFile, webKeyFile)
+		default:
+			if moveSub {
+				updateSubCert(subCertFile, subKeyFile)
+			}
+			if movePanel {
+				updateCert(webCertFile, webKeyFile)
+			}
 		}
 	case "info":
 		runInfo(os.Args[2:])

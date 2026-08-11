@@ -246,19 +246,14 @@
             </a-textarea>
         </a-form>
     </a-form-item>
-    <a-form-item v-if="inbound.canEnableTlsFlow()" label="Flow">
-        <a-select
-            v-model="client.flow"
-            :dropdown-class-name="themeSwitcher.currentTheme"
-        >
-            <a-select-option value="" selected
-                >{{ i18n "none" }}</a-select-option
-            >
-            <a-select-option v-for="key in TLS_FLOW_CONTROL" :value="key"
-                >[[ key ]]</a-select-option
-            >
-        </a-select>
-    </a-form-item>
+    <!-- The per-client Flow picker used to sit here. It is gone rather than merely
+         hidden: flow now belongs to the inbound (form/protocol/vless.html) and every
+         client entry is a mirror of that one value, so a picker here would let an
+         operator choose something the next save silently overwrites. It was only
+         ever reachable for the seed client of a NEW vless inbound anyway, since the
+         clients moved to their own page and vless.html lists them read-only once the
+         inbound exists, which is what left an existing inbound with no way to turn
+         vision on at all. -->
     <a-form-item>
         <template slot="label">
             <a-tooltip>

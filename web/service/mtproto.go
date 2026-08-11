@@ -136,6 +136,16 @@ type mtprotoClient struct {
 	Secret string `json:"secret"` // 32 hex chars, the credential
 	Enable bool   `json:"enable"`
 
+	// This account's own device cap. nil = inherit the inbound's User Limit, and it can
+	// only LOWER it (resolveUserLimitOverride).
+	//
+	// A DIFFERENT key from the "userLimit" this service already mirrors onto every
+	// client: that one is the INBOUND's cap written down for a downgrade, rewritten by
+	// MirrorInboundSettingsToClients on every sweep and read back by deriveMtprotoPolicy
+	// as the MAX across accounts. Overloading it would make an operator's per-account
+	// value both disappear within seconds and raise the inbound's own cap on its way out.
+	UserLimitOverride *int `json:"userLimitOverride"`
+
 	// AdtagEnable/Adtag credit sponsored channels to THIS account's tag, from
 	// @MTProxybot. Genuinely per-account storage (telemt's [access.user_ad_tags] is a
 	// per-user map, so two accounts can carry different tags), but NOT a per-account
@@ -394,10 +404,10 @@ func deriveMtprotoPolicy(clients []mtprotoLegacyClient) MtprotoInboundPolicy {
 		// Either there were no accounts, or every one of them predates the field. An
 		// absent per-client value resolved to 1 device (effectiveUserLimit), so an
 		// explicit 1 keeps the cap exactly where it was; only a truly empty inbound gets
-		// the fresh-inbound default of 0 (no limit).
+		// the fresh-inbound default of 10 devices.
 		legacy := 1
 		if len(clients) == 0 {
-			legacy = 0
+			legacy = 10
 		}
 		policy.UserLimit = &legacy
 	}
@@ -1110,10 +1120,17 @@ func (s *MtprotoService) buildServerConfig(inbound *model.Inbound, settings *mtp
 	// account natively, which is the closest a relay gets to a tunnel-IP User Limit.
 	// The inbound's value is the PER-ACCOUNT cap (the same reading l2tp/wgc/gre use),
 	// so it is written once per account rather than shared between them.
+	//
+	// Which is also what makes an account's own lower cap free here: the map already
+	// has a row per account, so an override changes one number in a file telemt was
+	// going to be handed anyway. It can only lower the inbound's
+	// (resolveUserLimitOverride) - nothing about a relay forces that, but one rule
+	// across the panel is worth more than mtproto being the exception.
 	deviceCap := effectiveUserLimit(settings.UserLimit)
 	b.WriteString("[access.user_max_unique_ips]\n")
 	for _, c := range clients {
-		b.WriteString(fmt.Sprintf("%q = %d\n", tomlEscape(c.Email), deviceCap))
+		b.WriteString(fmt.Sprintf("%q = %d\n", tomlEscape(c.Email),
+			resolveUserLimitOverride(deviceCap, c.UserLimitOverride)))
 	}
 	b.WriteString("\n")
 

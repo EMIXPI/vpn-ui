@@ -661,6 +661,13 @@ type WgcClientConfig struct {
 	Remark      string `json:"remark"`    // external-proxy label (empty for the default endpoint)
 	PublicKey   string `json:"publicKey"` // the account's public key (identifier)
 	Config      string `json:"config"`    // the full wg .conf text
+	// PreSharedKey is THIS device's own preshared key, empty when PSK is off, and is the
+	// same value the Config text above carries on its PresharedKey= line. It is repeated
+	// as a field because a caller that prints the key as its own row (the account export's
+	// PSK row) would otherwise have to parse it back out of the .conf, and there is no
+	// other source for it: each device of a multi-device account has a DIFFERENT key, so
+	// the account's legacy top-level psk is not a stand-in for the device's.
+	PreSharedKey string `json:"psk"`
 	// Host/Port mirror this config's own Endpoint= (the target this specific config
 	// dials, an external-proxy relay or the panel host). Callers that print a separate
 	// "Server" summary row (the account export) must read it from here rather than
@@ -746,6 +753,13 @@ func (s *WgcService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 				continue
 			}
 			cidr := ips[d] + "/32"
+			// Resolved once per device, not per endpoint: the key belongs to the device, and
+			// every endpoint config of that device carries the same one. Same shape (and same
+			// gate) as RenderClientParams below, which is what keeps the two in lock-step.
+			psk := ""
+			if settings.PskEnable && strings.TrimSpace(dev.Psk) != "" {
+				psk = dev.Psk
+			}
 			for ti, t := range targets {
 				var b strings.Builder
 				b.WriteString("[Interface]\n")
@@ -755,8 +769,8 @@ func (s *WgcService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 				b.WriteString(fmt.Sprintf("MTU = %d\n", settings.mtu()))
 				b.WriteString("\n[Peer]\n")
 				b.WriteString("PublicKey = " + settings.ServerPubKey + "\n")
-				if settings.PskEnable && strings.TrimSpace(dev.Psk) != "" {
-					b.WriteString("PresharedKey = " + dev.Psk + "\n")
+				if psk != "" {
+					b.WriteString("PresharedKey = " + psk + "\n")
 				}
 				b.WriteString(fmt.Sprintf("Endpoint = %s:%d\n", t.host, t.port))
 				b.WriteString("AllowedIPs = 0.0.0.0/0\n")
@@ -772,13 +786,14 @@ func (s *WgcService) RenderClientConfigs(inbound *model.Inbound, email, endpoint
 					remark += t.remark
 				}
 				out = append(out, WgcClientConfig{
-					DeviceIndex: d*len(targets) + ti,
-					IP:          cidr,
-					Remark:      remark,
-					PublicKey:   dev.PubKey,
-					Config:      b.String(),
-					Host:        t.host,
-					Port:        t.port,
+					DeviceIndex:  d*len(targets) + ti,
+					IP:           cidr,
+					Remark:       remark,
+					PublicKey:    dev.PubKey,
+					Config:       b.String(),
+					PreSharedKey: psk,
+					Host:         t.host,
+					Port:         t.port,
 				})
 			}
 		}

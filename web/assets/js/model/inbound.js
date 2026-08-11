@@ -2399,12 +2399,17 @@ class Inbound extends XrayCommonClass {
         return false;
     }
 
-    // Vision seed applies only when vision flow is selected
+    // Vision seed applies only when vision flow is selected.
+    //
+    // Asks the INBOUND, not the clients. flow used to be a per-client field and this
+    // read "does some client have one", which stopped being answerable once the
+    // clients moved to the Clients page: an inbound whose accounts were all added
+    // there carried no flow anywhere, so the seed silently stopped being emitted for
+    // an inbound that was plainly using vision.
     canEnableVisionSeed() {
         if (!this.canEnableTlsFlow()) return false;
-        const clients = this.settings?.vlesses;
-        if (!Array.isArray(clients)) return false;
-        return clients.some(c => c?.flow === TLS_FLOW_CONTROL.VISION || c?.flow === TLS_FLOW_CONTROL.VISION_UDP443);
+        const flow = this.settings?.flow;
+        return flow === TLS_FLOW_CONTROL.VISION || flow === TLS_FLOW_CONTROL.VISION_UDP443;
     }
 
     // AnyTLS belongs here and naive/tuic do not: REALITY is transport-layer, so it
@@ -3130,7 +3135,7 @@ class Inbound extends XrayCommonClass {
         if (Inbound.protocolRequiresTls(json.protocol) && stream.security !== 'tls') {
             stream.security = 'tls';
         }
-        return new Inbound(
+        const inbound = new Inbound(
             json.port,
             json.listen,
             json.protocol,
@@ -3139,7 +3144,32 @@ class Inbound extends XrayCommonClass {
             json.tag,
             Sniffing.fromJson(json.sniffing),
             json.clientStats
-        )
+        );
+        // The second case where rewriting on load is right, and for the same reason:
+        // the form has no control that could describe or undo this state.
+        //
+        // VLESSSettings.fromJson LIFTS a legacy per-client flow up to the inbound when
+        // settings.flow is absent, which is what carries an existing vision inbound
+        // through this change. But it sees only the settings blob, so it cannot ask
+        // whether the TRANSPORT supports flow, and canEnableTlsFlow needs the stream -
+        // which does not exist until here.
+        //
+        // Left ungated, a legacy VLESS inbound on ws or grpc whose clients carried a
+        // stray flow has it promoted to the inbound and then MIRRORED ONTO EVERY
+        // CLIENT on the next save. That turns one broken client into all of them, and
+        // it is unfixable from the form: the picker is hidden while canEnableTlsFlow
+        // is false, and the wipe handlers only fire on a security or network CHANGE,
+        // so opening the inbound and saving it without touching either preserves the
+        // value. The core validates the flow STRING and not the transport it rides on,
+        // so nothing downstream refuses it either - the accounts simply connect and
+        // then stall, with nothing in any log naming the reason.
+        //
+        // Clearing is the whole fix, and it is not lossy: flow on a transport that
+        // cannot carry it was never doing anything.
+        if (json.protocol === Protocols.VLESS && inbound.settings && !inbound.canEnableTlsFlow()) {
+            inbound.settings.flow = '';
+        }
+        return inbound;
     }
 
     toJson() {
@@ -3395,6 +3425,7 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
         fallbacks = [],
         selectedAuth = undefined,
         testseed = [900, 500, 900, 256],
+        flow = '',
     ) {
         super(protocol);
         this.vlesses = vlesses;
@@ -3403,6 +3434,15 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
         this.fallbacks = fallbacks;
         this.selectedAuth = selectedAuth;
         this.testseed = testseed;
+        // flow belongs to the INBOUND and applies to every account served on it.
+        // xray-core reads settings.flow as the default for a client that carries
+        // none, so this alone would steer the data plane, but toJson() mirrors it
+        // onto every client anyway: all four share-link generators (this file's
+        // genLink, sub/subService.go, sub/subJsonService.go, sub/subClashService.go)
+        // read the per-client field, and an inbound-only value would drop "flow="
+        // from every link while the tunnel itself kept working, which presents as
+        // vision clients that connect and then stall.
+        this.flow = flow;
     }
 
     addFallback() {
@@ -3420,14 +3460,39 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
             testseed = json.testseed;
         }
 
+        const clients = (json.clients || []).map(client => Inbound.VLESSSettings.VLESS.fromJson(client));
+
+        // An inbound saved by an earlier build has no settings.flow and carries the
+        // value on its clients instead, so the first client that has one is lifted
+        // into the inbound field. Without the lift, opening such an inbound would
+        // show flow as None and the very next save would mirror that None over every
+        // client, quietly turning vision off on a working REALITY inbound.
+        //
+        // The udp443 spelling folds down to plain vision on the way up. xray-core
+        // accepts only "" and "xtls-rprx-vision" for settings.flow, and a value it
+        // refuses THERE refuses the whole config rather than one client, which is a
+        // panel-wide outage; web/service/xray.go already folds the same spelling for
+        // client entries, so this only moves that rule one level up.
+        let flow = typeof json.flow === 'string' ? json.flow : '';
+        if (flow === '') {
+            const carried = clients.find(client => client.flow);
+            if (carried) {
+                flow = carried.flow;
+            }
+        }
+        if (flow === TLS_FLOW_CONTROL.VISION_UDP443) {
+            flow = TLS_FLOW_CONTROL.VISION;
+        }
+
         const obj = new Inbound.VLESSSettings(
             Protocols.VLESS,
-            (json.clients || []).map(client => Inbound.VLESSSettings.VLESS.fromJson(client)),
+            clients,
             json.decryption,
             json.encryption,
             Inbound.VLESSSettings.Fallback.fromJson(json.fallbacks || []),
             json.selectedAuth,
-            testseed
+            testseed,
+            flow
         );
         return obj;
     }
@@ -3453,9 +3518,26 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
             json.selectedAuth = this.selectedAuth;
         }
 
-        // Only include testseed if at least one client has a flow set
-        const hasFlow = this.vlesses && this.vlesses.some(vless => vless.flow && vless.flow !== '');
-        if (hasFlow && this.testseed && this.testseed.length >= 4) {
+        // The inbound-level default, plus a copy on every client. The copy is what
+        // keeps the share links right (they all read the per-client field) and what
+        // lets a rollback to a build that never knew about settings.flow still find
+        // the value where it expects it. It also means the panel and the core agree
+        // instead of relying on the core's own empty-client fallback.
+        //
+        // The mirror is unconditional, including the empty string, because clearing
+        // flow on the inbound has to actually clear it: writing only non-empty values
+        // would leave every client holding the vision they were last saved with and
+        // make the picker look ignored.
+        if (this.flow) {
+            json.flow = this.flow;
+        }
+        json.clients.forEach(client => {
+            client.flow = this.flow || '';
+        });
+
+        // Only include testseed when the inbound is actually using a flow. Asking the
+        // inbound rather than the clients for the same reason canEnableVisionSeed does.
+        if (this.flow && this.testseed && this.testseed.length >= 4) {
             json.testseed = this.testseed;
         }
 
@@ -4011,7 +4093,7 @@ Inbound.L2tpSettings = class extends Inbound.Settings {
     dns1 = "8.8.8.8",
     dns2 = "8.8.4.4",
     mtu = 1400,
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
     l2tpUsers = [new Inbound.L2tpSettings.L2tpUser()],
     externalProxy = [],
@@ -4200,7 +4282,7 @@ Inbound.PptpSettings = class extends Inbound.Settings {
     dns1 = "8.8.8.8",
     dns2 = "8.8.4.4",
     mtu = 1400,
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
     pptpUsers = [new Inbound.PptpSettings.PptpUser()],
     externalProxy = [],
@@ -4392,7 +4474,7 @@ Inbound.OpenvpnSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
     separatePorts = false,
     tlsUseFile = false,
@@ -4719,7 +4801,7 @@ Inbound.OcservSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
   ) {
     super(protocol);
@@ -4924,7 +5006,7 @@ Inbound.SstpSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
   ) {
     super(protocol);
@@ -5134,7 +5216,7 @@ Inbound.Ikev2Settings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
   ) {
     super(protocol);
@@ -5351,7 +5433,7 @@ Inbound.WgcSettings = class extends Inbound.Settings {
     clientToClient = false,
     crossInbound = false,
     ipRanges = [],
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
     externalProxy = [],
   ) {
@@ -5584,11 +5666,11 @@ Inbound.AwgSettings = class extends Inbound.Settings {
     crossInbound = false,
     ipRanges = [],
     // User Limit K = how many DEVICES an account gets, and the panel provisions one
-    // keypair + one config + one /32 per device. 1 is the default because 0 means the
+    // keypair + one config + one /32 per device. 10 is the default because 0 means the
     // maximum (64), which under that rule would mint 64 keypairs and render 64 configs
     // for every account, and would fit only ~3 accounts per /24. Raise it to the number
     // of devices the account should actually run.
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
     externalProxy = [],
   ) {
@@ -5853,7 +5935,7 @@ Inbound.GreSettings = class extends Inbound.Settings {
     // K consecutive inner addresses (one per peer). The cap is structural: only K
     // addresses exist, so there is nothing to enforce at connect time. GRE has no session
     // and no auth event, so a runtime limit could not be enforced anyway.
-    userLimit = 0,
+    userLimit = 10,
     // Kept for parity with the shared form; GRE enforces K structurally, so there is no
     // "evict the oldest" admission decision to make.
     userLimitStrategy = "accept",
@@ -6104,7 +6186,7 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
     modeSecure = true,
     modeTls = true,
     tlsDomain = "www.google.com",
-    userLimit = 0,
+    userLimit = 10,
     mtprotoUsers = [new Inbound.MtprotoSettings.MtprotoUser()],
     externalProxy = [],
   ) {
@@ -6162,7 +6244,7 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
         modeSecure: true,
         modeTls: true,
         tlsDomain: "www.google.com",
-        userLimit: 0,
+        userLimit: 10,
       };
     }
     const clients = Array.isArray(json.clients) ? json.clients : [];
@@ -6195,9 +6277,9 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
       out.modeClassic = out.modeSecure = out.modeTls = true;
     }
     if (out.userLimit === null) {
-      // No accounts at all is a fresh inbound (no limit); accounts that all predate the
-      // field each meant one device, so an explicit 1 keeps the cap where it was.
-      out.userLimit = clients.length === 0 ? 0 : 1;
+      // No accounts at all is a fresh inbound (ten devices); accounts that all predate
+      // the field each meant one device, so an explicit 1 keeps the cap where it was.
+      out.userLimit = clients.length === 0 ? 10 : 1;
     }
     if (!out.tlsDomain) out.tlsDomain = "www.google.com";
     return out;
@@ -6206,10 +6288,10 @@ Inbound.MtprotoSettings = class extends Inbound.Settings {
   static fromJson(json = {}) {
     // Resolved from the accounts rather than defaulted, because this form POSTS BACK
     // what it read: falling back to the fresh-inbound values here would widen an
-    // operator's narrower set to all three modes and no device cap the first time anyone
-    // opened an un-migrated inbound and pressed Save, with nothing left to recover it
-    // from. The backend's startup pass (LiftClientSettingsToInbound) resolves it the
-    // same way, so this only covers the window before that lands.
+    // operator's narrower set to all three modes and the ten-device default the first
+    // time anyone opened an un-migrated inbound and pressed Save, with nothing left to
+    // recover it from. The backend's startup pass (LiftClientSettingsToInbound) resolves
+    // it the same way, so this only covers the window before that lands.
     const legacy = Inbound.MtprotoSettings.legacyPolicy(json);
     return new Inbound.MtprotoSettings(
       Protocols.MTPROTO,
@@ -6449,7 +6531,7 @@ Inbound.MtprotoSettings.MtprotoUser = class extends XrayCommonClass {
 Inbound.SshSettings = class extends Inbound.Settings {
   constructor(
     protocol,
-    userLimit = 0,
+    userLimit = 10,
     userLimitStrategy = "accept",
     externalProxy = [],
     sshUsers = [new Inbound.SshSettings.SshUser()],
@@ -6757,7 +6839,7 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
         noKernelTun = false,
         wgClients = [],
         clientNetwork = '10.10.0.0/24',
-        userLimit = 0,
+        userLimit = 10,
     ) {
         super(protocol);
         this.mtu = mtu;

@@ -208,13 +208,62 @@ func renderClientEntry(account *model.Account, membership *model.AccountInbound,
 	entry["tgId"] = account.TgID
 	entry["comment"] = account.Comment
 
+	// The three nullable limit overrides, projected onto the entry because THE ENTRY
+	// IS WHERE EVERY READER LOOKS. The columns on the account are the editable copy;
+	// none of the enforcement paths ever open that table:
+	//
+	//   - loadSpeedLimitPolicies (speedlimit.go) decodes speedLimitDown/speedLimitUp
+	//     out of the inbound's settings blob, and publishes the resolved rate to the
+	//     core through the sidecar
+	//   - the four device-cap clamp sites each unmarshal userLimitOverride from the
+	//     same blob: radius.go BuildVpnEmailToIPMap, openvpn.go writeClientConfigDir,
+	//     ssh.go inboundLimit, mtproto.go user_max_unique_ips
+	//
+	// Without this the whole feature is inert: the form saves a value, the Clients
+	// page reads it back and shows it, and nothing anywhere throttles or caps.
+	//
+	// DELETED rather than written as null when the override is nil, and that is what
+	// makes the accounts migration's round-trip verification pass. It re-renders every
+	// stored entry through this function and requires the result to equal what is on
+	// disk; an entry that never had these keys must not grow three nulls, or check 3
+	// in verifyAccountsPass reports a projection bug and rolls the migration back.
+	// Client.SpeedLimitDown and friends carry omitempty for the same reason, so the
+	// struct path and this map path agree about what "no override" looks like.
+	setOverride := func(key string, v *int) {
+		if v == nil {
+			delete(entry, key)
+			return
+		}
+		// float64 and not int: every other number in this map arrives from
+		// encoding/json as a float64, and projectionRoundTrips compares the decoded
+		// values. An int here would differ from its own stored form on the very next
+		// read and fail a comparison that is otherwise about meaning.
+		entry[key] = float64(*v)
+	}
+	setOverride("speedLimitDown", account.SpeedLimitDown)
+	setOverride("speedLimitUp", account.SpeedLimitUp)
+	setOverride("userLimitOverride", account.UserLimitOverride)
+
 	applyAccountCredential(entry, account, inbound)
 
-	// vless carries a per-membership flow override; every other protocol leaves
-	// whatever the entry already had.
+	// vless flow is an INBOUND setting that every account on the inbound inherits,
+	// with the per-membership column left as an override for the rare account that
+	// needs its own. Every other protocol leaves whatever the entry already had.
+	//
+	// The inbound-level default is what fixes a live outage: SetMemberships creates
+	// memberships with Flow unset, so on a REALITY+TCP inbound the seed client had
+	// vision and every account added from the Clients page afterwards projected NO
+	// flow at all. Those accounts connected and then stalled, with nothing in any
+	// log naming the reason.
+	//
+	// The value is written onto the client entry even though the core would fall
+	// back to settings.flow by itself, because the four share-link generators
+	// (inbound.js genLink, sub/subService.go, sub/subJsonService.go,
+	// sub/subClashService.go) all read the per-client field and would otherwise emit
+	// links with no flow= for a data plane that requires it.
 	if protocol == model.VLESS {
-		if membership.Flow != "" {
-			entry["flow"] = membership.Flow
+		if flow := resolveVlessFlow(inbound, membership); flow != "" {
+			entry["flow"] = flow
 		} else {
 			delete(entry, "flow")
 		}
@@ -504,6 +553,30 @@ func (s *AccountService) upsertAccountFromEntry(tx *gorm.DB, entry map[string]an
 	if _, mentioned := entry["subId"]; !mentioned {
 		updated.SubID = account.SubID
 	}
+	// The three nullable limit overrides need the SAME guard, and need it more than
+	// subId does, because nearly every write reaches here without them.
+	//
+	// newAccountFromEntry reads an absent key as nil, and nil is a real value on these
+	// columns: it means "inherit the inbound". So without this, any client write that
+	// does not carry the keys silently clears the overrides - and the writes that do
+	// not carry them are the COMMON ones, not the exotic ones: the enable toggle on
+	// the Clients page, a bulk operation, a traffic reset, any script posting a
+	// partial client. An operator would set a customer's speed limit, flip them off
+	// and on again, and find the limit gone with nothing having reported a change.
+	//
+	// An entry that carries an explicit null still clears the override, which is what
+	// the Limits tab posts when the box is emptied. Mentioned-but-null and absent have
+	// to stay different, which is exactly why the test is on PRESENCE and not on the
+	// decoded value.
+	if _, mentioned := entry["speedLimitDown"]; !mentioned {
+		updated.SpeedLimitDown = account.SpeedLimitDown
+	}
+	if _, mentioned := entry["speedLimitUp"]; !mentioned {
+		updated.SpeedLimitUp = account.SpeedLimitUp
+	}
+	if _, mentioned := entry["userLimitOverride"]; !mentioned {
+		updated.UserLimitOverride = account.UserLimitOverride
+	}
 	// Then let THIS entry set the fields its own protocol owns. An edit that
 	// rotates a credential has to reach the account, or the projection would write
 	// the stale one straight back over it on the next membership change.
@@ -643,6 +716,16 @@ func (s *AccountService) upsertMembership(tx *gorm.DB, accountId int, inbound *m
 	}
 	if inbound.Protocol == model.VLESS {
 		flow, _ := entry["flow"].(string)
+		// Only a flow that DIFFERS from the inbound-level default is recorded as an
+		// override. Every client entry now carries a mirror of that default, so
+		// storing it verbatim would turn the mirror into an override on every
+		// account, and the next change to the inbound-level picker would then be
+		// ignored by all of them: renderClientEntry prefers the column. Storing ""
+		// instead keeps "override" meaning what the column says it means, and heals
+		// rows written before this by clearing them on the next sync.
+		if flow == inboundVlessFlow(inbound) {
+			flow = ""
+		}
 		membership.Flow = flow
 	}
 	if blob, err := json.Marshal(entry); err == nil {
@@ -693,6 +776,113 @@ func (s *AccountService) pruneOrphanAccounts(tx *gorm.DB) error {
 		return db.Where("1 = 1").Delete(&model.Account{}).Error
 	}
 	return db.Where("id NOT IN ?", live).Delete(&model.Account{}).Error
+}
+
+// inboundVlessFlow is the inbound-level vless flow, which every account served on
+// that inbound inherits unless its membership carries an override.
+//
+// The udp443 spelling is folded down to plain vision. xray-core accepts exactly ""
+// and "xtls-rprx-vision" and refuses everything else, and at settings level a
+// refusal takes the WHOLE config down rather than one client, so a legacy value
+// lifted out of an old inbound must not be handed back verbatim. web/service/xray.go
+// already applies the same fold to client entries on the way to the core; this is
+// that rule one level up. The panel only ever writes the two accepted values, so
+// this covers a hand-edited settings blob.
+//
+// Reading it out of the settings blob rather than off a struct field is deliberate:
+// nothing in Go needs to write it, and adding a field would mean teaching every
+// path that round-trips an inbound about a key that only the form and the core care
+// about. shadowsocksKeySize below parses the same blob the same way.
+func inboundVlessFlow(inbound *model.Inbound) string {
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+		return ""
+	}
+	flow, _ := settings["flow"].(string)
+	if flow == "" {
+		return ""
+	}
+	// The transport gate lives HERE, on the inbound-level default, and deliberately
+	// not on the resolved answer. See resolveVlessFlow for why that distinction is
+	// load-bearing.
+	//
+	// xtls-rprx-vision rides raw TCP under tls or reality and nothing else, which is
+	// the rule the form's canEnableTlsFlow() applies before it will even show the
+	// picker. The CORE does not enforce it: it validates the flow string and never
+	// asks what stream it is riding, so a vless inbound carrying vision over ws or
+	// grpc is accepted, comes up, and then stalls every account on it with nothing in
+	// any log naming the reason. The browser model clears this case on load, so the
+	// panel cannot produce it; this is for the blob that never went through a browser
+	// at all - an imported database, a hand-edited settings field, a direct API POST.
+	//
+	// Gating the DEFAULT is what earns its keep, because the default is mirrored onto
+	// every account on the inbound: ungated, one stray value in a stored blob turns
+	// one broken account into all of them.
+	if !vlessFlowFitsStream(inbound.StreamSettings) {
+		return ""
+	}
+	if flow == "xtls-rprx-vision-udp443" {
+		return "xtls-rprx-vision"
+	}
+	return flow
+}
+
+// resolveVlessFlow is the flow ONE membership's client entry should end up carrying,
+// and it is the only thing that should ever decide that. inboundVlessFlow above is
+// the inbound's DECLARED value and is not the answer on its own.
+//
+// A per-membership override is taken AS STORED, and is deliberately not put through
+// the transport gate that inboundVlessFlow applies to the inbound's own value.
+//
+// That asymmetry is not an oversight, and it was wrong the other way round once. The
+// gate used to sit here, on the resolved answer, on the reasoning that an override
+// would otherwise walk straight past it. What that missed is that this function is
+// not only consulted when writing something new: the accounts migration re-renders
+// every stored client entry through it and REQUIRES the result to equal what is
+// already on disk (verifyAccountsPass, check 3). Gating the override made the
+// projection delete a flow that a stored entry legitimately carried, the round-trip
+// verification correctly reported that as a projection bug, and the ENTIRE accounts
+// migration rolled back - on any panel holding a vless inbound whose streamSettings
+// do not parse as tcp plus tls or reality, which includes one with no streamSettings
+// at all. Aborting a whole migration is far worse than the case it was defending.
+//
+// Nothing is lost by trusting the override. A stored per-membership flow on a
+// transport that cannot carry it is broken for that ONE account and was already
+// broken before any of this; leaving it alone is the status quo, not a new failure.
+// The value that gets MIRRORED ONTO EVERY ACCOUNT is the inbound's, and that one is
+// gated, which is where the 1-becomes-N risk actually lives.
+//
+// The udp443 fold IS repeated here, because an override column can hold the legacy
+// spelling too and it reaches the core by a different path from the inbound default.
+// A fold is safe where the gate was not: it rewrites a value the core would refuse
+// into the one it accepts, which is what web/service/xray.go already does to the same
+// key on the way out, so the round trip still agrees with what is stored.
+func resolveVlessFlow(inbound *model.Inbound, membership *model.AccountInbound) string {
+	flow := membership.Flow
+	if flow == "" {
+		flow = inboundVlessFlow(inbound)
+	}
+	if flow == "xtls-rprx-vision-udp443" {
+		return "xtls-rprx-vision"
+	}
+	return flow
+}
+
+// vlessFlowFitsStream reports whether an inbound's transport can carry a vless flow.
+//
+// Absent or unparseable stream settings answer NO. That is the safe direction: the
+// only thing this gates is whether a flow is projected onto every account, and
+// declining to project one costs a working inbound nothing that the operator cannot
+// restore from the form, while projecting a wrong one silently breaks every account
+// served by that inbound.
+func vlessFlowFitsStream(streamSettings string) bool {
+	var stream map[string]any
+	if err := json.Unmarshal([]byte(streamSettings), &stream); err != nil {
+		return false
+	}
+	network, _ := stream["network"].(string)
+	security, _ := stream["security"].(string)
+	return network == "tcp" && (security == "tls" || security == "reality")
 }
 
 // shadowsocksKeySize is the exact PSK length the inbound's cipher requires, in

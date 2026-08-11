@@ -326,6 +326,9 @@ type openvpnClient struct {
 	Email    string `json:"email"`    // tracking identifier
 	Enable   bool   `json:"enable"`
 	Slot     *int   `json:"slot"`     // address-pool slot; nil = fall back to list index
+	// This account's own device cap. nil = inherit the inbound's K, and it can only
+	// LOWER it: see resolveUserLimitOverride.
+	UserLimitOverride *int `json:"userLimitOverride"`
 }
 
 // SetRadius configures the RADIUS service and shared secret for OpenVPN authentication.
@@ -575,6 +578,15 @@ func (s *OpenVpnService) writeClientConfigDir(inbound *model.Inbound, settings *
 			}
 		} else {
 			ips = vpnAccountDeviceIPs(subnets, slot, k)
+			// The account's own cap, applied by TRIMMING the block the inbound's K
+			// laid out. The connect hook leases a free IP from whatever this file
+			// lists and rejects (or evicts) once they are all held, so a shorter list
+			// is the whole of the enforcement. Never a WIDER one: the addresses are a
+			// fixed grid on a stride of K, so extra entries here would be the next
+			// account's addresses (see resolveUserLimitOverride).
+			if kAcct := resolveUserLimitOverride(k, client.UserLimitOverride); kAcct < len(ips) {
+				ips = ips[:kAcct]
+			}
 		}
 		if len(ips) == 0 {
 			continue

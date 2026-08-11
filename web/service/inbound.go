@@ -1294,6 +1294,9 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	if err := ValidateShadowsocksKeys(inbound, clients, nil); err != nil {
 		return inbound, false, err
 	}
+	if err := validateClientLimits(clients); err != nil {
+		return inbound, false, err
+	}
 
 	// Nothing to exclude: this inbound has no row yet, so the whole DB is "other".
 	existEmail, err := s.checkEmailsExistExcludingInbound(clients, 0)
@@ -1584,6 +1587,11 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	} else if err := validateClientIdentities(inbound.Protocol, updatedClients); err != nil {
 		return inbound, false, err
 	} else if err := ValidateShadowsocksKeys(inbound, updatedClients, nil); err != nil {
+		return inbound, false, err
+	}
+	// Outside the branch above: the limits are brand new columns, so no stored client
+	// can carry a bad one and there is nothing to exempt.
+	if err := validateClientLimits(updatedClients); err != nil {
 		return inbound, false, err
 	}
 
@@ -1896,6 +1904,9 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		if err := ValidateShadowsocksKeys(target, clients, nil); err != nil {
 			return false, err
 		}
+	}
+	if err := validateClientLimits(clients); err != nil {
+		return false, err
 	}
 
 	var settings map[string]any
@@ -2579,6 +2590,9 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 	if err := ValidateShadowsocksKeys(oldInbound, clients, oldClients); err != nil {
+		return false, err
+	}
+	if err := validateClientLimits(clients); err != nil {
 		return false, err
 	}
 

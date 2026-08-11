@@ -1284,6 +1284,10 @@ func (s *RadiusService) getClientIP(protocol string, inboundId int, username, st
 		ID    string `json:"id"`
 		Email string `json:"email"`
 		Slot  *int   `json:"slot"` // address-pool slot; nil = fall back to list index
+		// This account's own device cap. nil = inherit the inbound's K, and it can only
+		// LOWER it: see resolveUserLimitOverride for why raising it would silently put
+		// two customers on one tunnel address.
+		UserLimitOverride *int `json:"userLimitOverride"`
 	}
 	type settingsJSON struct {
 		IpRanges          []string      `json:"ipRanges"`
@@ -1341,6 +1345,20 @@ func (s *RadiusService) getClientIP(protocol string, inboundId int, username, st
 			}
 		} else {
 			blockIPs = vpnAccountDeviceIPs(pppSubnetsOrDefault(ranges, protocol, inbound.Id), accountSlot, k)
+		}
+		// The account's own cap, applied by TRIMMING the block the inbound's K just
+		// laid out - never by asking for a differently sized one. The addresses are a
+		// fixed grid on a stride of K (vpnAccountBlock), so the block's START and its
+		// STRIDE stay the inbound's whatever this account is capped at; only how many
+		// of its own addresses it may hold at once changes. The ones it gives up sit
+		// idle rather than moving to a neighbour, which is what keeps this safe.
+		//
+		// Kept out of the k<=1 branch on purpose: a one-IP block is already the
+		// smallest there is and an override can only lower.
+		if userLimitOverrideApplies(&inbound) {
+			if kAcct := resolveUserLimitOverride(k, settings.Clients[clientIndex].UserLimitOverride); kAcct < len(blockIPs) {
+				blockIPs = blockIPs[:kAcct]
+			}
 		}
 		if len(blockIPs) == 0 {
 			return nil, false

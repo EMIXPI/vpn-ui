@@ -200,13 +200,26 @@ func (a *SettingController) sslStart(c *gin.Context) {
 // because webCertFile still names a file the renewal never touches.
 //
 // `targets` names which listeners to move, repeated like every other array the
-// axios interceptor stringifies. Omitting it moves BOTH, which is what this route
-// has always done and what a host running one certificate wants; naming just one is
-// how the panel and the subscription server end up on different certificates.
+// axios interceptor stringifies. Naming just one is how the panel and the
+// subscription server end up on different certificates.
+//
+// AN ABSENT `targets` IS REFUSED, and used not to be: it meant BOTH listeners.
+// Combined with sslProfileParam, whose absent profile is the default one, that made
+// a bare no-body POST here mean "put the default certificate on the panel AND on
+// the subscription server" - a request nobody types, granting TLS to a listener the
+// caller never named. Every caller in tree sends an explicit list (settings.html
+// sslToggle and sslAfterRun), so nothing loses a convenience it was using.
+//
+// Assign refuses an empty list too, but only after resolving the profile and
+// validating its material, so the same mistake would come back as "that certificate
+// is not usable yet" on a host with no certificate. Refusing at the edge answers the
+// question that was actually wrong.
 func (a *SettingController) sslUseManaged(c *gin.Context) {
 	targets := c.PostFormArray("targets")
 	if len(targets) == 0 {
-		targets = []string{service.SSLAssignTargetPanel, service.SSLAssignTargetSub}
+		jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.useManaged"),
+			errors.New("name the listener to point at this certificate: the panel, the subscription server, or both"))
+		return
 	}
 	err := a.sslService.Assign(sslProfileParam(c), targets)
 	jsonMsg(c, I18nWeb(c, "pages.settings.ssl.toasts.useManaged"), err)
