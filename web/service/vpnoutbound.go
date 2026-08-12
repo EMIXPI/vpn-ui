@@ -35,6 +35,11 @@ import (
 // interface-binding facility, autoOutboundsInterface, installs a PROCESS-GLOBAL
 // dialer controller that would pin every outbound in the core to one device rather
 // than just this one, so it cannot express "this tag goes through that tunnel".
+//
+// The tun inbound does appear elsewhere in this feature, pointing the other way and
+// with that facility deliberately left off: vpnoutcarrier.go uses one as a CARRIER, a
+// device whose traffic leaves through a chosen outbound, which is the opposite
+// direction and asks nothing global of the core.
 
 // VpnOutboundKind names a client-side tunnel implementation. The value is stored, so
 // these strings are wire format: rename one and every saved outbound of that kind
@@ -88,6 +93,19 @@ type VpnOutboundConfig struct {
 	// outbounds from, so an upgrade would rewrite and restart things it had no reason
 	// to.
 	Via string `json:"via,omitempty" form:"via"`
+
+	// CarriedOverProxy is true while this tunnel is being raised through a carrier that
+	// is an XRAY OUTBOUND rather than a netdev of its own (vpnoutcarrier.go). It is set
+	// by the framework immediately before Up and read by the two drivers that have to
+	// put something different on the wire for it: charon's kernel ESP is proto 50, and
+	// a proxy carrier moves only TCP and UDP, so IKEv2 and L2TP/IPsec force NAT-T
+	// encapsulation when this is set and leave it alone when it is not.
+	//
+	// json:"-" because it is a fact about the CARRIER, derived on every raise from the
+	// tunnel's Via and the outbound list. Persisting it would create a second copy of
+	// something already stored, free to disagree with it after an operator edits the
+	// outbound the tunnel rides on.
+	CarriedOverProxy bool `json:"-"`
 
 	Settings json.RawMessage `json:"settings" form:"settings"`
 }
@@ -264,7 +282,7 @@ func (s *VpnOutboundService) InitVpnOutbound() {
 	// pair of rules already; this is the repair pass, and it is the only thing that
 	// removes a steer rule left behind by a crash or pointing at a table number that a
 	// rebuilt device has since given up.
-	vpnOutApplyVia(all)
+	vpnOutApplyVia(all, vpnOutApplyCarriers(all, (&SshOutboundService{}).List()))
 }
 
 // VpnOutSecrets is an OPTIONAL interface naming the settings keys that must never
@@ -430,8 +448,22 @@ func (s *VpnOutboundService) Save(cfg VpnOutboundConfig) (VpnOutboundConfig, err
 	// both tunnels dead, a Via naming an Xray outbound has no netdev to steer into, and
 	// a Via naming itself installs a rule sending a tunnel's handshake into its own
 	// table.
-	if err := vpnOutViaCheck(all, cfg); err != nil {
+	sshList := (&SshOutboundService{}).List()
+	carriers, _ := vpnOutCarrierPlan(all, sshList, vpnOutTemplateOutbounds())
+	if err := vpnOutViaCheck(all, vpnOutCarrierExtras(carriers), cfg); err != nil {
 		return cfg, err
+	}
+	// The per-kind gate, refused here as well as at the raise so an operator learns it
+	// from the form rather than from a tunnel that comes up and moves nothing.
+	if cfg.Via != "" {
+		for _, c := range carriers {
+			if c.Tag == cfg.Via {
+				if why := vpnOutCarrierRefusal(cfg, c); why != "" {
+					return cfg, errors.New(why)
+				}
+				break
+			}
+		}
 	}
 	// Turning a CARRIER off is the fourth refusal, and it is the one that is not about
 	// this tunnel at all: the tunnels riding on it would keep running with their steer
@@ -503,7 +535,7 @@ func (s *VpnOutboundService) Save(cfg VpnOutboundConfig) (VpnOutboundConfig, err
 	// Over the whole list, because this save can have changed somebody else's answer:
 	// disabling a tunnel that carries two others has to remove their steer rules, and
 	// they are not in this call anywhere.
-	vpnOutApplyVia(out)
+	vpnOutApplyVia(out, vpnOutApplyCarriers(out, (&SshOutboundService{}).List()))
 	// The freedom outbound fronting this tunnel is derived from the stored list when
 	// the config is built, so the core has to be rebuilt for the change to reach it.
 	(&XrayService{}).SetToNeedRestart()
@@ -547,7 +579,7 @@ func (s *VpnOutboundService) Delete(tag string) error {
 	// rule pointing into its table, and vpnOutUnbindEgress has just taken the table's
 	// blackhole with it: without this pass the tunnels it carried would fall through to
 	// main and leave in the clear.
-	vpnOutApplyVia(out)
+	vpnOutApplyVia(out, vpnOutApplyCarriers(out, (&SshOutboundService{}).List()))
 	(&XrayService{}).SetToNeedRestart()
 	return nil
 }
@@ -623,12 +655,27 @@ func (s *VpnOutboundService) bringUp(cfg VpnOutboundConfig, all []VpnOutboundCon
 	// anyway would give the operator a tunnel that works, reports itself up, and dials
 	// its server straight out of the host's WAN - the exact thing they configured this
 	// field to prevent.
+	var carrier vpnOutCarrier
 	if cfg.Via != "" {
-		carrier, ok := findVpnTunnel(all, cfg.Via)
-		if !ok {
-			return "", fmt.Errorf("%s is carried by %s, which is not a tunnel on this panel", cfg.Tag, cfg.Via)
+		var facts vpnOutViaFacts
+		carrier, facts, err = vpnOutResolveCarrier(cfg.Via, all, (&SshOutboundService{}).List())
+		if err != nil {
+			return "", err
 		}
-		if err := vpnOutSteerVia(cfg, carrier); err != nil {
+		// The per-kind gate, and it only ever fires for a carrier that is an Xray
+		// outbound. Steering into a netdev is L4-agnostic, so a tunnel carrier takes
+		// GRE and ESP whole; a proxy carrier moves TCP and UDP and drops the rest,
+		// which for PPTP means the control channel would ride and the data channel
+		// would not. Half a tunnel is worse than a refusal: it authenticates, reports
+		// itself up, and moves nothing.
+		if why := vpnOutCarrierRefusal(cfg, carrier); why != "" {
+			return "", errors.New(why)
+		}
+		// Read by the IPsec drivers, which have to force NAT-T encapsulation to put
+		// their ESP inside UDP where a proxy carrier can see it. Set before Up because
+		// it changes the config the client is started with.
+		cfg.CarriedOverProxy = carrier.Bridged()
+		if err := vpnOutSteerVia(cfg, facts); err != nil {
 			return "", err
 		}
 	}
@@ -654,10 +701,8 @@ func (s *VpnOutboundService) bringUp(cfg VpnOutboundConfig, all []VpnOutboundCon
 	// tunnel that pings and stalls on real traffic, which is worth saying out loud, but
 	// the exact overhead depends on the cipher that was negotiated and this panel is
 	// guessing at it.
-	if cfg.Via != "" {
-		if carrier, ok := findVpnTunnel(all, cfg.Via); ok {
-			vpnOutViaMtuCheck(cfg, iface, carrier.Iface)
-		}
+	if cfg.Via != "" && carrier.Iface != "" {
+		vpnOutViaMtuCheck(cfg, iface, carrier.Iface)
 	}
 	return iface, nil
 }

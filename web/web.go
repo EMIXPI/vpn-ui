@@ -366,6 +366,13 @@ func (s *Server) startTask() {
 	s.greService.InitGre()
 	s.mtprotoService.InitMtproto()
 	s.sshService.InitSsh()
+	// BEFORE anything dials, which is why it is here and not beside InitVpnOutbound
+	// below. A carrier is a device plus a routing table, and whatever rides on it sends
+	// its first packet the moment it starts: the SSH manager dials as soon as its
+	// listener binds, and a WireGuard client hands its handshake to the kernel the
+	// instant its peer is configured. A carrier made afterwards would arrive after the
+	// packet it was meant to carry had already left in the clear.
+	service.InitVpnOutCarriers()
 	s.sshOutboundService.InitSshOutbound()
 	// Before RestartXray below, like every Init above it: the synthesized freedom
 	// outbound binds to the netdev the client tunnel brings up, so the tunnel has to

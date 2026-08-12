@@ -918,6 +918,22 @@
           passphrase: s.passphrase,
           knownHost: s.knownHost,
           socksPort: s.socksPort,
+          // The outbound that carries this tunnel's own TCP connection to the SSH
+          // server, '' for none, and it comes from the row's own Dialer Proxy box:
+          // that is the panel's single chaining control, and on a tunnel row it
+          // means "carry this tunnel's own transport through that tag". The server
+          // turns it into routing rules and strips the key from the Xray config,
+          // where it would instead redirect the facade's CONNECT to the loopback
+          // SOCKS port and break the tunnel.
+          //
+          // Read off the model rather than the serialised row so the sockopt switch
+          // is respected: turning sockopts off drops the whole block, and a carrier
+          // the config no longer carries must not keep steering traffic.
+          //
+          // Sent on every save including the blank one: the server treats it as the
+          // whole answer, so leaving it out of a save that cleared the box would
+          // keep the old carrier and the routing rules with it.
+          via: model.stream?.sockopt?.dialerProxy || '',
         });
         if (!msg || !msg.success || !msg.obj) return 0;
         return Number(msg.obj.socksPort) || 0;
@@ -1061,8 +1077,22 @@
       sshOutboundModel(row, ssh) {
         const settings = new Outbound.SshSettings(ssh.address, ssh.port, ssh.username,
           ssh.authType || 'password', '', '', '', ssh.knownHost || '', ssh.socksPort || 0);
-        return new Outbound(row.tag, Protocols.SSH, settings,
-          StreamSettings.fromJson(row.streamSettings), row.sendThrough);
+        // The row's own stream settings come from the config and not from the
+        // tunnel list, which knows nothing about them: rebuilding from the tunnel
+        // alone would drop the operator's sockopts on the next save.
+        const stream = StreamSettings.fromJson(row.streamSettings);
+        // The carrier is written in two places at two different moments: into the
+        // tunnel (`via`) the instant the modal is confirmed, and into this row's
+        // Dialer Proxy only when the Xray page itself is saved. In between, the row
+        // is silent about a carrier the panel is already steering, and a form opened
+        // then would show none and clear it on the next save. Seeded from the tunnel
+        // for that window. The row wins when it has one: that is what the operator
+        // last typed. Mirrors vpnOutboundModel above.
+        if (ssh.via && !(stream.sockopt && stream.sockopt.dialerProxy)) {
+          if (!stream.sockopt) stream.sockoptSwitch = true;
+          stream.sockopt.dialerProxy = ssh.via;
+        }
+        return new Outbound(row.tag, Protocols.SSH, settings, stream, row.sendThrough);
       },
       // Removing the row has to remove the tunnel behind it. Splicing alone left
       // the tunnel in the `sshOutbounds`/`vpnOutbounds` setting still dialling

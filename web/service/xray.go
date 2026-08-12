@@ -504,6 +504,30 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	// via the socks inbound's tag above.
 	s.translateVpnRoutingRules(xrayConfig)
 
+	// The carrier bridges LAST, and the rule they add is PREPENDED, which is the whole
+	// reason they are here rather than beside the outbound synthesis at the top.
+	//
+	// Routing is first-match, and translateVpnRoutingRules appends a backstop that
+	// sends every source inside vpnAddrSpace (10.0.0.0/12) to the blackhole. A carrier
+	// device is addressed out of 10.11 - inside that /12 on purpose, so it inherits the
+	// firewalld trust - so a rule appended after that backstop would never be reached
+	// and every carried tunnel would be blackholed. Prepending puts the carrier's own
+	// inboundTag rule ahead of both the backstop and any operator rule that sends
+	// everything to a proxy, which would otherwise swallow a tunnel's outer transport
+	// and send it somewhere nobody asked for.
+	//
+	// Deriving it here also means the carriers are read once, from the same stored
+	// lists the raise path uses, so the config and the routing rules cannot disagree
+	// about which tag has a device.
+	carriers, problems := vpnOutCarrierPlan((&VpnOutboundService{}).List(),
+		(&SshOutboundService{}).List(), vpnOutTemplateOutbounds())
+	for _, p := range problems {
+		logger.Warning("vpn carrier:", p)
+	}
+	if err := applyCarrierBridgesWith(xrayConfig, carriers); err != nil {
+		logger.Warning("could not synthesize the carrier bridges:", err)
+	}
+
 	return xrayConfig, nil
 }
 
@@ -782,6 +806,22 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	if err != nil {
 		return err
 	}
+
+	// A carrier tun belongs to the panel but is attached by the core, and stopping the
+	// core sets the device DOWN. The kernel drops a table's device route when its
+	// device goes down, which is the fail-closed half and is deliberate: what is left
+	// is the blackhole at metric 1000, so a carried tunnel is dropped rather than
+	// leaked out of the host's WAN while the core is not running.
+	//
+	// Nothing put that route back, though, and that is the bug this call closes.
+	// vpnOutApplyVia reconciles RULES only; the egress ROUTES are written by
+	// vpnOutBindEgress, which until now only ran on save, boot and raise. So a carrier
+	// survived an Xray restart with a table holding one blackhole and stayed that way
+	// until somebody re-saved the tunnel: fail-closed, but stuck closed.
+	//
+	// Re-asserted after every start, because that is exactly when the device has just
+	// come back up. Idempotent, and cheap enough: a restart is not a hot path.
+	vpnOutReassertCarriers()
 
 	return nil
 }

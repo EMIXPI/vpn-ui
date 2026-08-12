@@ -13,13 +13,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Carrying one tunnel inside another is entirely a set of routing rules, so the whole
-// feature is testable as two pure questions: which rules a list of tunnels implies, and
-// which of the kernel's current rules are stale. Everything below asks one of those. No
-// database, no netlink, no kernel.
+// Carrying a tunnel inside a carrier is entirely a set of routing rules, so the whole
+// feature is testable as two pure questions: which rules a set of carriers and tunnels
+// implies, and which of the kernel's current rules are stale. Everything below asks one of
+// those. No database, no netlink, no kernel.
+//
+// A carrier is no longer required to be another tunnel: vpnoutcarrier.go resolves an Xray
+// outbound tag to a device and hands the planner the same fact tuple a tunnel produces. So
+// the tests that follow carry the carrier in as vpnOutViaFacts wherever the planner does.
 
 func viaCfg(tag, kind, via string) VpnOutboundConfig {
 	return VpnOutboundConfig{Tag: tag, Kind: kind, Enable: true, Via: via, Iface: "if-" + tag}
+}
+
+func init() {
+	// Registered from init, like vpnoutbound_test.go's fakes, so it is there however the
+	// tests are ordered or filtered. The host is a LITERAL address: vpnOutViaFactsOf
+	// resolves a carried tunnel's server, and a fake that needed a resolver for that would
+	// be testing the resolver.
+	RegisterVpnOutDriver("testviafixed", &fakeViaDriver{host: "203.0.113.10"})
 }
 
 // ---- refusals ---------------------------------------------------------------------
@@ -27,7 +39,7 @@ func viaCfg(tag, kind, via string) VpnOutboundConfig {
 func TestVpnOutViaCheckRefusesSelf(t *testing.T) {
 	all := []VpnOutboundConfig{viaCfg("wg-a", VpnOutWireguard, "")}
 	cfg := viaCfg("wg-a", VpnOutWireguard, "wg-a")
-	err := vpnOutViaCheck(all, cfg)
+	err := vpnOutViaCheck(all, nil, cfg)
 	if err == nil {
 		t.Fatal("a tunnel carried by itself was accepted")
 	}
@@ -36,46 +48,70 @@ func TestVpnOutViaCheckRefusesSelf(t *testing.T) {
 	}
 }
 
-// The Dialer Proxy is offered on every outbound, tunnels included, so an operator can
-// pick an ordinary Xray outbound there. It cannot be delivered - carrying is policy
-// routing into the carrier's netdev and a tag with no device has none - and the refusal
-// is per KIND, because what the operator can do instead differs per kind.
-func TestVpnOutViaCheckRefusesANonTunnel(t *testing.T) {
+// The Dialer Proxy is offered on every outbound, tunnels included, so an operator can name
+// anything there. What can be DELIVERED is now anything vpnOutCarrierFor resolves to a
+// device - another tunnel, a freedom outbound's interface pin, or a carrier tun in front of
+// a proxy outbound - and those arrive here already resolved, in `carriers`. So the only
+// thing left for this function to refuse is a tag that is neither.
+//
+// This test used to assert the opposite: that every non-tunnel was refused, with a sentence
+// explaining that an Xray outbound has no device to steer into. That sentence is now FALSE,
+// and a false refusal is worse than none - it sends an operator to change a field that was
+// right, over a limit the panel no longer has.
+func TestVpnOutViaCheckRefusesATagThatIsNeitherTunnelNorCarrier(t *testing.T) {
 	all := []VpnOutboundConfig{viaCfg("wg-a", VpnOutWireguard, "")}
+	carriers := []vpnOutViaFacts{{Tag: "proxy-vless", Enable: true, Table: 30042}}
 
-	// A kind that cannot ride a proxy at all: gre never opens a userspace socket, so a
-	// VPN tunnel is the only carrier it can have and the refusal has to say so rather
-	// than send the operator looking for a proxy field that is not on its form.
-	t.Run("a kind with no proxy support", func(t *testing.T) {
-		err := vpnOutViaCheck(all, viaCfg("gre-b", VpnOutGre, "proxy-vless"))
+	t.Run("a tag nothing on this panel answers to", func(t *testing.T) {
+		err := vpnOutViaCheck(all, carriers, viaCfg("gre-b", VpnOutGre, "proxy-vles"))
 		if err == nil {
-			t.Fatal("a Dialer Proxy naming an Xray outbound was accepted; there is no device to steer into")
+			t.Fatal("a Dialer Proxy naming neither a tunnel nor an outbound was accepted")
 		}
 		msg := err.Error()
-		for _, want := range []string{"proxy-vless", VpnOutGre, "VPN tunnel"} {
+		// The typo is named, because that is the whole of what the operator has to fix.
+		for _, want := range []string{"proxy-vles", "gre-b", VpnOutGre, "not a tunnel and not an outbound"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("the refusal does not mention %q, so the operator cannot act on it: %v", want, err)
 			}
 		}
-		if strings.Contains(msg, "SOCKS5 Proxy") {
-			t.Errorf("the refusal offers a proxy field a gre tunnel does not have: %v", err)
+		if strings.Contains(msg, "no device to steer into") || strings.Contains(msg, "SOCKS5 Proxy") {
+			t.Errorf("the refusal still claims an Xray outbound cannot be a carrier: %v", err)
 		}
 	})
 
-	// One of the three whose client CAN dial through a proxy. Still refused - an Xray
-	// outbound is not a proxy address, and putting a listener in front of one is a
-	// separate piece of work - but the operator is pointed at the field that grants the
-	// same wish today.
-	t.Run("a kind that can be proxied", func(t *testing.T) {
-		err := vpnOutViaCheck(all, viaCfg("ovpn-b", VpnOutOpenVPN, "proxy-vless"))
-		if err == nil {
-			t.Fatal("an Xray outbound was accepted as an OpenVPN tunnel's carrier")
-		}
-		msg := err.Error()
-		for _, want := range []string{"proxy-vless", VpnOutOpenVPN, "VPN tunnel", "SOCKS5 Proxy"} {
-			if !strings.Contains(msg, want) {
-				t.Errorf("the refusal does not mention %q: %v", want, err)
+	// The behaviour that was removed, pinned from the other side. A resolved carrier is
+	// accepted whatever kind names it, INCLUDING the kinds the old refusal had a special
+	// sentence for. Whether this kind survives this carrier is vpnOutCarrierRefusal's
+	// question, asked in vpnoutcarrier.go where the carrier's device kind is known: a
+	// netdev moves GRE and ESP, a carrier tun moves TCP and UDP, and this function can see
+	// neither.
+	t.Run("a carrier that is not a tunnel is accepted", func(t *testing.T) {
+		for _, kind := range []string{VpnOutGre, VpnOutOpenVPN, VpnOutPPTP, VpnOutWireguard} {
+			if err := vpnOutViaCheck(all, carriers, viaCfg("carried-"+kind, kind, "proxy-vless")); err != nil {
+				t.Errorf("a %s tunnel was refused a carrier that resolves to a device: %v", kind, err)
 			}
+		}
+	})
+
+	// Same tag, no carriers: nothing resolved it, so it is refused again. This is what
+	// makes the check fail-closed rather than permissive - the tag is accepted because a
+	// carrier was RESOLVED for it, not because it looks like an outbound name.
+	t.Run("an unresolved carrier is still refused", func(t *testing.T) {
+		if err := vpnOutViaCheck(all, nil, viaCfg("gre-b", VpnOutGre, "proxy-vless")); err == nil {
+			t.Fatal("a carrier tag that resolved to nothing was accepted")
+		}
+	})
+
+	// A carrier is not a tunnel, so naming one must not make it look like one to the rest
+	// of the panel: a tunnel tag of the same name still wins, and a chain THROUGH a
+	// carrier is still walked for loops.
+	t.Run("a loop closed through a carrier is still caught", func(t *testing.T) {
+		err := vpnOutViaCheck(
+			[]VpnOutboundConfig{viaCfg("a", VpnOutWireguard, "b"), viaCfg("b", VpnOutGre, "")},
+			[]vpnOutViaFacts{{Tag: "proxy-vless", Enable: true, Table: 30042}},
+			viaCfg("b", VpnOutGre, "a"))
+		if err == nil || !strings.Contains(err.Error(), "b -> a -> b") {
+			t.Errorf("the loop was not caught with carriers in play: %v", err)
 		}
 	})
 }
@@ -89,7 +125,7 @@ func TestVpnOutViaCheckRefusesCyclesAndNamesThePath(t *testing.T) {
 			viaCfg("a", VpnOutWireguard, "b"),
 			viaCfg("b", VpnOutGre, ""),
 		}
-		err := vpnOutViaCheck(all, viaCfg("b", VpnOutGre, "a"))
+		err := vpnOutViaCheck(all, nil, viaCfg("b", VpnOutGre, "a"))
 		if err == nil {
 			t.Fatal("a two-tunnel loop was accepted")
 		}
@@ -104,7 +140,7 @@ func TestVpnOutViaCheckRefusesCyclesAndNamesThePath(t *testing.T) {
 			viaCfg("b", VpnOutGre, "c"),
 			viaCfg("c", VpnOutL2TP, ""),
 		}
-		err := vpnOutViaCheck(all, viaCfg("c", VpnOutL2TP, "a"))
+		err := vpnOutViaCheck(all, nil, viaCfg("c", VpnOutL2TP, "a"))
 		if err == nil {
 			t.Fatal("a three-tunnel loop was accepted")
 		}
@@ -119,13 +155,13 @@ func TestVpnOutViaCheckRefusesCyclesAndNamesThePath(t *testing.T) {
 			viaCfg("b", VpnOutGre, "c"),
 			viaCfg("c", VpnOutL2TP, ""),
 		}
-		if err := vpnOutViaCheck(all, viaCfg("a", VpnOutWireguard, "b")); err != nil {
+		if err := vpnOutViaCheck(all, nil, viaCfg("a", VpnOutWireguard, "b")); err != nil {
 			t.Errorf("a -> b -> c was refused: %v", err)
 		}
 	})
 
 	t.Run("a blank Via is always fine", func(t *testing.T) {
-		if err := vpnOutViaCheck(nil, viaCfg("a", VpnOutWireguard, "")); err != nil {
+		if err := vpnOutViaCheck(nil, nil, viaCfg("a", VpnOutWireguard, "")); err != nil {
 			t.Errorf("a tunnel with no carrier was refused: %v", err)
 		}
 	})
@@ -139,7 +175,7 @@ func TestVpnOutViaCheckReadsTheIncomingEdit(t *testing.T) {
 		viaCfg("a", VpnOutWireguard, "b"),
 		viaCfg("b", VpnOutGre, "a"), // the stored loop
 	}
-	if err := vpnOutViaCheck(all, viaCfg("b", VpnOutGre, "")); err != nil {
+	if err := vpnOutViaCheck(all, nil, viaCfg("b", VpnOutGre, "")); err != nil {
 		t.Errorf("breaking a stored loop was refused: %v", err)
 	}
 }
@@ -381,9 +417,202 @@ func TestVpnOutViaPlan(t *testing.T) {
 			t.Errorf("the problems do not mention %q: %v", want, problems)
 		}
 	}
+	// A carrier that is absent from the facts is now absent from BOTH catalogues - the
+	// tunnels and the resolved carriers - so the line no longer says "not a tunnel", which
+	// would read as "pick a tunnel" when an outbound would have done.
+	if !strings.Contains(joined, "not a tunnel and not an outbound on this panel") {
+		t.Errorf("the unknown-carrier problem still tells the operator it has to be a tunnel: %v", problems)
+	}
 	if strings.Contains(joined, "l2tp-d") {
 		t.Errorf("a deliberately disabled tunnel was reported as a problem: %v", problems)
 	}
+}
+
+// A carrier that is not a tunnel reaches the planner as `extra` facts, and from there the
+// planner cannot tell it apart from a tunnel: the steer names a TABLE, and a table is a
+// table whichever device filled it. This is the whole of what widening the carrier cost
+// this file.
+func TestVpnOutViaFactsOfAppendsCarriersThatAreNotTunnels(t *testing.T) {
+	defer swapVia(&vpnOutTableOf, func(iface string) int {
+		switch iface {
+		case "if-wg-a":
+			return 30011
+		case "if-dup":
+			return 30022
+		}
+		return 0
+	})()
+
+	list := []VpnOutboundConfig{
+		{Tag: "wg-a", Kind: "testviafixed", Enable: true, Iface: "if-wg-a"},
+		{Tag: "dup", Kind: "testviafixed", Enable: true, Iface: "if-dup", Via: "proxy-vless"},
+	}
+	extra := []vpnOutViaFacts{
+		{Tag: "proxy-vless", Enable: true, Table: 30042},
+		// Should never happen: vpnOutCarrierFor answers with the tunnel before it ever
+		// reads the outbound list, and vpnOutCarrierPlan drops tunnel carriers. Pinned
+		// anyway, because two entries for one tag would make the plan depend on map order.
+		{Tag: "dup", Enable: true, Table: 39999},
+		// A carrier with no tag can never be named, so it could only ever collide.
+		{Tag: "", Enable: true, Table: 30077},
+	}
+
+	got := vpnOutViaFactsOf(list, extra)
+	byTag := map[string]vpnOutViaFacts{}
+	for _, f := range got {
+		if _, dup := byTag[f.Tag]; dup {
+			t.Errorf("%q appears twice in the facts: %+v", f.Tag, got)
+		}
+		byTag[f.Tag] = f
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d facts, want the two tunnels and the one carrier: %+v", len(got), got)
+	}
+	if _, blank := byTag[""]; blank {
+		t.Error("a carrier with no tag was added to the facts")
+	}
+	if c := byTag["proxy-vless"]; c.Table != 30042 || !c.Enable {
+		t.Errorf("the carrier's facts did not survive being appended: %+v", c)
+	}
+	if d := byTag["dup"]; d.Table != 30022 || d.Via != "proxy-vless" {
+		t.Errorf("an extra won a tag collision with a tunnel: %+v; the tunnel's table is read from its live device", d)
+	}
+}
+
+func TestVpnOutViaPlanSteersIntoACarrierThatIsNotATunnel(t *testing.T) {
+	defer swapVia(&vpnOutTableOf, func(iface string) int {
+		if iface == "if-wg-a" {
+			return 30011
+		}
+		return 0
+	})()
+	list := []VpnOutboundConfig{
+		{Tag: "wg-a", Kind: "testviafixed", Enable: true, Iface: "if-wg-a", Via: "proxy-vless"},
+	}
+
+	t.Run("the steer looks up the carrier's table", func(t *testing.T) {
+		rules, problems := vpnOutViaPlan(vpnOutViaFactsOf(list, []vpnOutViaFacts{
+			{Tag: "proxy-vless", Enable: true, ServerAddrs: []string{"198.51.100.7/32"}, Table: 30042},
+		}))
+		if len(problems) != 0 {
+			t.Fatalf("a carrier that is not a tunnel was reported as a problem: %v", problems)
+		}
+		var steers, excludes []vpnOutRule
+		for _, r := range rules {
+			switch r.Table {
+			case 30042:
+				steers = append(steers, r)
+			case vpnOutMainTable:
+				excludes = append(excludes, r)
+			default:
+				t.Errorf("a rule looks up table %d, which is neither the carrier's nor main: %+v", r.Table, r)
+			}
+		}
+		if len(steers) != 1 || steers[0].Dst != "203.0.113.10/32" {
+			t.Fatalf("steers = %+v, want wg-a's own server steered into the carrier's table", steers)
+		}
+		// The carrier's own uplink is pinned to main exactly as a tunnel carrier's server
+		// is. Without it the core would dial the address that feeds the carrier THROUGH
+		// the carrier, which is the loop proxy/tun/README.md warns about.
+		if len(excludes) != 1 || excludes[0].Dst != "198.51.100.7/32" {
+			t.Fatalf("excludes = %+v, want the carrier's own uplink pinned to main", excludes)
+		}
+	})
+
+	// Table 0 is the fail-closed value and it means "the device is not there": for a
+	// bridged carrier that is Xray stopped, or the tun not created yet. Nothing may be
+	// steered into it - a rule naming table 0 would be a rule with no route in it, and the
+	// lookup falls through to main and out of the host's WAN in the clear.
+	t.Run("a carrier with no table carries nothing", func(t *testing.T) {
+		rules, problems := vpnOutViaPlan(vpnOutViaFactsOf(list, []vpnOutViaFacts{
+			{Tag: "proxy-vless", Enable: true, ServerAddrs: []string{"198.51.100.7/32"}},
+		}))
+		if len(rules) != 0 {
+			t.Fatalf("rules were built for a carrier with no device: %+v", rules)
+		}
+		joined := strings.Join(problems, "; ")
+		for _, want := range []string{"wg-a", "proxy-vless", "not up"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("the problem does not mention %q: %v", want, problems)
+			}
+		}
+	})
+}
+
+// vpnOutSteerVia takes the carrier as FACTS now, so the two guards that used to be derived
+// from a tunnel row - its Enable flag, and vpnOutTableOf of its device - are read off the
+// tuple instead. Both are fail-closed, and neither may reach netlink: a rule installed for
+// a carrier that cannot carry is a rule pointing into an empty table.
+func TestVpnOutViaSteerTakesCarrierFacts(t *testing.T) {
+	var added []vpnOutRule
+	defer swapVia(&vpnOutListRules, func() ([]vpnOutRule, []netlink.Rule, error) { return nil, nil, nil })()
+	defer swapVia(&vpnOutAddRule, func(r vpnOutRule) error {
+		added = append(added, r)
+		return nil
+	})()
+
+	carried := VpnOutboundConfig{Tag: "wg-a", Kind: "testviafixed", Enable: true, Iface: "if-wg-a"}
+
+	for _, tc := range []struct {
+		name    string
+		carrier vpnOutViaFacts
+		want    string
+	}{
+		{"disabled", vpnOutViaFacts{Tag: "proxy-vless", Table: 30042}, "disabled"},
+		{"no device", vpnOutViaFacts{Tag: "proxy-vless", Enable: true}, "not up"},
+		// One address, two tunnels: a rule selects on the destination and cannot tell them
+		// apart, and the exclusion is the lower rule, so the carried tunnel would leave in
+		// the clear while every screen called it carried.
+		{"a shared address", vpnOutViaFacts{Tag: "proxy-vless", Enable: true, Table: 30042,
+			ServerAddrs: []string{"203.0.113.10/32"}}, "203.0.113.10"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := vpnOutSteerVia(carried, tc.carrier)
+			if err == nil {
+				t.Fatalf("a carrier that is %s was accepted", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal does not say %q: %v", tc.want, err)
+			}
+		})
+	}
+	if len(added) != 0 {
+		t.Fatalf("a refused carrier still installed %+v", added)
+	}
+
+	t.Run("a resolved carrier gets the exclusion and the steer", func(t *testing.T) {
+		added = nil
+		err := vpnOutSteerVia(carried, vpnOutViaFacts{Tag: "proxy-vless", Enable: true,
+			Table: 30042, ServerAddrs: []string{"198.51.100.7/32"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(added) != 2 {
+			t.Fatalf("installed %+v, want the carrier's exclusion and wg-a's steer", added)
+		}
+		if added[0].Table != vpnOutMainTable || added[0].Dst != "198.51.100.7/32" {
+			t.Errorf("the first rule is %+v, want the carrier's own uplink pinned to main", added[0])
+		}
+		if added[1].Table != 30042 || added[1].Dst != "203.0.113.10/32" {
+			t.Errorf("the second rule is %+v, want wg-a's server steered into table 30042", added[1])
+		}
+	})
+
+	// A carrier that is ITSELF carried must not have its uplink pinned to main: that
+	// exclusion sits below its own steer rule and would quietly un-carry it. Whitespace
+	// counts as a Via, or one stray space in a stored field turns the chain back off.
+	t.Run("a carried carrier keeps its own steer", func(t *testing.T) {
+		for _, via := range []string{"upstream", "  upstream  "} {
+			added = nil
+			if err := vpnOutSteerVia(carried, vpnOutViaFacts{Tag: "proxy-vless", Via: via, Enable: true,
+				Table: 30042, ServerAddrs: []string{"198.51.100.7/32"}}); err != nil {
+				t.Fatal(err)
+			}
+			if len(added) != 1 || added[0].Table != 30042 {
+				t.Errorf("via %q installed %+v, want only the steer", via, added)
+			}
+		}
+	})
 }
 
 // ---- the diff, which is what makes the reconcile safe -------------------------------
@@ -818,6 +1047,23 @@ func TestVpnOutViaMtuAdvice(t *testing.T) {
 	t.Run("an unknown kind still gets an answer", func(t *testing.T) {
 		if got := vpnOutViaMtuAdvice("x", "something-new", 1500, 1420); got == "" {
 			t.Error("a kind with no overhead entry was silently passed")
+		}
+	})
+	// The two ESP figures were WRONG and are corrected. IKEv2's left out the 8 bytes NAT-T
+	// adds, and NAT-T is not optional here: the driver forces UDP encapsulation whenever
+	// the carrier is an Xray outbound, because raw ESP is one of the things a carrier tun
+	// drops. The L2TP figure counted no IPsec leg at all. Both fitted MTUs move DOWN, which
+	// is the direction that matters - an overhead that is too small hands back an MTU that
+	// passes a ping and black-holes full-size packets.
+	t.Run("the ESP kinds count their own encapsulation", func(t *testing.T) {
+		for _, tc := range []struct{ kind, fits string }{
+			{VpnOutIKEv2, "1339"}, // 1420 - 81
+			{VpnOutL2TP, "1338"},  // 1420 - 82
+		} {
+			got := vpnOutViaMtuAdvice("t", tc.kind, 1420, 1420)
+			if !strings.Contains(got, tc.fits) {
+				t.Errorf("%s: the advice %q does not name %s as the MTU that fits", tc.kind, got, tc.fits)
+			}
 		}
 	})
 }

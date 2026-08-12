@@ -16,9 +16,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Carrying one tunnel INSIDE another: tunnel A's own outer transport (its WireGuard
-// UDP, its GRE, its ESP, its OpenVPN TCP) travels through tunnel B's netdev, so the
-// server A dials never sees this host's address.
+// Carrying one tunnel INSIDE a carrier: tunnel A's own outer transport (its WireGuard
+// UDP, its GRE, its ESP, its OpenVPN TCP) travels through carrier B's netdev, so the
+// server A dials never sees this host's address. B is another VPN tunnel, or any Xray
+// outbound vpnoutcarrier.go could resolve to a device; from here down it is a TABLE and
+// nothing else.
 //
 // The operator asks for it with the outbound row's DIALER PROXY, which is the panel's
 // one chaining control on every outbound, tunnels included. On a tunnel row that field
@@ -38,13 +40,22 @@ import (
 // see a locally generated packet at all. It is also the only mechanism that works for
 // charon's kernel ESP, which has no mark knob in this build.
 //
-// A NETDEV is required at both ends, which is why an Xray outbound cannot be a
-// carrier. The alternative - synthesizing a device with an Xray TUN inbound - was
-// measured and it SILENTLY SWALLOWS GRE and ESP: the packets are counted on RX, zero
-// leave, and nothing is logged. An operator who wants an Xray outbound in front of a
-// tunnel wants the OpenVPN, OpenConnect or SSTP proxy field, which wraps the outer
-// connection where the daemon itself can see it; naming one in the Dialer Proxy is
-// refused, per kind, by vpnOutViaProxyAdvice below.
+// A NETDEV is STILL required at both ends. That has not changed and cannot: the
+// selector is a routing table, and a table holds device routes. What changed is where
+// the carrier's device comes from. It no longer has to be a tunnel's own, because
+// vpnoutcarrier.go can SYNTHESIZE one for an Xray outbound - a tun inbound the panel
+// creates and the core attaches to, routed to that outbound - or hand over the device a
+// freedom outbound is already pinned to. Nothing below notices: this file is given a
+// carrier's TABLE and steers into it, and a table is a table whichever device filled it.
+//
+// The measurement that used to make an Xray outbound impossible as a carrier is still
+// true, and it is exactly why the per-kind gate exists. A tun inbound moves TCP and UDP
+// ONLY. Re-measured 2026-08-12 against the bundled core 26.4.17: ICMP is dropped (ping
+// through it, 100% loss), and so are the raw IP protocols - GRE (47) and ESP (50) are
+// counted on RX, zero leave, and nothing is logged. A tunnel's own netdev has no such
+// limit, which is why the two kinds of carrier stay distinct rather than collapsing into
+// one. That gate is VpnOutCarriable, in vpnoutcarrier.go, where the kind of device is
+// known; this file refuses only a carrier it cannot RESOLVE.
 //
 // THE WHOLE SCHEME FAILS OPEN WITHOUT THE BLACKHOLE. Naming a TABLE rather than a
 // DEVICE is what introduces the hazard: with B's device gone, the steer rule still
@@ -285,16 +296,29 @@ func vpnOutRuleIsOurs(r vpnOutRule) bool {
 	return r.Protocol == 0 && r.Table >= vpnOutRouteTableBase
 }
 
-// vpnOutViaFacts is what the planner needs to know about one tunnel and cannot work out
-// from its config: where its outer transport goes, and which table its device is on.
+// vpnOutViaFacts is what the planner needs to know about one CARRIER and cannot work out
+// from a config: where its own outer transport goes, and which table its device is on.
+//
+// Deliberately not a tunnel. Everything from vpnOutViaRules down works on this tuple and
+// nothing else, which is what let a carrier stop having to be another VPN tunnel without
+// touching the planner: vpnoutcarrier.go resolves an outbound tag to a device, the device
+// gives a table, and a table fills this in exactly like a tunnel's does. A tunnel fills
+// it from its own row (vpnOutViaFactsOf); anything else arrives as `extra`.
 type vpnOutViaFacts struct {
 	Tag    string
 	Via    string
 	Enable bool
-	// ServerAddrs are the /32 prefixes this tunnel's outer transport dials.
+	// ServerAddrs are the /32 prefixes this end's own outer transport dials: a tunnel's
+	// server, or the addresses an Xray outbound itself connects to. They are what the
+	// exclusion rule pins to the main table so a carrier cannot end up inside itself.
+	//
+	// May be empty, and that is not an error: an outbound whose protocol does not spell
+	// its server in a shape vpnOutOutboundUplinks knows about yields none. The exclusion
+	// is a belt for an unlikely collision (the carrier's own uplink sharing an address
+	// with what it carries), not the thing that makes carrying work.
 	ServerAddrs []string
-	// Table is this tunnel's own egress table, or 0 when its device is not up. Zero is
-	// the fail-closed value: nothing is ever steered into table 0.
+	// Table is this end's own egress table, or 0 when its device is not up. Zero is the
+	// fail-closed value: nothing is ever steered into table 0.
 	Table int
 }
 
@@ -371,7 +395,7 @@ func vpnOutViaPlan(facts []vpnOutViaFacts) (rules []vpnOutRule, problems []strin
 		}
 		carrier, ok := byTag[f.Via]
 		if !ok {
-			problems = append(problems, f.Tag+" is carried by "+f.Via+", which is not a tunnel on this panel")
+			problems = append(problems, f.Tag+" is carried by "+f.Via+", which is not a tunnel and not an outbound on this panel")
 			continue
 		}
 		if !carrier.Enable {
@@ -457,40 +481,24 @@ func vpnOutStaleRuleIdx(have []vpnOutRule, iface string, table, keepTable int) [
 	return out
 }
 
-// vpnOutViaProxyField names the three kinds whose CLIENT can dial its own server through
-// a proxy, by the label the tunnel form puts on that field.
-//
-// Measured, and short on purpose: openvpn speaks SOCKS5, openconnect takes http or
-// socks5, sstp takes HTTP CONNECT only. The other six cannot be proxied at all -
-// wireguard, awg and gre never open a userspace socket the panel could wrap, and the ppp
-// clients and charon have no proxy knob - so for those a tunnel is the only carrier there
-// is.
-//
-// Read only to write a refusal, never to decide anything. Pointing an operator at a field
-// that is not on the form in front of them is worse than saying nothing at all. (Making
-// an Xray outbound carry even these three needs a local listener synthesized in front of
-// it, which is a separate piece of work and not something this refusal pretends exists.)
-var vpnOutViaProxyField = map[string]string{
-	VpnOutOpenVPN:     "SOCKS5 Proxy",
-	VpnOutOpenConnect: "Proxy Host",
-	VpnOutSSTP:        "HTTP Proxy",
-}
-
-// vpnOutViaProxyAdvice is the tail of the refusal above: what this particular kind can do
-// instead, which differs per kind and is the whole reason the refusal names the kind.
-func vpnOutViaProxyAdvice(kind string) string {
-	if field, ok := vpnOutViaProxyField[kind]; ok {
-		return fmt.Sprintf("; pick another VPN tunnel, or reach the server through a proxy with this "+
-			"tunnel's own %q field, which wraps the outer connection where the client can see it", field)
-	}
-	return fmt.Sprintf("; pick another VPN tunnel - a %s client cannot dial through a proxy at all", kind)
-}
-
 // vpnOutViaCheck refuses a Via the operator is about to save, before anything is raised.
 //
-// Pure: it answers from the stored list and the incoming config alone, which is what
-// lets every refusal below be tested without a kernel, a resolver or a database.
-func vpnOutViaCheck(all []VpnOutboundConfig, cfg VpnOutboundConfig) error {
+// Pure: it answers from the stored list, the resolved carriers and the incoming config
+// alone, which is what lets every refusal below be tested without a kernel, a resolver or
+// a database.
+//
+// `carriers` are the carriers that are NOT tunnels, already resolved by
+// vpnOutCarrierFor: a freedom outbound's pinned device, or a synthesized carrier tun.
+// They are passed in rather than looked up here for the reason `all` is: the outbound
+// template is not this function's to read, and every refusal below is a sentence an
+// operator reads and is worth testing without a database behind it.
+//
+// Two questions only, and both are about the SHAPE of the chain. Whether this particular
+// KIND of tunnel can survive this particular kind of carrier is vpnOutCarrierRefusal's
+// question, asked where the carrier's device kind is known (a tun moves TCP and UDP, a
+// netdev moves anything), and answering it here would mean answering it with less
+// information.
+func vpnOutViaCheck(all []VpnOutboundConfig, carriers []vpnOutViaFacts, cfg VpnOutboundConfig) error {
 	via := strings.TrimSpace(cfg.Via)
 	if via == "" {
 		return nil
@@ -509,11 +517,25 @@ func vpnOutViaCheck(all []VpnOutboundConfig, cfg VpnOutboundConfig) error {
 		byTag[c.Tag] = strings.TrimSpace(c.Via)
 		known[c.Tag] = true
 	}
+	// Seeded SECOND, and never over a tunnel of the same tag. A tunnel already has a row
+	// in the outbound template - applyVpnOutboundsWith writes it there as a freedom
+	// outbound pinned to the tunnel's device - so one tag can arrive from both sides, and
+	// the tunnel's own Via is the one that says whether this is a chain.
+	//
+	// A carrier that is not a tunnel gets whatever Via its facts carry, which is empty
+	// for everything vpnOutCarrierFor resolves today: an Xray outbound chains through
+	// dialerProxy inside the core, where this file cannot see it and does not need to -
+	// the core dials it, not a client daemon, so no rule of ours is involved.
+	for _, f := range carriers {
+		if f.Tag == "" || known[f.Tag] {
+			continue
+		}
+		known[f.Tag] = true
+		byTag[f.Tag] = strings.TrimSpace(f.Via)
+	}
 	if !known[via] {
-		return fmt.Errorf("the %s tunnel %s cannot be carried by %q, which is not a VPN tunnel on "+
-			"this panel: carrying a tunnel is policy routing into the carrier's netdev, and an Xray "+
-			"outbound has no device to steer into%s",
-			cfg.Kind, cfg.Tag, via, vpnOutViaProxyAdvice(cfg.Kind))
+		return fmt.Errorf("the %s tunnel %s cannot be carried by %q, which is not a tunnel and not an "+
+			"outbound on this panel", cfg.Kind, cfg.Tag, via)
 	}
 	if path := vpnOutViaCycle(byTag, cfg.Tag); len(path) > 0 {
 		return fmt.Errorf("this would loop: %s", strings.Join(path, " -> "))
@@ -623,16 +645,44 @@ func vpnOutViaClash(carriedTag string, carried []string, carrierTag string, carr
 // be wrong in the direction that is hard to notice (a tunnel that carries small packets
 // and black-holes full-size ones). Saying the number out loud and leaving the field to
 // the operator is the honest version.
+//
+// The two ESP entries were WRONG and are corrected here. Both are keyed on the kind
+// alone, which is all this function is given, so where a figure has to choose it chooses
+// the LARGER one: an overhead that is too small hands the operator an MTU that passes a
+// ping and drops full-size packets, which is the exact silent failure this advice exists
+// to name, while one that is too large costs a little payload per packet and nothing
+// else.
 var vpnOutViaOverhead = map[string]int{
 	VpnOutWireguard:   60, // IPv4 20 + UDP 8 + WireGuard 32
 	VpnOutAmneziaWG:   60, // same framing; the junk packets are not on the data path
 	VpnOutGre:         24, // IPv4 20 + GRE 4
 	VpnOutOpenVPN:     69, // IPv4 20 + UDP 8 + OpenVPN header/HMAC/IV ~41
-	VpnOutL2TP:        44, // IPv4 20 + UDP 8 + L2TP 12 + PPP 4
-	VpnOutIKEv2:       73, // IPv4 20 + ESP 8 + IV 16 + pad/trailer + ICV
 	VpnOutPPTP:        36, // IPv4 20 + GRE 12 + PPP 4
 	VpnOutOpenConnect: 65, // IPv4 20 + UDP 8 + DTLS record ~29 + CSTP 8
 	VpnOutSSTP:        60, // IPv4 20 + TCP 20 + TLS record ~16 + SSTP 4
+
+	// Was 73 (IPv4 20 + ESP 8 + IV 16 + pad 15 + trailer 2 + ICV 12), which counted the
+	// worst-case block padding but left out the 8-byte UDP header NAT-T adds. That header
+	// is not optional in the case this advice is about: a carried IKEv2 tunnel is raised
+	// with CarriedOverProxy set whenever its carrier is an Xray outbound, and the driver
+	// FORCES UDP encapsulation then, because raw ESP (proto 50) is one of the things a
+	// carrier tun drops. On a device carrier it is present on any path with a NAT in it,
+	// which is most of them. 73 + 8.
+	VpnOutIKEv2: 81,
+
+	// Was 44 (IPv4 20 + UDP 8 + L2TP 12 + PPP 4), which is plain L2TP and ignores the
+	// IPsec leg entirely. A PSK turns this into L2TP/IPsec, and the transport-mode ESP
+	// around it costs ESP 8 + IV 16 + trailer 2 + ICV 12 = 38 more. 44 + 38.
+	//
+	// NOT CONDITIONAL, and the shortfall is worth stating rather than hiding: whether a
+	// PSK is set lives in the l2tp driver's own Settings, which the framework does not
+	// parse (see VpnOutServer on why Settings is opaque here), and this function is handed
+	// a KIND and two MTUs. So a plain L2TP tunnel with no PSK is warned 38 bytes early,
+	// and told to set an MTU 38 smaller than it needs. In the other direction 82 is still
+	// optimistic: NAT-T's 8 (forced, as for IKEv2, when the carrier is an Xray outbound)
+	// and up to 15 bytes of padding to the cipher's block put the true worst case at 105.
+	// Treat it as a middle figure, not an authority.
+	VpnOutL2TP: 82,
 }
 
 // vpnOutViaMtuAdvice compares a carried tunnel's MTU against what its carrier can
@@ -718,13 +768,21 @@ var vpnOutAddRule = func(r vpnOutRule) error {
 // vpnOutDelRule removes one, by the object it was enumerated as.
 var vpnOutDelRule = func(r netlink.Rule) error { return netlink.RuleDel(&r) }
 
-// vpnOutViaFactsOf gathers what the planner needs about every stored tunnel.
+// vpnOutViaFactsOf gathers what the planner needs about every stored tunnel, and appends
+// the carriers that are not tunnels.
 //
 // A tunnel whose server cannot be worked out (nothing typed yet, a name that does not
 // resolve) is recorded with no addresses rather than dropped: it still has a table, so
 // it can still be a CARRIER, and only its own carrying is impossible.
-func vpnOutViaFactsOf(list []VpnOutboundConfig) []vpnOutViaFacts {
-	out := make([]vpnOutViaFacts, 0, len(list))
+//
+// `extra` are the carriers vpnOutCarrierFor resolved out of the outbound template - a
+// freedom outbound's pinned device, or a synthesized carrier tun. They are appended
+// rather than merged because the planner only ever looks a carrier up BY TAG: an entry
+// with no Via of its own is a leaf of the chain and produces no rules by itself, and one
+// a tunnel names becomes that tunnel's carrier exactly as another tunnel would.
+func vpnOutViaFactsOf(list []VpnOutboundConfig, extra []vpnOutViaFacts) []vpnOutViaFacts {
+	out := make([]vpnOutViaFacts, 0, len(list)+len(extra))
+	seen := make(map[string]bool, len(list)+len(extra))
 	for _, c := range list {
 		f := vpnOutViaFacts{
 			Tag:    c.Tag,
@@ -742,6 +800,20 @@ func vpnOutViaFactsOf(list []VpnOutboundConfig) []vpnOutViaFacts {
 			}
 			f.ServerAddrs = addrs
 		}
+		seen[c.Tag] = true
+		out = append(out, f)
+	}
+	// A TUNNEL WINS a tag collision. It should not happen - vpnOutCarrierFor answers with
+	// the tunnel first and never reaches the outbound list for a tag that is one - but two
+	// entries for one tag would make the plan depend on map order, and the tunnel's facts
+	// are the ones read from the live device rather than from a template that also
+	// contains a row this panel synthesized for that same tunnel.
+	for _, f := range extra {
+		if f.Tag == "" || seen[f.Tag] {
+			continue
+		}
+		seen[f.Tag] = true
+		f.Via = strings.TrimSpace(f.Via)
 		out = append(out, f)
 	}
 	return out
@@ -786,13 +858,20 @@ func vpnOutViaInUse(list []VpnOutboundConfig, tag string) error {
 		tag, strings.Join(riders, ", "))
 }
 
-// vpnOutApplyVia reconciles the two priority bands against the stored tunnels.
+// vpnOutApplyVia reconciles the two priority bands against the stored tunnels and the
+// carriers that are not tunnels.
 //
 // Called after every save, delete and boot. Whole-set, so it is also the repair path:
 // a steer rule left behind by a crash, or pointing at a table number a rebuilt device
 // has since given up, is not in the plan and is removed here.
-func vpnOutApplyVia(list []VpnOutboundConfig) {
-	want, problems := vpnOutViaPlan(vpnOutViaFactsOf(list))
+//
+// `extra` has to arrive on EVERY call, not only the ones that touched a carrier. The
+// reconcile deletes everything in the two bands that is not in the plan, so a call made
+// without the carriers a tunnel rides on would compute a plan missing those steers and
+// then remove them - taking a working carried tunnel out to the host's WAN, which is the
+// one failure this whole file is built to prevent.
+func vpnOutApplyVia(list []VpnOutboundConfig, extra []vpnOutViaFacts) {
+	want, problems := vpnOutViaPlan(vpnOutViaFactsOf(list, extra))
 	for _, p := range problems {
 		logger.Warning("vpn outbound:", p+", so its traffic is not being carried")
 	}
@@ -830,7 +909,7 @@ func vpnOutApplyVia(list []VpnOutboundConfig) {
 	}
 }
 
-// vpnOutSteerVia installs the rules that carry one tunnel inside another, and is called
+// vpnOutSteerVia installs the rules that carry one tunnel inside a carrier, and is called
 // BEFORE the carried client is started.
 //
 // The ordering is the point. The steer rule needs the carried tunnel's SERVER address
@@ -838,28 +917,34 @@ func vpnOutApplyVia(list []VpnOutboundConfig) {
 // so there is no reason to wait - and every reason not to: a WireGuard client sends its
 // first handshake the instant its peer is configured, and a rule added a moment later
 // would arrive after that packet had already left in the clear.
-func vpnOutSteerVia(carried, carrier VpnOutboundConfig) error {
+//
+// The carrier arrives as FACTS rather than as a tunnel, which is the whole of what this
+// function gave up to let a carrier be an Xray outbound. The caller resolves it once -
+// carrier.Enable from the tunnel or the outbound, carrier.Table from vpnOutTableOf of
+// whichever device vpnOutCarrierFor named, carrier.ServerAddrs from vpnOutServerAddrs or
+// from the outbound's own uplinks - and every refusal below is unchanged, because none of
+// them was ever about the carrier being a tunnel.
+func vpnOutSteerVia(carried VpnOutboundConfig, carrier vpnOutViaFacts) error {
 	if !carrier.Enable {
 		return fmt.Errorf("%s is carried by %s, which is disabled", carried.Tag, carrier.Tag)
 	}
-	table := vpnOutTableOf(carrier.Iface)
-	if table == 0 {
+	if carrier.Table == 0 {
 		return fmt.Errorf("%s is carried by %s, which is not up", carried.Tag, carrier.Tag)
 	}
 	carriedAddrs, _, err := vpnOutServerAddrs(carried)
 	if err != nil {
 		return err
 	}
-	carrierAddrs, _, err := vpnOutServerAddrs(carrier)
-	if err != nil {
-		return err
-	}
-	if err := vpnOutViaClash(carried.Tag, carriedAddrs, carrier.Tag, carrierAddrs); err != nil {
+	// Trimmed here as well as at the caller, because a Via of one space is not "" and
+	// vpnOutViaRules reads it as "this carrier is itself carried" - which silently drops
+	// the exclusion that keeps the carrier's own outer transport out of itself.
+	carrier.Via = strings.TrimSpace(carrier.Via)
+	if err := vpnOutViaClash(carried.Tag, carriedAddrs, carrier.Tag, carrier.ServerAddrs); err != nil {
 		return err
 	}
 	rules := vpnOutViaRules(
 		vpnOutViaFacts{Tag: carried.Tag, Via: carrier.Tag, Enable: true, ServerAddrs: carriedAddrs},
-		vpnOutViaFacts{Tag: carrier.Tag, Via: strings.TrimSpace(carrier.Via), Enable: true, ServerAddrs: carrierAddrs, Table: table},
+		carrier,
 	)
 	have, _, err := vpnOutListRules()
 	if err != nil {

@@ -55,6 +55,9 @@ var (
 	// inbound id, nothing else. "wgc-home", "wgc0x" and "awg_office" are theirs.
 	wgcNameRe = regexp.MustCompile(`^wgc[0-9]+$`)
 	awgNameRe = regexp.MustCompile(`^awg[0-9]+$`)
+
+	// vpnOutCarrierNameRe matches vpnOutCarrierDev's normal form: xcar<8 hex>.
+	vpnOutCarrierNameRe = regexp.MustCompile(`^xcar[0-9a-f]{8}$`)
 )
 
 // greOwnedName reports whether a netdev name has the exact shape GreService
@@ -103,6 +106,29 @@ func wgcOwnsLink(l netlink.Link) bool {
 		return false
 	}
 	if _, ok := l.(*netlink.Wireguard); !ok {
+		return false
+	}
+	return !ownForbidsDelete(ownIface, name)
+}
+
+// vpnOutCarrierOwnedName reports whether a netdev name has the exact shape
+// vpnoutcarrier.go generates: "xcar" plus eight hex digits of the carrier tag's hash.
+// Anchored and fixed-width, so it cannot match a device somebody named "xcar" or
+// "xcar0" by hand.
+func vpnOutCarrierOwnedName(name string) bool { return vpnOutCarrierNameRe.MatchString(name) }
+
+// vpnOutCarrierOwnsLink is the full ownership test for a carrier tun.
+//
+// The kind gate matters more here than for the other families, because this is the one
+// device the panel creates that a person might plausibly also create: a tuntap is what
+// every VPN client on earth makes. The name shape is what carries the identity, and the
+// kind check stops a bridge or a dummy wearing the name from being deleted.
+func vpnOutCarrierOwnsLink(l netlink.Link) bool {
+	name := l.Attrs().Name
+	if !vpnOutCarrierOwnedName(name) {
+		return false
+	}
+	if _, ok := l.(*netlink.Tuntap); !ok {
 		return false
 	}
 	return !ownForbidsDelete(ownIface, name)
@@ -167,6 +193,17 @@ func ownSynthesizeIfaces(installed map[string]bool) int {
 				continue
 			}
 			core = "awg"
+		case vpnOutCarrierOwnedName(l.Attrs().Name):
+			if _, ok := l.(*netlink.Tuntap); !ok {
+				continue
+			}
+			// Deliberately keyed on a core NOBODY installs, so a device wearing this
+			// name shape on a host the panel has not made one on is recorded as
+			// pre-existing and vetoed from every later delete. Carrier devices are not
+			// a core: they are made on demand when a tunnel names an Xray outbound as
+			// its carrier, so "is the core installed" has no answer for them and the
+			// safe answer is the one that never deletes somebody else's tuntap.
+			core = "vpnoutcarrier"
 		default:
 			continue
 		}

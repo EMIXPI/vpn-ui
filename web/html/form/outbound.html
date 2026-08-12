@@ -2137,15 +2137,23 @@
              dialerProxy set to a live OpenVPN tunnel's tag exited at the tunnel's
              address, not the host's.
 
-             On a VPN tunnel row the panel handles it, because Xray cannot: the
-             tunnel's outer transport is dialled by a client daemon, not by the core.
-             Saving posts this value as the tunnel's `via`, and the panel installs
-             the ip rules that steer that daemon's packets into the carrier's table
-             (web/service/vpnoutvia.go). The key itself is stripped from the emitted
-             config, where it would cancel the interface pin - deliberate, and
-             explained at vpnOutStreamSettings. A pick the panel cannot deliver (an
-             ordinary outbound, which has no netdev to steer into) is refused at
-             save, naming the tunnel kind and what it can do instead. -->
+             On a VPN tunnel row, and on an SSH tunnel row, the panel handles it,
+             because Xray cannot: the tunnel's outer transport is dialled by a client
+             daemon, not by the core. Saving posts this value as the tunnel's `via`,
+             and the panel installs the ip rules that steer that daemon's packets into
+             the carrier's table (web/service/vpnoutvia.go). The key itself is stripped
+             from the emitted config, where it would cancel the interface pin -
+             deliberate, and explained at vpnOutStreamSettings.
+
+             ANY tag may be named here now, not only another tunnel. The panel resolves
+             it to a device three ways (web/service/vpnoutcarrier.go): a tunnel uses its
+             own netdev; a freedom outbound with an Interface is already a device; and
+             any other outbound gets a tun device the core attaches to, whose traffic
+             leaves through that outbound. The first two carry anything, including GRE
+             and ESP. The third carries TCP and UDP only, which is measured, so a tunnel
+             whose outer transport is neither is refused at save, naming the protocol
+             and what to change - PPTP's data channel is raw GRE and has no such
+             setting, so for PPTP the answer is one of the first two. -->
         <a-form-item label="Dialer Proxy">
           <a-select
             v-model="outbound.stream.sockopt.dialerProxy"
