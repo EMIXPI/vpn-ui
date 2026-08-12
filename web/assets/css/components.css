@@ -2529,3 +2529,182 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
   color: var(--accent);
   background-color: var(--accent-weak);
 }
+
+/* ================================================================== *
+ * Inbounds list: the Manifest row
+ *
+ * The list page used to spend eleven columns on one inbound, and up to a
+ * dozen coloured pills per row: protocol, network, TLS, Reality, five
+ * account popovers, traffic, all-time, expiry. Nothing had a shape, so
+ * nothing could be scanned.
+ *
+ * Five columns now. Remark, protocol, port, network and security collapse
+ * into one identity cell (a name over a monospace signature); traffic and
+ * all-time become a used/cap pair over a meter; the five account popovers
+ * become one segmented bar with a plain-English line under it.
+ *
+ * Deliberately NOT scoped under .inbounds-page. Some of these run inside
+ * a-popover content, which antd portals onto <body>, outside #app and
+ * therefore outside the page class. The bo-il- prefix is the isolation.
+ * ================================================================== */
+
+/* --- identity ----------------------------------------------------- */
+.bo-il-ident { display:flex; align-items:center; gap:9px; min-width:0; }
+.bo-il-ident > .bo-il-lines { min-width:0; }
+
+/* Two type sizes and no more, both straight off the scale: --fs-base for
+   anything that answers the row's question (the remark, the figure, the
+   count) and --fs-sm for anything that qualifies the answer. An earlier
+   pass ran a step lower throughout, at 13.5/11px, which is what the
+   prototype was drawn at in a page of its own - next to the panel's other
+   tables, whose cells inherit --fs-base, the whole row read as fine print. */
+
+/* Health, not intent: the switch beside it says what the operator asked
+   for, this says what the row actually is right now. Always paired with
+   the title text below, never colour alone. */
+.bo-il-lamp {
+  width:9px; height:9px; border-radius:50%; flex:none;
+  background:var(--off);
+}
+.bo-il-lamp[data-state="ok"] { background:var(--ok); }
+.bo-il-lamp[data-state="warn"] { background:var(--warn); }
+.bo-il-lamp[data-state="error"] { background:var(--error); }
+.bo-il-lamp[data-state="off"] { background:var(--off); }
+
+.bo-il-name {
+  display:block; font-size:var(--fs-base); font-weight:var(--fw-semibold); color:var(--text);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* The technical signature: protocol, where it listens, how it is wrapped.
+   Pinned LTR because it is machine text and a Persian or Arabic locale
+   would otherwise reorder ":8080 - tcp - tls" around the separators.
+   A monospace face sets smaller than the sans at the same size, so this
+   still reads a clear step below the remark at --fs-sm. */
+.bo-il-meta {
+  display:block; font-family:var(--font-mono); font-size:var(--fs-sm);
+  color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  direction:ltr; unicode-bidi:isolate; text-align:start;
+}
+/* The protocol name is the "what is this" answer and the only part of this
+   line anyone reads first, so it takes the full size while the transport and
+   security tokens beside it stay a step down. It does not fight the remark
+   above it: different family, lighter colour. */
+.bo-il-meta b {
+  color:var(--text-2); font-weight:var(--fw-semibold); font-size:var(--fs-base);
+}
+/* Inside the mobile info popover there is no column to overflow, and the
+   signature is the heading of the whole panel, so it wraps instead. */
+.bo-il-meta--wrap { white-space:normal; overflow:visible; }
+
+/* Separator between the blocks of that popover. A plain rule rather than
+   a-divider, which brings its own vertical rhythm and a wrapper element. */
+.bo-il-rule { border-top:1px solid var(--border); margin:9px 0; }
+
+/* On a phone the table drops table-layout:fixed (the wide one gets it from
+   scroll.x, the narrow one has no scroll set), so a cell that refuses to wrap
+   makes the whole table wider than the screen and pushes the last column off
+   the right edge. Both lines wrap here instead. Vertical room is the thing a
+   phone has; ellipsis is for the desktop column, which is measured. */
+@media (max-width:768px) {
+  .bo-il-name, .bo-il-meta { white-space:normal; overflow-wrap:anywhere; }
+}
+
+/* --- data + accounts share one head/bar/foot shape ---------------- */
+.bo-il-top {
+  display:flex; align-items:baseline; justify-content:space-between;
+  gap:10px; font-size:var(--fs-base); margin-bottom:5px;
+}
+.bo-il-used { font-family:var(--font-mono); font-weight:var(--fw-semibold); color:var(--text); }
+.bo-il-cap { font-family:var(--font-mono); font-size:var(--fs-sm); color:var(--text-3); }
+.bo-il-sub {
+  display:block; margin-top:5px; font-size:var(--fs-sm); color:var(--text-3);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+.bo-il-meter {
+  height:5px; border-radius:var(--radius-pill);
+  background:var(--surface-2); overflow:hidden;
+}
+.bo-il-meter > i {
+  display:block; height:100%; border-radius:var(--radius-pill);
+  background:var(--accent);
+}
+.bo-il-meter--warn > i { background:var(--warn); }
+.bo-il-meter--error > i { background:var(--error); }
+
+/* One bar, five segments, sized by share. Replaces five a-popover tags
+   whose numbers had to be read one at a time to learn the same thing. */
+.bo-il-acc {
+  display:flex; gap:1px; height:5px; border-radius:var(--radius-pill);
+  background:var(--surface-2); overflow:hidden;
+}
+.bo-il-acc > i { display:block; height:100%; }
+.bo-il-acc--online { background:var(--info); }
+.bo-il-acc--idle { background:var(--border-strong); }
+.bo-il-acc--expiring { background:var(--warn); }
+.bo-il-acc--depleted { background:var(--error); }
+.bo-il-acc--off { background:var(--off); }
+
+.bo-il-n { font-family:var(--font-mono); font-weight:var(--fw-semibold); color:var(--text); }
+.bo-il-online { font-family:var(--font-mono); font-size:var(--fs-sm); color:var(--info); }
+
+/* --- endpoint ------------------------------------------------------
+   The address a client dials. Right-aligned in its column so the ports
+   stack and the eye runs down one edge rather than hunting a different
+   offset per row; the host is the part that repeats, so it recedes and
+   the port keeps the contrast. */
+.bo-il-ep {
+  display:flex; flex-direction:column; align-items:flex-end; gap:3px;
+  font-family:var(--font-mono); font-size:var(--fs-sm);
+  direction:ltr; unicode-bidi:isolate;
+}
+.bo-il-ep--start { align-items:flex-start; margin-top:6px; }
+.bo-il-ep-line {
+  display:inline-flex; align-items:baseline; max-width:100%;
+  padding:1px 5px; margin-inline-end:-5px; border-radius:5px;
+  cursor:pointer; white-space:nowrap;
+}
+.bo-il-ep--start .bo-il-ep-line { margin-inline-end:0; margin-inline-start:-5px; }
+.bo-il-ep-line:hover { background:var(--surface-2); }
+.bo-il-ep-tag { color:var(--text-3); margin-inline-end:6px; }
+/* No text-overflow here. endpointHost() has already elided from the middle,
+   and a CSS ellipsis on top of that produced a host with TWO of them
+   (cdn.a-very-…xampl…), which reads as corruption rather than truncation. */
+.bo-il-ep-host { color:var(--text-3); }
+.bo-il-ep-port { color:var(--text); font-weight:var(--fw-semibold); }
+/* Present at rest but nearly silent: a copy glyph on every row of a long
+   table is noise, and one that only appears on hover cannot be found by
+   someone who does not already know it is there. */
+.bo-il-ep-copy {
+  margin-inline-start:6px; font-size:11px; color:var(--text-3);
+  opacity:.35; transition:opacity var(--dur-fast) var(--ease);
+}
+.bo-il-ep-line:hover .bo-il-ep-copy { opacity:1; color:var(--accent); }
+.bo-il-ep-more { font-size:var(--fs-xs); color:var(--text-3); cursor:default; }
+
+/* --- the .ovpn download, against the protocol name -----------------
+   Inline with "OpenVPN" rather than out in the actions cell, because it
+   is not a row action like edit or delete - it is what that word means
+   here. Accent, because it is an action with an outcome, and because it
+   only ever appears on OpenVPN rows, so it cannot become wallpaper the
+   way a per-row accent on every row would.
+
+   Sized OFF the protocol name rather than at a number of its own, so the
+   two cannot drift if the scale moves. The multiplier is not decoration:
+   an icon glyph does not fill its em box the way letters do, so at a
+   nominal 14px it reads visibly smaller than the 14px word beside it. */
+.bo-il-dl {
+  font-size:calc(var(--fs-base) * 1.35); color:var(--accent);
+  margin-inline-start:8px; vertical-align:-4px;
+  padding:2px; border-radius:5px; line-height:1;
+  transition:background var(--dur-fast) var(--ease);
+}
+.bo-il-dl:hover { background:var(--accent-weak); }
+
+/* --- expiry + the no-limit mark ----------------------------------- */
+/* Full size: this is the whole content of its column, not a qualifier. */
+.bo-il-exp { font-family:var(--font-mono); font-size:var(--fs-base); color:var(--text-2); }
+.bo-il-exp--warn { color:var(--warn); }
+.bo-il-exp--error { color:var(--error); }
+.bo-il-inf { font-size:var(--fs-md); line-height:1; color:var(--text-3); }
+.bo-il-none { font-size:var(--fs-base); color:var(--text-3); }
