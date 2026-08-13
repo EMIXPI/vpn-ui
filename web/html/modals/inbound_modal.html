@@ -1,4 +1,20 @@
 {{define "modals/inboundModal"}}
+{{if .legacyInboundForm}}
+<!-- THE OLD DIALOG, served whole when the panel-wide Old inbound modify UI setting is on.
+     Byte-identical to the pre-redesign modal: antd's default 520px, its default footer,
+     and form/inbound/legacy inside it. The choice is made HERE, server-side, rather than
+     with a v-if, so only one of the two forms is ever parsed by Vue and neither dialog
+     pays for the other. Flipping the setting reloads the page for that reason.
+
+     Everything below the markup - inModal, the computed properties, modalFormValid -
+     is shared by both dialogs. Only the shape differs. -->
+<a-modal id="inbound-modal" v-model="inModal.visible" :title="inModal.title" :dialog-style="{ top: '20px' }"
+    @ok="inModal.ok" :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
+    :ok-button-props="{ props: { disabled: !modalFormValid } }"
+    :class="themeSwitcher.currentTheme" :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'>
+    {{template "form/inbound/legacy"}}
+</a-modal>
+{{else}}
 <!-- 820px and a custom footer, both to match the client form (modals/client_membership_modal.html).
      The footer is custom because the default one can only disable the OK button, and a
      disabled button with no reason attached is the defect this dialog exists to fix: a
@@ -29,6 +45,7 @@
         </div>
     </template>
 </a-modal>
+{{end}}
 <script>
     // Make inModal globally available to ensure it works with any base path
     // The lowest port at or above `from` that no existing inbound already claims, so
@@ -75,7 +92,7 @@
         { id: "network",   group: "policy",   icon: "global",             rail: "Network" },
         { id: "access",    group: "policy",   icon: "dashboard",          rail: "Access limits" },
         { id: "quota",     group: "policy",   icon: "pay-circle",         rail: "Quota" },
-        { id: "reach",     group: "policy",   icon: "share-alt",          rail: "Reachability" },
+        { id: "reach",     group: "policy",   icon: "share-alt",          rail: "External Proxy" },
         { id: "sniff",     group: "policy",   icon: "filter",             rail: "Sniffing" },
     ];
     const INBOUND_GROUPS = [

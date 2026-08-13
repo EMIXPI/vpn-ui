@@ -63,6 +63,11 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/updateUser", a.updateUser)
 	g.POST("/twoFactor", a.updateTwoFactor)
 	g.POST("/restartPanel", a.restartPanel)
+	// Its own route rather than a field in AllSetting: the switch is on the
+	// inbounds page, which never loads the settings blob, so posting through
+	// /update would mean fetching every setting just to send them all back -
+	// and any field that round trip got wrong would be saved along with it.
+	g.POST("/inboundForm", a.setLegacyInboundForm)
 	g.GET("/getDefaultJsonConfig", a.getDefaultXrayConfig)
 	g.GET("/service", a.serviceStatus)
 	g.GET("/service/log", a.serviceLog)
@@ -156,6 +161,16 @@ func (a *SettingController) updateSetting(c *gin.Context) {
 		return
 	}
 	err = a.settingService.UpdateAllSetting(allSetting)
+	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
+}
+
+// setLegacyInboundForm switches the panel between the old inbound dialog and the
+// current one, for everyone. Form-encoded like every other POST the panel makes
+// (assets/js/util/index.js stringifies each body), so the flag arrives as a
+// string and "true" is the only value that turns it on.
+func (a *SettingController) setLegacyInboundForm(c *gin.Context) {
+	enabled := c.PostForm("enabled") == "true"
+	err := a.settingService.SetLegacyInboundForm(enabled)
 	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
 }
 

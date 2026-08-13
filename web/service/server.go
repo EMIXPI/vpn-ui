@@ -413,8 +413,10 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 	}
 	status.CpuModel = s.cachedCpuModel
 	// Read fresh every poll, and deliberately NOT cached: the whole point of it is
-	// that it moves.
-	status.CpuSpeedCurMhz = liveCpuMhz()
+	// that it moves. The rated speed goes in because a host with no readable clock
+	// (every virtual machine) is measured instead, and a measurement of how fast the
+	// vCPU is actually going has to be scaled by something to be stated in MHz.
+	status.CpuSpeedCurMhz = liveCpuMhz(status.CpuSpeedMhz)
 
 	// Uptime
 	// This process's own uptime, alongside the host's below.

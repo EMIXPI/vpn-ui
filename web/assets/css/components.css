@@ -1230,6 +1230,13 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 .bo-cf-rail {
   flex:0 0 200px; border-inline-end:1px solid var(--border);
   background:var(--surface-2); display:flex; flex-direction:column;
+  /* Same reason as the pane below: without it the rail refuses to shrink under
+     its own content, and the sections that do not fit are pushed out of the
+     dialog and clipped by .ant-modal-body's overflow:hidden rather than being
+     scrolled to. On a 700px-tall window that lost the last two entries of a
+     nine-section inbound - reported as "some parts cannot be reached on a
+     smaller screen", and unreachable is exactly what they were. */
+  min-height:0;
 }
 /* min-height:0 is what lets the pane actually scroll: a flex item defaults to
    min-height:auto, which refuses to shrink below its content and pushes the
@@ -1248,7 +1255,13 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 }
 .bo-cf-kv b { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
 
-.bo-cf-tabs { padding:10px; display:flex; flex-direction:column; gap:2px; }
+/* The section list scrolls, not the whole rail: the summary above it says WHOSE
+   dialog this is, and scrolling that away to reach the last section is how the
+   operator loses track of which inbound they are editing. */
+.bo-cf-tabs {
+  padding:10px; display:flex; flex-direction:column; gap:2px;
+  flex:1 1 auto; min-height:0; overflow-y:auto;
+}
 .bo-cf-tab {
   display:flex; align-items:center; gap:9px; width:100%;
   font:inherit; font-size:13.5px; text-align:start; cursor:pointer;
@@ -1356,12 +1369,69 @@ html[data-theme-animations='off'] .log-live-dot { animation:none; }
 .bo-cf-stem { color:var(--text-3); }
 
 /* The rail stacks above the pane once there is no room beside it. */
+/* The rail dialogs on a narrow screen.
+ *
+ * Three things were wrong here at once, and all three read to an operator as
+ * "part of this dialog cannot be reached".
+ *
+ * 1. The sections scrolled SIDEWAYS. Stacking the rail on top turned nine
+ *    sections into a 1227px strip inside a 350px window, so two of them were on
+ *    screen and the other seven were behind a horizontal scroll with nothing but
+ *    a hairline scrollbar to suggest they existed. They wrap now: every section
+ *    is visible at once, which is the whole job of a rail.
+ *
+ * 2. The pane stopped scrolling. `overflow-y:visible` let a 479px section spill
+ *    out of a 438px pane, and .ant-modal-body (custom.css) is overflow-y:hidden,
+ *    so the spill was CLIPPED rather than scrolled: on a 390x844 phone the last
+ *    40px of every long section - the Port field among them - simply could not be
+ *    got at. The pane keeps its own scrollbar here, exactly as on the desktop.
+ *
+ * 3. The dialog gave the pane almost nothing to work with, because the summary
+ *    block above it is written for a 200px column and kept all four of its rows.
+ *    On a phone it is trimmed to the name; the fields it recapped are in the form
+ *    itself, a few taps away.
+ */
 @media (max-width:640px) {
-  .bo-cf { flex-direction:column; height:auto; }
-  .bo-cf-rail { flex:0 0 auto; border-inline-end:0; border-bottom:1px solid var(--border); }
-  .bo-cf-tabs { flex-direction:row; overflow-x:auto; }
-  .bo-cf-tab { width:auto; white-space:nowrap; }
-  .bo-cf-pane { overflow-y:visible; }
+  .bo-cf {
+    flex-direction:column; height:auto;
+    /* Taller than the desktop ceiling: with the rail stacked ON TOP of the pane
+       rather than beside it, the same allowance leaves the pane a letterbox. The
+       180px covers the modal's header, its footer and the 20px it is offset by,
+       with room to spare on the shortest phone. */
+    max-height:calc(100vh - 180px);
+  }
+  .bo-cf-rail {
+    flex:0 0 auto; border-inline-end:0; border-bottom:1px solid var(--border);
+  }
+  /* Trimmed to the title. Protocol, ports, account count and usage are all
+     visible in the form below, and on a 640px-tall phone those four rows cost
+     more than they tell. */
+  .bo-cf-summary { padding:12px 14px; }
+  .bo-cf-summary .bo-cf-sub,
+  .bo-cf-summary .bo-cf-kv { display:none; }
+  /* Wraps rather than scrolls. */
+  .bo-cf-tabs {
+    flex-direction:row; flex-wrap:wrap; gap:4px; padding:8px;
+    overflow:visible;
+  }
+  .bo-cf-tab {
+    width:auto; white-space:nowrap; font-size:12.5px; gap:6px; padding:7px 9px;
+  }
+  /* The group headings are a desktop nicety and a wrap-breaker here: each one
+     would claim a whole row of its own. The sections stay in group order. */
+  .bo-if-grp { display:none; }
+  /* The field count goes with them: it is a comparison aid for a nine-item
+     column, and every character of a chip's width is wanted for its name. */
+  .bo-if-n { display:none; }
+  .bo-cf-pane { padding:16px; }
+}
+
+/* .ant-modal-body drops to 20px of padding at this width (custom.css), so the
+   -24px bleed that makes the rail meet the dialog edge overshoots by 4px on each
+   side - enough for .ant-modal-body's overflow-x:auto to put a scrollbar across
+   the bottom of every rail dialog. */
+@media (max-width:768px) {
+  .bo-cf { margin:-20px; }
 }
 
 /* ================================================================== *

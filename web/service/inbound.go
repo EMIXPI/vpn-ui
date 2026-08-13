@@ -3280,6 +3280,11 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	if err != nil {
 		return err, false, nil, nil, nil
 	}
+	// Before the client records are applied, and with the inbound totals in hand:
+	// Xray's per-account stat names no inbound, and this is where that gap is closed
+	// while the same tick's per-inbound evidence is still available to close it with.
+	// See web/service/coreattribution.go.
+	attributeCoreRecords(tx, inboundTraffics, clientTraffics)
 	err = s.addClientTraffic(tx, clientTraffics)
 	if err != nil {
 		return err, false, nil, nil, nil

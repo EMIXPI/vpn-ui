@@ -87,6 +87,11 @@ var defaultValueMap = map[string]string{
 	"externalTrafficInformURI":    "",
 	"xrayOutboundTestUrl":         "https://www.google.com/generate_204",
 	"geofileAutoUpdate":           "true",
+	// Serve the pre-redesign inbound dialog instead of the rail one. Panel-wide,
+	// not per browser: operators asked for it back for their whole team, and a
+	// preference each admin had to find and flip on every device they use is not
+	// the thing that was asked for. Off means the current form.
+	"legacyInboundForm": "false",
 
 	// LDAP defaults
 	"ldapEnable":            "false",
@@ -851,6 +856,28 @@ func (s *SettingService) GetGeofileAutoUpdate() (bool, error) {
 // SetGeofileAutoUpdate turns the periodic geo data refresh on or off.
 func (s *SettingService) SetGeofileAutoUpdate(value bool) error {
 	return s.setBool("geofileAutoUpdate", value)
+}
+
+// GetLegacyInboundForm reports whether the inbounds page should serve the old
+// inbound dialog - one scrolling column at 520px - instead of the rail form that
+// replaced it. Off by default; the panel ships the current form.
+//
+// Read where the inbounds PAGE is rendered rather than over XHR, because the
+// answer decides which of the two form templates Go writes into the HTML. Asking
+// afterwards would mean shipping both and letting Vue throw one away.
+//
+// Deliberately NOT part of entity.AllSetting, for the same reason
+// GetGeofileAutoUpdate is not: AllSetting is bound wholesale from the Settings
+// form, so a key outside that form is written back as false by the next unrelated
+// Settings save.
+func (s *SettingService) GetLegacyInboundForm() (bool, error) {
+	return s.getBool("legacyInboundForm")
+}
+
+// SetLegacyInboundForm switches the whole panel between the old inbound dialog
+// and the current one.
+func (s *SettingService) SetLegacyInboundForm(value bool) error {
+	return s.setBool("legacyInboundForm", value)
 }
 
 // GetLdapEnable returns whether LDAP is enabled.

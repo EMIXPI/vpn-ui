@@ -151,35 +151,71 @@
                   </a-space>
                 </template>
                 <template #extra>
-                  <a-button-group>
-                    <a-button icon="sync" @click="manualRefresh"
-                      :loading="refreshing"></a-button>
-                    <a-popover placement="bottomRight" trigger="click"
-                      :overlay-class-name="themeSwitcher.currentTheme">
-                      <template #title>
-                        <div class="ant-custom-popover-title">
-                          <a-switch v-model="isRefreshEnabled"
-                            @change="toggleRefresh" size="small"></a-switch>
-                          <span>{{ i18n "pages.inbounds.autoRefresh" }}</span>
-                        </div>
-                      </template>
-                      <template #content>
-                        <a-space direction="vertical">
-                          <span>{{ i18n "pages.inbounds.autoRefreshInterval"
-                            }}</span>
-                          <a-select v-model="refreshInterval"
-                            :disabled="!isRefreshEnabled"
-                            :style="{ width: '100%' }"
-                            @change="changeRefreshInterval"
-                            :dropdown-class-name="themeSwitcher.currentTheme">
-                            <a-select-option v-for="key in [5,10,30,60]"
-                              :value="key*1000">[[ key ]]s</a-select-option>
-                          </a-select>
-                        </a-space>
-                      </template>
-                      <a-button icon="down"></a-button>
-                    </a-popover>
-                  </a-button-group>
+                  <div
+                    :style="{ display: 'flex', alignItems: 'center', gap: '10px' }">
+                    <!-- Offered only to panel-settings holders because it is one
+                         setting for the whole panel, and the route that writes it
+                         takes that same permission: showing the switch to a
+                         delegated admin or a reseller would give them a control
+                         whose every use is refused.
+
+                         Hardcoded English, like the section names in the form
+                         itself: an en_US-only key blanks the label in the other
+                         twelve locales and grows the parity ratchet in
+                         web/i18n_toml_test.go. -->
+                    {{ if .perms.accessPanelSettings }}
+                    <span
+                      :style="{ display: 'inline-flex', alignItems: 'center', gap: '6px' }">
+                      <a-switch :checked="legacyInboundForm"
+                        :loading="legacyInboundFormSaving"
+                        @change="toggleLegacyInboundForm" size="small"></a-switch>
+                      <!-- The card header is one flex row and the title beside it
+                           carries the Add Inbound and General Actions buttons, so on
+                           a phone the words are dropped rather than left to squeeze
+                           them. The tooltip still says what the switch does, which
+                           is why its text names the dialog instead of relying on
+                           this label. -->
+                      <span v-if="!isMobile">Old inbound modify UI</span>
+                      <a-tooltip :overlay-class-name="themeSwitcher.currentTheme">
+                        <template slot="title">
+                          <span>Serves the Add and Edit inbound dialog as it was
+                            before the redesign, to every admin on this panel. The
+                            page reloads when this changes.</span>
+                        </template>
+                        <a-icon type="question-circle"></a-icon>
+                      </a-tooltip>
+                    </span>
+                    {{ end }}
+                    <a-button-group>
+                      <a-button icon="sync" @click="manualRefresh"
+                        :loading="refreshing"></a-button>
+                      <a-popover placement="bottomRight" trigger="click"
+                        :overlay-class-name="themeSwitcher.currentTheme">
+                        <template #title>
+                          <div class="ant-custom-popover-title">
+                            <a-switch v-model="isRefreshEnabled"
+                              @change="toggleRefresh" size="small"></a-switch>
+                            <span>{{ i18n "pages.inbounds.autoRefresh" }}</span>
+                          </div>
+                        </template>
+                        <template #content>
+                          <a-space direction="vertical">
+                            <span>{{ i18n "pages.inbounds.autoRefreshInterval"
+                              }}</span>
+                            <a-select v-model="refreshInterval"
+                              :disabled="!isRefreshEnabled"
+                              :style="{ width: '100%' }"
+                              @change="changeRefreshInterval"
+                              :dropdown-class-name="themeSwitcher.currentTheme">
+                              <a-select-option v-for="key in [5,10,30,60]"
+                                :value="key*1000">[[ key ]]s</a-select-option>
+                            </a-select>
+                          </a-space>
+                        </template>
+                        <a-button icon="down"></a-button>
+                      </a-popover>
+                    </a-button-group>
+                  </div>
                 </template>
                 <a-space direction="vertical">
                   <div
@@ -615,7 +651,10 @@
 {{template "component/aPersianDatepicker" .}}
 {{template "component/aTableSortable" .}}
 {{template "component/clientActions" .}}
-{{template "modals/inboundModal"}}
+{{/* Takes the page data because it picks between the rail form and the old one
+     server-side, off .legacyInboundForm. Without the dot the define runs with a
+     nil context and that key cannot be read. */}}
+{{template "modals/inboundModal" .}}
 {{template "modals/promptModal"}}
 {{template "modals/qrcodeModal"}}
 {{template "modals/textModal"}}
@@ -740,10 +779,22 @@
       defaultKey: '',
       clientCount: [],
       onlineClients: [],
+      // "<inboundId>:<email>" for each pair seen in the last traffic tick. Consumed
+      // by membershipOnline (component/clientActions.html), which is what the
+      // accounts cell counts its online tally with.
+      onlineMemberships: [],
       lastOnlineMap: {},
       isRefreshEnabled: localStorage.getItem("isRefreshEnabled") === "true" ? true : false,
       refreshing: false,
       refreshInterval: Number(localStorage.getItem("refreshInterval")) || 5000,
+      // Which inbound dialog this panel serves. Seeded from the server-rendered
+      // flag rather than fetched, because the page was already WRITTEN with one
+      // of the two forms in it: asking afterwards could only ever disagree with
+      // what is on screen. Not localStorage either - it is one panel-wide
+      // setting, so a second admin sees the same dialog without flipping
+      // anything on their own machine.
+      legacyInboundForm: {{ if .legacyInboundForm }}true{{ else }}false{{ end }},
+      legacyInboundFormSaving: false,
       subSettings: {
         enable: false,
         subTitle: '',
@@ -785,6 +836,7 @@
 
         await this.getLastOnlineMap();
         await this.getOnlineUsers();
+        await this.getOnlineMemberships();
 
         this.setInbounds(msg.obj);
         setTimeout(() => {
@@ -823,6 +875,18 @@
           return;
         }
         this.onlineClients = msg.obj != null ? msg.obj : [];
+      },
+      // WHICH inbound each online account was seen on, as "<inboundId>:<email>" pairs,
+      // with inbound 0 for a session the core could not place (see
+      // web/service/coreattribution.go). The account-wide list above cannot answer
+      // that, and using it per inbound is what reported a customer connected over one
+      // inbound as online on all ten they hold.
+      async getOnlineMemberships() {
+        const msg = await HttpUtil.post('/panel/api/inbounds/onlineMemberships');
+        if (!msg.success) {
+          return;
+        }
+        this.onlineMemberships = msg.obj != null ? msg.obj : [];
       },
       async getLastOnlineMap() {
         const msg = await HttpUtil.post('/panel/api/inbounds/lastOnline');
@@ -902,7 +966,17 @@
             clients.forEach(client => {
               if (client.enable) {
                 active.push(client.email);
-                if (this.isClientOnline(client.email)) online.push(client.email);
+                // Online ON THIS INBOUND, not online anywhere. isClientOnline is an
+                // account-wide answer, and asking it once per inbound is what made a
+                // customer connected over one of their ten inbounds count as an
+                // online client on all ten - every row's tally inflated by the same
+                // session. membershipOnlineShared covers the case the core still
+                // cannot place, which the tooltip and the Clients page both call out
+                // as shared rather than certain.
+                if (this.membershipOnline(dbInbound, client.email) ||
+                  this.membershipOnlineShared(dbInbound, client.email)) {
+                  online.push(client.email);
+                }
               } else {
                 deactive.push(client.email);
               }
@@ -1720,6 +1794,30 @@
       changeRefreshInterval() {
         localStorage.setItem("refreshInterval", this.refreshInterval);
       },
+      // Switch the whole panel between the old inbound dialog and the current one.
+      //
+      // Reloads on success because the two are different Go templates and the
+      // choice was made when this page was served: the dialog already in the DOM
+      // cannot become the other one. The switch is driven by :checked rather than
+      // v-model so a refused or failed save leaves it showing what is actually
+      // stored - a denial here is an HTTP 200 carrying success:false, so the body
+      // is what decides, never the status.
+      async toggleLegacyInboundForm(checked) {
+        const previous = this.legacyInboundForm;
+        this.legacyInboundForm = checked;
+        this.legacyInboundFormSaving = true;
+        try {
+          const msg = await HttpUtil.post('/panel/setting/inboundForm', { enabled: checked });
+          if (msg && msg.success) {
+            window.location.reload();
+            return;
+          }
+          this.legacyInboundForm = previous;
+        } catch (e) {
+          this.legacyInboundForm = previous;
+        }
+        this.legacyInboundFormSaving = false;
+      },
       async manualRefresh() {
         if (!this.refreshing) {
           this.loadingStates.spinning = true;
@@ -1813,7 +1911,23 @@
           // Update online clients list in real-time
           if (payload && Array.isArray(payload.onlineClients)) {
             const nextOnlineClients = payload.onlineClients;
-            let onlineChanged = this.onlineClients.length !== nextOnlineClients.length;
+            // Which inbound each of them is on, from the same tick. Taken first,
+            // because the recount below reads it.
+            let onlineChanged = false;
+            if (Array.isArray(payload.onlineMemberships)) {
+              const prev = this.onlineMemberships || [];
+              const next = payload.onlineMemberships;
+              // A recount is owed when the PAIRS change, not only when the set of
+              // online accounts does: a customer moving from one of their inbounds
+              // to another leaves the account-wide list identical while every
+              // per-inbound tally on the page is now wrong.
+              onlineChanged = prev.length !== next.length ||
+                next.some((pair, i) => pair !== prev[i]);
+              this.onlineMemberships = next;
+            }
+            if (!onlineChanged) {
+              onlineChanged = this.onlineClients.length !== nextOnlineClients.length;
+            }
             if (!onlineChanged) {
               const prevSet = new Set(this.onlineClients);
               for (const email of nextOnlineClients) {

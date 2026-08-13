@@ -143,6 +143,17 @@ func resetMembershipUsage(tx *gorm.DB, emails []string) {
 // covering both and there is nothing to split it by.
 func countedByPanel(p model.Protocol) bool { return isVpnProtocol(p) || isRelayProtocol(p) }
 
+// mayHoldCoreTraffic reports whether an inbound can be the source of bytes that Xray
+// counted per ACCOUNT without naming an inbound - the pooled remainder below.
+//
+// It is the same test attributeCoreRecords picks its candidates with, and shares its
+// reasoning: an inbound Xray terminates itself produces a user stat, a relay's paired
+// socks inbound produces one under the account's email, and a pool VPN protocol
+// produces none at all because its dokodemo-door carries no user identity. Written
+// once, here, so the figure a membership DISPLAYS cannot end up disagreeing with the
+// set of inbounds the attribution was willing to consider.
+func mayHoldCoreTraffic(p model.Protocol) bool { return !isVpnProtocol(p) }
+
 // membershipUsageRow is one membership's share, joined to the identity it belongs to
 // and to the inbound holding it.
 type membershipUsageRow struct {
@@ -241,26 +252,25 @@ func (s *InboundService) attachClientStats(db *gorm.DB, inbounds []*model.Inboun
 		split.byInbound[share.InboundId] = share
 	}
 
-	// What is left after every attributable inbound took its share. Floored at zero:
-	// the two sides are written by different statements in the same tick and a reset
-	// clears them independently, so a momentary negative is possible and reads far
-	// worse than a zero.
+	// What is left after every inbound took its share. Floored at zero: the two sides
+	// are written by different statements in the same tick and a reset clears them
+	// independently, so a momentary negative is possible and reads far worse than a
+	// zero.
 	//
-	// ONLY attributable shares are subtracted, and that is the whole of a bug that
-	// made every figure on the Clients page read zero. An Xray-native inbound is
-	// never rendered from its own share (the core's stat carries no inbound, so it
-	// has none to speak of) but from this remainder, so a share parked on one is
-	// subtracted here and then displayed nowhere at all. MigrationMembershipUsage
-	// parked exactly that: on the upgrade that introduced the breakdown it filed
-	// each account's whole history under client_traffics.inbound_id, the account's
-	// HOME inbound, which on the overwhelming majority of panels is a vless or vmess
-	// one. The remainder came out as total-minus-total, so the account's Xray
-	// inbounds showed 0 and its VPN inbounds showed their own (zero) share: every
-	// protocol reporting nothing used while the account row above said gigabytes.
+	// EVERY share is subtracted, including those on Xray-native inbounds, because
+	// those are now real: attributeCoreRecords resolves the core's inbound-less
+	// records to one inbound whenever only one of the account's could have produced
+	// them, and clientStatsFor below renders that share. A share left out of this sum
+	// would be displayed by its own inbound AND still be sitting in the remainder
+	// every other Xray inbound shows, so the account's usage would appear twice.
 	//
-	// Filtering here rather than only fixing the seeder repairs those panels on the
-	// next page load, and makes the class of bug unreachable: a share on an inbound
-	// that cannot render it can no longer eat the figure of one that can.
+	// The historical hazard this replaces was the mirror image: back when an
+	// Xray-native inbound rendered only the remainder, a share parked on one was
+	// subtracted here and displayed nowhere at all, so the Clients page read 0 used
+	// against every inbound of an account that had moved gigabytes. That is what
+	// MigrationMembershipUsage's first backfill did (it filed each account's whole
+	// history under client_traffics.inbound_id, which on most panels is a vless or
+	// vmess inbound), and repairMembershipUsage clears those rows.
 	for key, split := range splits {
 		total := byEmail[key]
 		if total == nil {
@@ -268,9 +278,6 @@ func (s *InboundService) attachClientStats(db *gorm.DB, inbounds []*model.Inboun
 		}
 		var up, down, allTime int64
 		for _, share := range split.byInbound {
-			if !countedByPanel(share.Protocol) {
-				continue
-			}
 			up += share.Up
 			down += share.Down
 			allTime += share.AllTime
@@ -294,7 +301,9 @@ func (s *InboundService) clientStatsFor(
 	byEmail map[string]*xray.ClientTraffic,
 	splits map[string]*accountUsageSplit,
 ) []xray.ClientTraffic {
-	attributable := countedByPanel(inbound.Protocol)
+	// Whether this inbound can be holding some of what the core could not place. Only
+	// such an inbound shows the pooled remainder on top of its own share.
+	pooledHere := mayHoldCoreTraffic(inbound.Protocol)
 
 	stats := make([]xray.ClientTraffic, 0, 8)
 	seen := map[string]bool{}
@@ -334,17 +343,26 @@ func (s *InboundService) clientStatsFor(
 			if total.InboundId == inbound.Id {
 				row.InboundUp, row.InboundDown, row.InboundAllTime = total.Up, total.Down, total.AllTime
 			}
-		case attributable:
+		default:
+			// This inbound's own share: the ticks whose source was known, which is
+			// every tick for a protocol the panel meters itself and the resolvable
+			// ones for an inbound Xray terminates.
 			share := split.byInbound[inbound.Id]
 			row.InboundUp, row.InboundDown, row.InboundAllTime = share.Up, share.Down, share.AllTime
-		default:
-			// Xray-native: the remainder, pooled across every such inbound serving
-			// the account, flagged so the page can say so instead of implying this
-			// one inbound moved all of it.
-			row.InboundUp = split.pooled.Up
-			row.InboundDown = split.pooled.Down
-			row.InboundAllTime = split.pooled.AllTime
-			row.Shared = true
+			// Plus what the core could not place, if this inbound is one of the
+			// inbounds it could have come through. Added rather than substituted, so
+			// an inbound with a resolved share does not lose it, and flagged so the
+			// page can say the surplus is shared with the account's other Xray
+			// inbounds instead of implying this one moved all of it.
+			//
+			// A zero here would read as "this customer has never used it", which is
+			// what the pooling exists to avoid saying.
+			if pooledHere && split.pooled.Up+split.pooled.Down+split.pooled.AllTime > 0 {
+				row.InboundUp += split.pooled.Up
+				row.InboundDown += split.pooled.Down
+				row.InboundAllTime += split.pooled.AllTime
+				row.Shared = true
+			}
 		}
 		stats = append(stats, row)
 	}

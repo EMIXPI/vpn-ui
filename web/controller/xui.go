@@ -82,8 +82,20 @@ func (a *XUIController) index(c *gin.Context) {
 }
 
 // inbounds renders the inbounds management page.
+//
+// It carries which inbound dialog to serve, because the two forms are different
+// templates and Go picks between them while writing the page (see
+// modals/inbound_modal.html). A read failure serves the current form: the panel's
+// default, and the wrong thing to fail closed on.
 func (a *XUIController) inbounds(c *gin.Context) {
-	html(c, "inbounds.html", "pages.inbounds.title", nil)
+	var settingService service.SettingService
+	legacyForm, err := settingService.GetLegacyInboundForm()
+	if err != nil {
+		legacyForm = false
+	}
+	html(c, "inbounds.html", "pages.inbounds.title", gin.H{
+		"legacyInboundForm": legacyForm,
+	})
 }
 
 // clients renders the account-centric Clients page.

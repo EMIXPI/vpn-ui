@@ -887,55 +887,6 @@
         const client = (this.getInboundClients(dbInbound) || []).find(c => c.email === row.email);
         return client ? [client] : [];
       },
-      // --- per-membership liveness -----------------------------------------
-      // Which of an account's inbounds it is actually connected over.
-      //
-      // The account-wide flag (isClientOnline, the lamp on the row) says only THAT a
-      // customer is connected. Every block in this expander used to read it, so an
-      // account on ssh and l2tp connecting over ssh showed both as live and the page
-      // could not answer the one question the expander exists for.
-      //
-      // The set the server sends is "<inboundId>:<email>" per pair seen in the last
-      // traffic tick, with inbound 0 for a session whose source inbound the collector
-      // could not name. That happens for everything Xray counts, whose per-user stat
-      // carries no inbound at all: those memberships are marked live-but-ambiguous
-      // rather than guessed at, exactly as their usage figure is marked shared.
-      //
-      // Indexed once per refresh: this is called for every rendered block, and
-      // Array.includes over the whole panel's sessions per block is quadratic.
-      membershipOnlineIndex() {
-        const list = this.onlineMemberships || [];
-        if (this._onlineIdxSrc !== list) {
-          this._onlineIdxSrc = list;
-          this._onlineIdx = new Set(list);
-        }
-        return this._onlineIdx;
-      },
-      // Seen on THIS inbound. The email is normalised the way the server normalises
-      // it, or an account created as "Foo@x" never matches its own session.
-      membershipOnline(dbInbound, email) {
-        if (!dbInbound || !email) return false;
-        return this.membershipOnlineIndex().has(dbInbound.id + ':' + String(email).trim().toLowerCase());
-      },
-      // Live, but on one of this account's Xray-native inbounds without the core
-      // saying which. Gated on the server's own `shared` flag rather than on a
-      // protocol list kept here, so the liveness and the usage figure cannot end up
-      // disagreeing about whether an inbound can account for itself.
-      membershipOnlineShared(dbInbound, email) {
-        if (!dbInbound || !email) return false;
-        if (!this.isSharedStats(dbInbound, email)) return false;
-        return this.membershipOnlineIndex().has('0:' + String(email).trim().toLowerCase());
-      },
-      membershipLampClass(dbInbound, email) {
-        if (this.membershipOnline(dbInbound, email)) return 'bo-mb-lamp--live';
-        if (this.membershipOnlineShared(dbInbound, email)) return 'bo-mb-lamp--maybe';
-        return '';
-      },
-      membershipOnlineText(dbInbound, email) {
-        if (this.membershipOnline(dbInbound, email)) return '{{ i18n "online" }}';
-        if (this.membershipOnlineShared(dbInbound, email)) return '{{ i18n "pages.clients.onlineShared" }}';
-        return '{{ i18n "offline" }}';
-      },
       // Enabled ON THIS INBOUND. Normally the same as the account's own flag, since
       // a write projects onto every membership, but the per-membership switch below
       // can turn one off on its own.

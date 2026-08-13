@@ -3,6 +3,8 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -129,7 +131,7 @@ func TestCpuMhzFromSysfsReportsUnknownWithNoCpufreqTree(t *testing.T) {
 // whole file exists for: the panel showed a cached cpu.Info().Mhz, which on this
 // host is 4900 forever.
 func TestLiveCpuMhzIsNotTheRatedSpeed(t *testing.T) {
-	got := liveCpuMhz()
+	got := liveCpuMhz(4900)
 	if got == 0 {
 		t.Skip("this host reports no live clock (no cpufreq sysfs, no cpu MHz)")
 	}
@@ -143,5 +145,144 @@ func TestLiveCpuMhzIsNotTheRatedSpeed(t *testing.T) {
 	max := avgSysfsMhz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
 	if max > 0 && got == max {
 		t.Errorf("live clock %v MHz equals the rated maximum (%s): it is not live", got, raw)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// The virtual machine case
+// -----------------------------------------------------------------------------
+
+// A guest has no cpufreq tree and a "cpu MHz" copied from the host's TSC at boot,
+// so every readable source is a constant. Serving that constant as the CURRENT
+// clock is the reported bug ("the cpu clock speed is not live"), and it is worse
+// than serving nothing, because nothing falls through to a figure that does move.
+func TestCpuinfoIsNotTrustedUntilItHasBeenSeenToMove(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cpuinfo")
+	write := func(mhz string) {
+		if err := os.WriteFile(path, []byte("processor\t: 0\ncpu MHz\t\t: "+mhz+"\n"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	// A fresh watch state, so the test does not inherit the host's own verdict.
+	cpuinfoWatch.Lock()
+	cpuinfoWatch.last, cpuinfoWatch.moves = 0, false
+	cpuinfoWatch.Unlock()
+	t.Cleanup(func() {
+		cpuinfoWatch.Lock()
+		cpuinfoWatch.last, cpuinfoWatch.moves = 0, false
+		cpuinfoWatch.Unlock()
+	})
+
+	write("2999.998")
+	for i := 0; i < 4; i++ {
+		if got := movingCpuinfoMhz(path); got != 0 {
+			t.Fatalf("poll %d reported %v MHz from a file that has never changed; on a VM "+
+				"that is the boot-time constant, not the current clock", i, got)
+		}
+	}
+
+	// The same reader on a host where the kernel really does update it.
+	write("3600.121")
+	if got := movingCpuinfoMhz(path); got != 3600.121 {
+		t.Errorf("after the value moved, got %v; want it trusted from then on", got)
+	}
+	// And it stays trusted through a repeat, which an idle machine parked at its
+	// floor legitimately produces.
+	if got := movingCpuinfoMhz(path); got != 3600.121 {
+		t.Errorf("a repeated reading demoted a source already proven live: got %v", got)
+	}
+}
+
+// The measurement that stands in for a clock nobody will report. It cannot be
+// checked against a known frequency here (the whole point is hosts that have
+// none), so what is pinned is the contract the readout depends on: a figure in
+// MHz, never above the rated speed, and one that responds to how much of the CPU
+// this process is actually getting.
+func TestEstimatedCpuMhzIsBoundedByTheRatedSpeed(t *testing.T) {
+	cpuSpin.Lock()
+	cpuSpin.iters, cpuSpin.best = 0, 0
+	cpuSpin.Unlock()
+	t.Cleanup(func() {
+		cpuSpin.Lock()
+		cpuSpin.iters, cpuSpin.best = 0, 0
+		cpuSpin.Unlock()
+	})
+
+	const rated = 3000.0
+	for i := 0; i < 5; i++ {
+		got := estimatedCpuMhz(rated)
+		if got <= 0 {
+			t.Fatalf("estimate %d = %v; a host with a rated speed must always get a figure", i, got)
+		}
+		if got > rated+0.001 {
+			t.Errorf("estimate %d = %v MHz, above the rated %v: the panel must not claim a "+
+				"clock the chip does not have", i, got, rated)
+		}
+	}
+
+	// With no rated speed there is nothing to scale by, and 0 is the caller's
+	// signal to show the rated figure alone rather than a confident zero.
+	if got := estimatedCpuMhz(0); got != 0 {
+		t.Errorf("estimatedCpuMhz(0) = %v; want 0", got)
+	}
+}
+
+// The estimate is a ratio against this host's own best, which is what makes it
+// portable: the cycles-per-iteration of the spin loop differs between x86 and
+// arm64 and cancels out of a division. What must NOT cancel is the signal itself -
+// a vCPU getting less of the machine has to read lower.
+func TestEstimatedCpuMhzFallsWhenTheCpuIsContended(t *testing.T) {
+	if runtime.NumCPU() < 2 {
+		t.Skip("needs more than one core to create contention without starving the test")
+	}
+	cpuSpin.Lock()
+	cpuSpin.iters, cpuSpin.best = 0, 0
+	cpuSpin.Unlock()
+	t.Cleanup(func() {
+		cpuSpin.Lock()
+		cpuSpin.iters, cpuSpin.best = 0, 0
+		cpuSpin.Unlock()
+	})
+
+	const rated = 3000.0
+	// Establish the reference on an otherwise idle process.
+	clear := 0.0
+	for i := 0; i < 8; i++ {
+		if got := estimatedCpuMhz(rated); got > clear {
+			clear = got
+		}
+	}
+
+	// Now oversubscribe every core, so the same burst takes longer wall-clock.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < runtime.NumCPU()*4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					cpuSpinSink += spinXorshift(200_000)
+				}
+			}
+		}()
+	}
+	busy := rated
+	for i := 0; i < 8; i++ {
+		if got := estimatedCpuMhz(rated); got < busy {
+			busy = got
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if busy >= clear {
+		t.Errorf("idle estimate %.0f MHz, contended estimate %.0f MHz: the figure did not "+
+			"respond to the CPU being taken away, so it is not measuring anything", clear, busy)
 	}
 }

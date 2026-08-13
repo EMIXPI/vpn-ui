@@ -57,6 +57,19 @@ type ClientTraffic struct {
 	// caveat rather than inventing a number or hiding one.
 	Shared bool `json:"shared" gorm:"-"`
 
+	// CoreCounted marks a COLLECTED record (never a stored row) as Xray's own user
+	// stat, which is the one measurement that arrives without knowing which inbound
+	// it came through.
+	//
+	// It is what lets the panel finish the attribution the core cannot: an account's
+	// bytes with no inbound on them can only have entered through one of the inbounds
+	// that produce a user stat at all, so when exactly one of those is in play the
+	// answer follows (see attributeCoreRecords). The flag has to be carried rather
+	// than guessed, because a record naming no inbound may equally be a VPN session
+	// the collector could not place, and those bytes did NOT come through an Xray
+	// inbound - attributing them to one would be a fiction.
+	CoreCounted bool `json:"-" gorm:"-"`
+
 	ExpiryTime int64 `json:"expiryTime" form:"expiryTime"`
 	Total      int64 `json:"total" form:"total"`
 	Reset      int   `json:"reset" form:"reset" gorm:"default:0"`

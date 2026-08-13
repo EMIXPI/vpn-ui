@@ -2,6 +2,7 @@ package job
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
@@ -326,6 +327,12 @@ func (j *XrayTrafficJob) Run() {
 
 	// Update online clients list and map
 	onlineClients := j.inboundService.GetOnlineClients()
+	// And WHICH inbound each of them was seen on. The pages count their online
+	// tallies per inbound from this; without it in the push they would recompute
+	// from whatever membership set the last REST fetch left behind, and a session
+	// that moved between two of an account's inbounds would go on lighting the one
+	// it left until the next full refresh.
+	onlineMemberships := j.inboundService.GetOnlineMemberships()
 	lastOnlineMap, err := j.inboundService.GetClientsLastOnline()
 	if err != nil {
 		logger.Warning("get clients last online failed:", err)
@@ -335,7 +342,7 @@ func (j *XrayTrafficJob) Run() {
 	// Traffic names clients, so it is per-admin data and cannot go out panel-wide:
 	// broadcasting it whole put every admin's client emails and usage in every other
 	// admin's browser. Each connected admin gets only their own slice.
-	j.broadcastTrafficScoped(traffics, clientTraffics, onlineClients, lastOnlineMap)
+	j.broadcastTrafficScoped(traffics, clientTraffics, onlineClients, onlineMemberships, lastOnlineMap)
 
 	// Inbounds are per-admin, so this job cannot push a payload: it has no single
 	// correct audience. It used to broadcast GetAllInbounds() to every browser every
@@ -385,6 +392,7 @@ func (j *XrayTrafficJob) broadcastTrafficScoped(
 	traffics []*xray.Traffic,
 	clientTraffics []*xray.ClientTraffic,
 	onlineClients []string,
+	onlineMemberships []string,
 	lastOnlineMap map[string]int64,
 ) {
 	hub := websocket.GetHub()
@@ -417,10 +425,11 @@ func (j *XrayTrafficJob) broadcastTrafficScoped(
 	for _, userId := range userIds {
 		if supers[userId] {
 			websocket.BroadcastTrafficToUser(userId, map[string]any{
-				"traffics":       traffics,
-				"clientTraffics": clientTraffics,
-				"onlineClients":  onlineClients,
-				"lastOnlineMap":  lastOnlineMap,
+				"traffics":          traffics,
+				"clientTraffics":    clientTraffics,
+				"onlineClients":     onlineClients,
+				"onlineMemberships": onlineMemberships,
+				"lastOnlineMap":     lastOnlineMap,
 			})
 			continue
 		}
@@ -436,6 +445,15 @@ func (j *XrayTrafficJob) broadcastTrafficScoped(
 				myOnline = append(myOnline, email)
 			}
 		}
+		// Scoped on the email half of the pair, exactly as the list above is: the
+		// pairs name the same clients, and shipping them unfiltered would hand a
+		// delegated admin the emails the filtering exists to withhold.
+		myMemberships := make([]string, 0, len(onlineMemberships))
+		for _, pair := range onlineMemberships {
+			if _, email, found := strings.Cut(pair, ":"); found && access[email][userId] {
+				myMemberships = append(myMemberships, pair)
+			}
+		}
 		myLastOnline := make(map[string]int64, len(lastOnlineMap))
 		for email, t := range lastOnlineMap {
 			if access[email][userId] {
@@ -446,9 +464,10 @@ func (j *XrayTrafficJob) broadcastTrafficScoped(
 		// omitted for non-super admins rather than shipped unfiltered. The per-client
 		// figures above are what the inbounds table renders.
 		websocket.BroadcastTrafficToUser(userId, map[string]any{
-			"clientTraffics": mine,
-			"onlineClients":  myOnline,
-			"lastOnlineMap":  myLastOnline,
+			"clientTraffics":    mine,
+			"onlineClients":     myOnline,
+			"onlineMemberships": myMemberships,
+			"lastOnlineMap":     myLastOnline,
 		})
 	}
 }
