@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   build-and-boot:
@@ -38,11 +39,22 @@ jobs:
             --progress=plain \
             . 2>&1 | tee build.log
 
-      - name: Surface build failure as annotation
+      - name: Surface build failure
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tail -n 150 build.log | sed ':a;N;$!ba;s/\n/%0A/g' > /tmp/ann.txt
-          head -c 3500 /tmp/ann.txt | awk '{print "::error::" $0}'
+          {
+            echo "### railway-image: build failed"
+            echo ""
+            echo "<details><summary>docker build tail (last 150 lines)</summary>"
+            echo ""
+            echo '```text'
+            tail -n 150 build.log
+            echo '```'
+            echo "</details>"
+          } > comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file comment.md || true
 
       - name: Upload build log
         if: always()

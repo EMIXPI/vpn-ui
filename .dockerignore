@@ -9,7 +9,9 @@
 !.env.example
 
 # local build outputs and hosts' state
-build/
+# NOTE: keep build/ itself — main.go go:embeds build/acme/*.sh — only build/out
+# (the local binary output dir) is excluded.
+build/out/
 vpn-ui
 vpn-ui.db*
 *.log
