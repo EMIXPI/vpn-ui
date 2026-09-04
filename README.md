@@ -81,6 +81,17 @@ the core rather than by a daemon, and they work as **inbounds and outbounds**:
 curl -Ls https://raw.githubusercontent.com/Sir-MmD/vpn-ui/refs/heads/main/deploy.sh | sudo bash
 ```
 
+### Deploy on Railway (container profile)
+
+Prefer a PaaS? A Railway-specific build is included that keeps only the parts
+that work inside a container (the full panel plus every Xray-core protocol:
+VLESS, VMess, Trojan, Shadowsocks, XHTTP, AnyTLS, TUIC, NaiveProxy) and wires
+everything up — build, ports, variables, database — with one click:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/EMIXPI/vpn-ui&utm_medium=integration&utm_source=button&utm_campaign=generic)
+
+See [RAILWAY.md](/RAILWAY.md) for the full guide (what works, variables, volumes, ports).
+
 ## Uninstalling the Panel
 
 ```bash

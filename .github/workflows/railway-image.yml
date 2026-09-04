@@ -1,0 +1,137 @@
+# Validates the Railway container profile: builds deploy/railway/Dockerfile
+# exactly as Railway would (no submodules — the Dockerfile fetches the pinned
+# Xray core itself), then boots the image the way Railway does ($PORT, /data
+# volume, env-provisioned admin) and exercises the panel over HTTP.
+#
+# Runs on workflow_dispatch and whenever the Railway profile changes.
+
+name: railway-image
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deploy/railway/**"
+      - "railway.json"
+      - ".dockerignore"
+      - ".github/workflows/railway-image.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the Railway image
+        run: |
+          set -o pipefail
+          docker buildx build \
+            --file deploy/railway/Dockerfile \
+            --tag vpn-ui-railway:test \
+            --load \
+            --progress=plain \
+            . 2>&1 | tee build.log
+
+      - name: Surface build failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### railway-image: build failed"
+            echo ""
+            echo "<details><summary>docker build tail (last 150 lines)</summary>"
+            echo ""
+            echo '```text'
+            tail -n 150 build.log
+            echo '```'
+            echo "</details>"
+          } > comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file comment.md || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Boot the panel (volume + env, like Railway)
+        run: |
+          mkdir -p volume
+          docker run -d --name vpnui \
+            -p 2083:2083 \
+            -e PORT=2083 \
+            -e VPNUI_ADMIN_USERNAME=railadmin \
+            -e VPNUI_ADMIN_PASSWORD='S3cret-Pass!' \
+            -v "$PWD/volume:/data" \
+            vpn-ui-railway:test
+
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:2083/ || true)
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          echo "GET / -> $code"
+          if [ "$code" != "200" ]; then docker logs vpnui 2>&1 | tail -60; fi
+          [ "$code" = "200" ]
+
+          test -f volume/vpn-ui.db && echo "db on volume: OK"
+          test -f volume/.railway-provisioned && echo "provision marker: OK"
+          test -x volume/bin/xray-linux-amd64 && echo "extracted xray on volume: OK"
+
+      - name: Login with the env-provisioned credentials
+        run: |
+          resp=$(curl -s -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data 'username=railadmin&password=S3cret-Pass!' \
+            http://127.0.0.1:2083/login)
+          echo "$resp"
+          echo "$resp" | grep -q '"success":true'
+
+      - name: PORT sync — redeploy on another Railway port re-binds the panel
+        run: |
+          docker rm -f vpnui >/dev/null 2>&1 || true
+          docker rm -f vpnui2 >/dev/null 2>&1 || true
+          docker run -d --name vpnui2 \
+            -p 9527:9527 \
+            -e PORT=9527 \
+            -v "$PWD/volume:/data" \
+            vpn-ui-railway:test
+
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9527/ || true)
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          echo "GET / on 9527 -> $code"
+          if [ "$code" != "200" ]; then docker logs vpnui2 2>&1 | tail -60; fi
+          [ "$code" = "200" ]
+          docker logs vpnui2 2>&1 | grep -q "9527" && echo "panel synced to PORT=9527: OK"
+
+      - name: Ephemeral fallback — no volume still boots
+        run: |
+          docker rm -f vpnui2 >/dev/null 2>&1 || true
+          docker rm -f vpnui3 >/dev/null 2>&1 || true
+          docker run -d --name vpnui3 -p 3064:3064 -e PORT=3064 vpn-ui-railway:test
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3064/ || true)
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          echo "GET / on 3064 -> $code"
+          if [ "$code" != "200" ]; then docker logs vpnui3 2>&1 | tail -60; fi
+          [ "$code" = "200" ]
+          docker logs vpnui3 2>&1 | grep -q "state in /data" && echo "state rooted at /data: OK"
+
+      - name: Image size
+        run: docker image ls vpn-ui-railway:test

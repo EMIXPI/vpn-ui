@@ -73,6 +73,14 @@
 curl -Ls https://raw.githubusercontent.com/Sir-MmD/vpn-ui/refs/heads/main/deploy.sh | sudo bash
 ```
 
+### دیپلوی روی Railway (پروفایل کانتینر)
+
+اگر PaaS می‌خواهید، یک بیلد مخصوص Railway هم وجود دارد که فقط بخش‌های قابل‌اجرا داخل کانتینر را نگه می‌دارد (پنل کامل به‌همراه همهٔ پروتکل‌های Xray-core: VLESS، VMess، Trojan، Shadowsocks، XHTTP، AnyTLS، TUIC و NaiveProxy) و همه‌چیز — بیلد، پورت‌ها، متغیرها و دیتابیس — را با یک کلیک راه می‌اندازد:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/EMIXPI/vpn-ui&utm_medium=integration&utm_source=button&utm_campaign=generic)
+
+راهنمای کامل (چه چیزهایی کار می‌کند، متغیرها، Volume و پورت‌ها) در [RAILWAY.md](/RAILWAY.md) است.
+
 ## حذف پنل
 
 ```bash
