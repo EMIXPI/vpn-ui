@@ -29,14 +29,27 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build the Railway image
-        uses: docker/build-push-action@v6
+        run: |
+          set -o pipefail
+          docker buildx build \
+            --file deploy/railway/Dockerfile \
+            --tag vpn-ui-railway:test \
+            --load \
+            --progress=plain \
+            . 2>&1 | tee build.log
+
+      - name: Surface build failure as annotation
+        if: failure()
+        run: |
+          tail -n 150 build.log | sed ':a;N;$!ba;s/\n/%0A/g' > /tmp/ann.txt
+          head -c 3500 /tmp/ann.txt | awk '{print "::error::" $0}'
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          file: deploy/railway/Dockerfile
-          tags: vpn-ui-railway:test
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=image
+          name: build-log
+          path: build.log
 
       - name: Boot the panel (volume + env, like Railway)
         run: |
