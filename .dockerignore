@@ -1,0 +1,32 @@
+# Keep the Docker build context small. Everything the go:embed directives need
+# (web assets, awgsrc, sub templates, config files) is tracked in git and must
+# stay; this only strips local artifacts and docs.
+
+.git
+.github
+.env
+.env.*
+!.env.example
+
+# local build outputs and hosts' state
+build/
+vpn-ui
+vpn-ui.db*
+*.log
+
+# docs and media not needed to compile
+*.md
+LICENSE
+media/
+redesign/
+table.md
+
+# planning/E2E material
+test_unit/
+*.plan.md
+
+# local tooling
+.claude/
+.agents/
+.idea/
+.vscode/
