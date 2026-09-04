@@ -117,7 +117,7 @@ jobs:
           [ "$code" = "200" ]
           docker logs vpnui2 2>&1 | grep -q "9527" && echo "panel synced to PORT=9527: OK"
 
-      - name: Ephemeral fallback — no volume still boots (with a warning)
+      - name: Ephemeral fallback — no volume still boots
         run: |
           docker rm -f vpnui2 >/dev/null 2>&1 || true
           docker rm -f vpnui3 >/dev/null 2>&1 || true
@@ -131,7 +131,7 @@ jobs:
           echo "GET / on 3064 -> $code"
           if [ "$code" != "200" ]; then docker logs vpnui3 2>&1 | tail -60; fi
           [ "$code" = "200" ]
-          docker logs vpnui3 2>&1 | grep -qi "EPHEMERAL" && echo "no-volume warning shown: OK"
+          docker logs vpnui3 2>&1 | grep -q "state in /data" && echo "state rooted at /data: OK"
 
       - name: Image size
         run: docker image ls vpn-ui-railway:test

@@ -28,11 +28,11 @@ Railway کانتینر بدون دسترسی به کرنل اجرا می‌کن�
 
 ### نکتهٔ مهم: Volume ببندید
 
-بدون Volume، دیتابیس روی دیسک موقت کانتینر است و با هر Redeploy پاک می‌شود:
+بدون Volume، دیتابیس روی فایل‌سیستمِ موقت خود کانتینر (پوشهٔ `/data` داخل کانتینر) ذخیره می‌شود و با هر Redeploy پاک می‌شود:
 
 - در Railway: سرویس → **Volumes** → مسیر `/data` را وصل کنید.
 
-دیتابیس در `/data/vpn-ui.db`، لاگ‌ها در `/data/logs` و باینری هستهٔ Xray در `/data/bin` ذخیره می‌شود. اگر Volume وصل نباشد، اسکریپت اجرا به‌جای `/data` از `/app/data` استفاده می‌کند و در لاگ هشدار صریح می‌دهد.
+دیتابیس در `/data/vpn-ui.db`، لاگ‌ها در `/data/logs` و باینری هستهٔ Xray در `/data/bin` ذخیره می‌شود. اگر `/data` به هر دلیلی قابل‌نوشتن نباشد، اسکریپت اجرا به‌جای آن از `/app/data` استفاده می‌کند و در لاگ هشدار صریح می‌دهد.
 
 ## متغیرهای محیطی
 
@@ -107,7 +107,7 @@ railway volume add /data   # یا از داشبورد
 
 **Variables:** `PORT` (automatic), `VPNUI_ADMIN_USERNAME`, `VPNUI_ADMIN_PASSWORD` (first boot, both required), `VPNUI_WEB_BASE_PATH` (first boot), `VPNUI_DATA_DIR` (default `/data`). Build args: `GEO_IR`, `GEO_RU`, `GO_VERSION`, `XRAY_REPO`, `XRAY_COMMIT`.
 
-**Storage:** attach a volume at `/data` — otherwise the DB is ephemeral (the entrypoint warns loudly and falls back to `/app/data`).
+**Storage:** attach a volume at `/data` — otherwise the DB lives on the container's ephemeral filesystem and is lost on every redeploy (if `/data` is ever unwritable, the entrypoint warns loudly and falls back to `/app/data`).
 
 **Networking:** panel on the generated domain; for each inbound, add a matching TCP port under Service → Settings → Networking (Railway's public proxy is TCP, so UDP-based TUIC/HTTP3 are not reachable from outside). Enable the subscription server in panel settings and expose its port the same way.
 
